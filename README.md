@@ -1,6 +1,6 @@
 # 声画译匠 · SubDub Forge
 
-当前版本：`v1.0.0`
+当前版本：`v1.0.1`
 
 这是一个面向 Windows 的视频翻译与二创辅助工具。它可以识别视频中的中文语音、翻译并压缩为英文字幕、接收外部 TTS 生成的英文配音和同步字幕，最后完成原字幕擦除、英文字幕烧录、音画节奏适配和成片导出。
 
@@ -21,6 +21,7 @@
 - 支持淡入淡出、弹出等字幕动画，以及边框、阴影、粗体、斜体、字间距等样式。
 - 合成前检查文件完整性，输出 FFmpeg 日志和视频局部变速报告。
 - 用户需要的文件保留在 `output` 根目录，程序内部文件集中在 `output/_internal`。
+- 主界面可直接检查并安装 GitHub 稳定版更新，更新前自动备份程序文件。
 
 ## 推荐工作流程
 
@@ -449,6 +450,7 @@ video_translate_auto/
   config.default.yaml           随程序发布的默认配置
   config.user.yaml              本机用户覆盖配置，不上传 GitHub
   version.json                  应用名称、版本和更新通道
+  update_manifest.json          更新器管理的程序文件清单
   LICENSE                       MIT 开源许可证
   requirements.txt              Python 依赖
   README.md                     完整使用说明
@@ -465,9 +467,22 @@ video_translate_auto/
     style_editor.py             字幕擦除、位置和样式设置
     subtitle_cleanup.py         FFmpeg 原字幕擦除滤镜
     subtitle_effects.py         字幕动画与 ASS 生成
+    update_manager.py           GitHub 更新检查、备份、安装与回滚
 ```
 
-## 十四、GitHub 发布注意事项
+## 十四、应用更新
+
+点击主界面的“检查应用更新”按钮，程序会读取 GitHub `main` 分支上的版本信息：
+
+- 没有新版时，提示当前已是最新版；
+- 有新版时，显示版本号和更新说明，确认后下载对应的 GitHub Release 标签源码包；
+- 安装完成后提示重启，选择“是”会重新启动图形界面；
+- 更新前会把可能改变的旧程序文件备份到 `output/_internal/update_backups/`；
+- 如果安装中途失败，程序会尽力自动恢复旧文件。
+
+更新器只同步 `update_manifest.json` 中列出的程序文件。`.env`、`config.user.yaml`、`models/`、`output/`、`venv/` 和 Git 仓库数据均受保护，不会被更新器修改或删除。
+
+## 十五、GitHub 发布注意事项
 
 配置采用分层合并：程序先读取 `config.default.yaml`，再用 `config.user.yaml` 中的用户值递归覆盖。更新程序可以安全更新默认配置，而不会覆盖视频路径、字幕样式、字体收藏等本机设置。
 

@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "version": "1.0.1",
+  "files": [
+    ".env.example",
+    ".gitignore",
+    "LICENSE",
+    "MODEL_DOWNLOAD.md",
+    "README.md",
+    "config.default.yaml",
+    "requirements.txt",
+    "src/audio_fit_editor.py",
+    "src/config_manager.py",
+    "src/gui_launcher.py",
+    "src/pipeline.py",
+    "src/style_editor.py",
+    "src/subtitle_cleanup.py",
+    "src/subtitle_effects.py",
+    "src/translation_api_editor.py",
+    "src/tts_audio_editor.py",
+    "src/tts_whisper_srt.py",
+    "src/update_manager.py",
+    "update_manifest.json",
+    "version.json",
+    "启动图形界面.bat"
+  ]
+}

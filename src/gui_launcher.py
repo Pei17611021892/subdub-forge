@@ -14,6 +14,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from config_manager import load_config, save_config
+from update_manager import check_for_update, download_and_apply
 
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "src" / "pipeline.py"
@@ -21,6 +22,7 @@ STYLE_EDITOR = ROOT / "src" / "style_editor.py"
 AUDIO_FIT_EDITOR = ROOT / "src" / "audio_fit_editor.py"
 TTS_AUDIO_EDITOR = ROOT / "src" / "tts_audio_editor.py"
 TRANSLATION_API_EDITOR = ROOT / "src" / "translation_api_editor.py"
+LAUNCHER_BAT = ROOT / "启动图形界面.bat"
 OUTPUT = ROOT / "output"
 INTERNAL = OUTPUT / "_internal"
 VERSION_FILE = ROOT / "version.json"
@@ -111,6 +113,7 @@ class Launcher(tk.Tk):
             ("字幕位置与样式设置", self.open_style_editor),
             ("音频拷入设置", self.open_audio_fit_editor),
             ("4 合成最终视频", lambda: self.run_pipeline_step("compose")),
+            ("检查应用更新", self.check_app_update),
             ("打开 output 文件夹", self.open_output),
             ("清空日志", self.clear_log),
         ]
@@ -364,6 +367,60 @@ class Launcher(tk.Tk):
 
     def clear_log(self) -> None:
         self.log_text.delete("1.0", tk.END)
+
+    def check_app_update(self) -> None:
+        self._start_worker(self._worker_check_update)
+
+    def _worker_check_update(self) -> None:
+        try:
+            self._log("正在连接 GitHub 检查应用更新……")
+            local, remote, newer = check_for_update()
+            self._log(f"本地版本：v{local['version']}；GitHub 版本：v{remote['version']}")
+            self.after(200, lambda: self._show_update_result(local, remote, newer))
+        except Exception as exc:
+            error = str(exc)
+            self._log(f"检查更新失败：{error}")
+            self.after(200, lambda: messagebox.showerror("检查更新失败", error))
+        finally:
+            self.log_queue.put("__DONE__")
+
+    def _show_update_result(self, local: dict, remote: dict, newer: bool) -> None:
+        if not newer:
+            messagebox.showinfo("检查更新", f"当前版本 v{local['version']} 已是最新版。")
+            return
+        notes = str(remote.get("notes", "")).strip() or "GitHub 上有新的稳定版本。"
+        confirmed = messagebox.askyesno(
+            "发现新版本",
+            f"当前版本：v{local['version']}\n最新版本：v{remote['version']}\n\n{notes}\n\n"
+            "更新会备份并替换程序文件，不会修改 .env、config.user.yaml、models 或 output。\n\n现在下载并安装吗？",
+            icon="info",
+        )
+        if confirmed:
+            self._start_worker(lambda: self._worker_apply_update(remote))
+
+    def _worker_apply_update(self, remote: dict) -> None:
+        try:
+            backup = download_and_apply(remote, self._log)
+            self.after(200, lambda: self._update_complete(str(remote["version"]), backup))
+        except Exception as exc:
+            error = str(exc)
+            self._log(f"应用更新失败：{error}")
+            self.after(200, lambda: messagebox.showerror("更新失败", error))
+        finally:
+            self.log_queue.put("__DONE__")
+
+    def _update_complete(self, version: str, backup: Path) -> None:
+        restart = messagebox.askyesno(
+            "更新完成",
+            f"声画译匠已更新到 v{version}。\n\n旧程序备份：\n{backup}\n\n必须重启后才能使用新版。现在重启吗？",
+        )
+        if not restart:
+            return
+        try:
+            os.startfile(str(LAUNCHER_BAT))  # type: ignore[attr-defined]
+            self.destroy()
+        except Exception as exc:
+            messagebox.showerror("无法自动重启", f"请手动关闭并双击“启动图形界面.bat”。\n\n{exc}")
 
     def open_style_editor(self) -> None:
         try:
