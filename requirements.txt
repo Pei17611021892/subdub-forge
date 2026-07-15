@@ -1,0 +1,11 @@
+﻿# Core
+PyYAML>=6.0.1
+
+# ASR: speech to subtitle
+faster-whisper>=1.0.3
+
+# Optional: OpenAI-compatible translation
+openai>=1.30.0
+
+# Optional but useful for charset/path handling
+charset-normalizer>=3.3.2

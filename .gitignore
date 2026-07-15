@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+config.user.yaml*
+config.yaml
+url+apikey.txt
+huggingface-token.txt
+output/
+logs/
+.joycode/
+.agents/
+venv/
+__pycache__/
+*.pyc
+models/
