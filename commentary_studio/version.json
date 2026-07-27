@@ -1,7 +1,7 @@
 {
   "name": "StoryCut Studio",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "新增 AI 配置预检、明确的故事生成错误提示和独立版本更新入口。"
+  "notes": "优化无 API Key 时的引导，可在应用内快速保存 API 配置；明确本地预处理用途，并修复更新弹窗布局警告。"
 }

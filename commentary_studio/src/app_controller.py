@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
 import shutil
 import threading
 import time
@@ -113,9 +114,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.1.1"))
+            self._app_version = str(read_version().get("version", "0.1.2"))
         except Exception:
-            self._app_version = "0.1.1"
+            self._app_version = "0.1.2"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -369,6 +370,10 @@ class AppController(QObject):
             return f"API 已配置：{api['model']} · {endpoint}"
         return "根目录 .env 中未配置 OPENAI_API_KEY"
 
+    @Property(str, notify=noticeChanged)
+    def apiBaseUrl(self) -> str:
+        return str(api_configuration(self._config, self._root, "story")["base_url"])
+
     @Property(str, notify=updateChanged)
     def appVersion(self) -> str:
         return self._app_version
@@ -408,6 +413,42 @@ class AppController(QObject):
         env_file = self._root.parent / ".env"
         target = env_file if env_file.exists() else self._root.parent
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    @Slot(str, str, result=bool)
+    def saveApiConfiguration(self, api_key: str, base_url: str) -> bool:
+        cleaned_key = api_key.strip()
+        cleaned_url = base_url.strip()
+        if not cleaned_key:
+            self._notice = "API Key 不能为空"
+            self.noticeChanged.emit()
+            return False
+        if "\n" in cleaned_key or "\r" in cleaned_key or "\n" in cleaned_url or "\r" in cleaned_url:
+            self._notice = "API 配置不能包含换行符"
+            self.noticeChanged.emit()
+            return False
+
+        env_file = self._root.parent / ".env"
+        try:
+            self._update_env_file(
+                env_file,
+                {
+                    "OPENAI_API_KEY": cleaned_key,
+                    "OPENAI_BASE_URL": cleaned_url,
+                },
+            )
+            # 当前进程可能已经加载过旧值，保存后立即同步，避免必须重启应用。
+            os.environ["OPENAI_API_KEY"] = cleaned_key
+            if cleaned_url:
+                os.environ["OPENAI_BASE_URL"] = cleaned_url
+            else:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            self._notice = "API 配置已保存，可以继续处理"
+            self.noticeChanged.emit()
+            return True
+        except Exception as exc:
+            self._notice = f"API 配置保存失败：{exc}"
+            self.noticeChanged.emit()
+            return False
 
     @Slot()
     def checkForUpdates(self) -> None:
@@ -1569,6 +1610,27 @@ class AppController(QObject):
         self._story_outline = [dict(item) for item in story.get("outline", []) if isinstance(item, dict)]
         self._story_narration = [dict(item) for item in story.get("narration", []) if isinstance(item, dict)]
         self.storyChanged.emit()
+
+    @staticmethod
+    def _update_env_file(env_file: Path, values: dict[str, str]) -> None:
+        lines = env_file.read_text(encoding="utf-8-sig").splitlines() if env_file.exists() else []
+        remaining = dict(values)
+        updated: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in line:
+                key = line.split("=", 1)[0].strip()
+                if key in remaining:
+                    updated.append(f"{key}={remaining.pop(key)}")
+                    continue
+            updated.append(line)
+        if updated and updated[-1].strip():
+            updated.append("")
+        updated.extend(f"{key}={value}" for key, value in remaining.items())
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = env_file.with_name(env_file.name + ".update_tmp")
+        temporary.write_text("\n".join(updated).rstrip() + "\n", encoding="utf-8")
+        os.replace(temporary, env_file)
 
     def _estimate_analysis_total(self, duration: float) -> float:
         samples: list[tuple[float, float]] = []

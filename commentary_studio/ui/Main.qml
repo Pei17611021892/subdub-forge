@@ -283,45 +283,163 @@ ApplicationWindow {
             Text {
                 Layout.fillWidth: true
                 text: apiPreflightDialog.requestedAction === "understanding"
-                      ? "根目录 .env 中没有检测到 OPENAI_API_KEY。继续后只能完成语音转写、场景切分和关键帧，本次不会生成视觉描述；第 2 步仍需要 API。"
-                      : "第 2 步必须调用 AI 生成故事和英文解说。请在仓库根目录 .env 中配置 OPENAI_API_KEY；使用中转接口时同时配置 OPENAI_BASE_URL。"
+                      ? "没有检测到 API Key。建议先设置后再开始，这样才能完整理解画面并继续组织故事。"
+                      : "第 2 步必须调用 AI 生成故事和英文解说，请先设置 API Key。"
                 color: textMuted
                 font.pixelSize: 12
                 wrapMode: Text.WordWrap
             }
             Rectangle {
                 Layout.fillWidth: true
-                height: 42
+                Layout.preferredHeight: apiPreflightDialog.requestedAction === "understanding" ? 74 : 48
                 radius: 9
                 color: "#1d2028"
                 border.color: "#303541"
                 Text {
-                    anchors.centerIn: parent
-                    text: appController.apiConfigurationHint
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    text: apiPreflightDialog.requestedAction === "understanding"
+                          ? "“仅做本地分析”用于提前完成语音转写、场景切分和关键帧提取等耗时预处理。它不会生成视觉描述，第 2 步仍然需要 API。"
+                          : appController.apiConfigurationHint
                     color: "#c6cad4"
                     font.pixelSize: 11
+                    wrapMode: Text.WordWrap
+                    verticalAlignment: Text.AlignVCenter
                 }
             }
             RowLayout {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
                 GhostButton {
-                    text: "打开 .env"
-                    onClicked: appController.openApiConfigFolder()
+                    visible: apiPreflightDialog.requestedAction === "understanding"
+                    text: "仅做本地预处理"
+                    onClicked: {
+                        apiPreflightDialog.close()
+                        appController.startUnderstandingLocalOnly()
+                    }
                 }
                 GhostButton {
                     text: "取消"
                     onClicked: apiPreflightDialog.close()
                 }
                 FlatButton {
-                    visible: apiPreflightDialog.requestedAction === "understanding"
-                    text: "仅做本地分析"
+                    id: setApiKeyButton
+                    text: "设置 API Key"
                     onClicked: {
                         apiPreflightDialog.close()
-                        appController.startUnderstandingLocalOnly()
+                        apiKeySetupDialog.requestedAction = apiPreflightDialog.requestedAction
+                        apiKeySetupDialog.open()
                     }
                 }
             }
+        }
+
+        onOpened: setApiKeyButton.forceActiveFocus()
+    }
+
+    Dialog {
+        id: apiKeySetupDialog
+        property string requestedAction: "understanding"
+        width: 520
+        anchors.centerIn: parent
+        modal: true
+        padding: 22
+        closePolicy: Popup.CloseOnEscape
+
+        function saveAndContinue() {
+            if (!appController.saveApiConfiguration(apiKeyInput.text, apiBaseUrlInput.text))
+                return
+            apiKeyInput.text = ""
+            close()
+            if (requestedAction === "understanding")
+                appController.startUnderstanding()
+            else
+                appController.generateStory(storyTargetDuration)
+        }
+
+        background: Rectangle {
+            radius: 16
+            color: "#15171e"
+            border.color: "#3a3f4c"
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 12
+            Text {
+                text: "快速设置 API"
+                color: textMain
+                font.pixelSize: 19
+                font.bold: true
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "配置会保存到仓库根目录的 .env，并立即在当前应用中生效。该文件不会提交到 Git。"
+                color: textMuted
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+            }
+            Text { text: "API Key"; color: "#d4d4d8"; font.pixelSize: 12 }
+            TextField {
+                id: apiKeyInput
+                Layout.fillWidth: true
+                placeholderText: "粘贴 OPENAI_API_KEY"
+                echoMode: showApiKey.checked ? TextInput.Normal : TextInput.Password
+                selectByMouse: true
+                color: textMain
+                placeholderTextColor: "#71717a"
+                onAccepted: apiKeySetupDialog.saveAndContinue()
+                background: Rectangle {
+                    implicitHeight: 42
+                    radius: 9
+                    color: "#1d2028"
+                    border.color: apiKeyInput.activeFocus ? accent : "#3a3f4c"
+                }
+            }
+            CheckBox {
+                id: showApiKey
+                text: "显示 API Key"
+                contentItem: Text {
+                    leftPadding: showApiKey.indicator.width + showApiKey.spacing
+                    text: showApiKey.text
+                    color: textMuted
+                    font.pixelSize: 11
+                    verticalAlignment: Text.AlignVCenter
+                }
+            }
+            Text { text: "接口地址（可选）"; color: "#d4d4d8"; font.pixelSize: 12 }
+            TextField {
+                id: apiBaseUrlInput
+                Layout.fillWidth: true
+                placeholderText: "留空使用 OpenAI 官方接口"
+                selectByMouse: true
+                color: textMain
+                placeholderTextColor: "#71717a"
+                onAccepted: apiKeySetupDialog.saveAndContinue()
+                background: Rectangle {
+                    implicitHeight: 42
+                    radius: 9
+                    color: "#1d2028"
+                    border.color: apiBaseUrlInput.activeFocus ? accent : "#3a3f4c"
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                GhostButton {
+                    text: "取消"
+                    onClicked: apiKeySetupDialog.close()
+                }
+                FlatButton {
+                    text: "保存并继续"
+                    enabled: apiKeyInput.text.trim() !== ""
+                    onClicked: apiKeySetupDialog.saveAndContinue()
+                }
+            }
+        }
+
+        onOpened: {
+            apiBaseUrlInput.text = appController.apiBaseUrl
+            apiKeyInput.forceActiveFocus()
         }
     }
 
@@ -357,14 +475,17 @@ ApplicationWindow {
             Rectangle {
                 Layout.fillWidth: true
                 visible: appController.remoteNotes !== ""
-                height: visible ? Math.max(54, updateNotes.implicitHeight + 24) : 0
+                Layout.preferredHeight: visible ? Math.max(54, updateNotes.implicitHeight + 24) : 0
                 radius: 9
                 color: "#1d2028"
                 border.color: "#303541"
                 Text {
                     id: updateNotes
-                    anchors.fill: parent
-                    anchors.margins: 12
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
                     text: appController.remoteNotes
                     color: "#c6cad4"
                     font.pixelSize: 11
