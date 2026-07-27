@@ -6,6 +6,11 @@
 
 项目以图形界面为唯一推荐入口，无需依次运行多个脚本。
 
+仓库同时包含独立的 AI 解说剪辑工具
+[StoryCut Studio](commentary_studio/README.md)，其初版版本为 `v0.1.0`。旧翻译工具使用
+`启动图形界面.bat`，StoryCut Studio 使用 `启动解说剪辑台.bat`；两者共用虚拟环境、
+`.env`、`models/` 和 FFmpeg，但配置、项目目录和 GUI 相互独立。
+
 ## 主要功能
 
 - 选择或更换输入视频，并使用文件指纹防止误用旧项目产物。

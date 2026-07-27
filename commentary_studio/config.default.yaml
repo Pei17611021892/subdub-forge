@@ -1,0 +1,70 @@
+app:
+  language: zh-CN
+  theme: dark
+
+projects_dir: ./projects
+
+shared:
+  env_file: ../.env
+  models_dir: ../models
+  ffmpeg_bin: ffmpeg
+  ffprobe_bin: ffprobe
+
+story:
+  output_language: en
+  target_duration_sec: 90
+  narrative_style: concise
+  model: gpt-4o-mini
+  base_url: ''
+
+analysis:
+  asr_model: large-v3
+  model_dir: ../models/faster-whisper
+  local_files_only: true
+  language: zh
+  device: auto
+  compute_type: float16
+  cpu_compute_type: int8
+  vad_filter: true
+  beam_size: 5
+  scene_threshold: 0.32
+  min_scene_sec: 1.0
+  keyframe_width: 640
+  frame_sample_interval_sec: 3
+
+vision:
+  enabled: true
+  model: gpt-4o-mini
+  base_url: ''
+  batch_size: 4
+
+export:
+  width: 1080
+  height: 1920
+  fps: 30
+  video_codec: libx264
+  crf: 18
+  preset: veryfast
+  audio_bitrate: 192k
+  fit_mode: original
+  cleanup_original_subtitles: false
+  source_crop_height_ratio: 0.82
+  subtitle_font: Arial
+  subtitle_font_size: 48
+  subtitle_margin_h: 72
+  subtitle_margin_v: 150
+  subtitle_bold: true
+  subtitle_background_enabled: false
+  subtitle_background_opacity: 0.62
+  subtitle_outline_width: 3
+  subtitle_box_padding: 12
+  original_subtitle_cleanup_mode: mask
+  original_subtitle_cleanup_x: 0.08
+  original_subtitle_cleanup_y: 0.82
+  original_subtitle_cleanup_width: 0.84
+  original_subtitle_cleanup_height: 0.14
+  original_subtitle_cleanup_opacity: 0.78
+  original_subtitle_blur_radius: 12
+  original_subtitle_blur_power: 2
+  original_subtitle_region_padding: 4
+  original_subtitle_feather: 12
