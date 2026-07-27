@@ -36,8 +36,10 @@ AI 解说剪辑工具，当前版本 `v0.1.0`，已经完成初版封版。
 ```powershell
 python -m venv venv
 venv\Scripts\python.exe -m pip install -r requirements.txt
-venv\Scripts\python.exe -m pip install -r commentary_studio/requirements.txt
 ```
+
+根目录 `requirements.txt` 会一次安装两套工具所需依赖，包括 StoryCut 使用的
+PySide6。无需再分别安装第二份依赖文件。
 
 FFmpeg 和 ffprobe 由两套工具共用。可将其加入系统 PATH，或分别在应用的
 `config.user.yaml` 中配置绝对路径。
