@@ -10,7 +10,7 @@ ApplicationWindow {
     height: 800
     minimumWidth: 1040
     minimumHeight: 680
-    title: "StoryCut Studio v0.1.0 · AI 解说剪辑"
+    title: "StoryCut Studio v" + appController.appVersion + " · AI 解说剪辑"
     color: "#0b0c10"
 
     property color accent: "#8b5cf6"
@@ -253,6 +253,156 @@ ApplicationWindow {
         defaultSuffix: "srt"
         nameFilters: ["SRT 字幕 (*.srt)"]
         onAccepted: appController.saveTtsSrt(selectedFile.toString())
+    }
+
+    Dialog {
+        id: apiPreflightDialog
+        property string requestedAction: "understanding"
+        width: 520
+        anchors.centerIn: parent
+        modal: true
+        padding: 22
+        closePolicy: Popup.CloseOnEscape
+
+        background: Rectangle {
+            radius: 16
+            color: "#15171e"
+            border.color: "#3a3f4c"
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 14
+            Text {
+                text: apiPreflightDialog.requestedAction === "understanding"
+                      ? "开始前缺少 AI 接口配置"
+                      : "无法生成故事"
+                color: textMain
+                font.pixelSize: 19
+                font.bold: true
+            }
+            Text {
+                Layout.fillWidth: true
+                text: apiPreflightDialog.requestedAction === "understanding"
+                      ? "根目录 .env 中没有检测到 OPENAI_API_KEY。继续后只能完成语音转写、场景切分和关键帧，本次不会生成视觉描述；第 2 步仍需要 API。"
+                      : "第 2 步必须调用 AI 生成故事和英文解说。请在仓库根目录 .env 中配置 OPENAI_API_KEY；使用中转接口时同时配置 OPENAI_BASE_URL。"
+                color: textMuted
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                height: 42
+                radius: 9
+                color: "#1d2028"
+                border.color: "#303541"
+                Text {
+                    anchors.centerIn: parent
+                    text: appController.apiConfigurationHint
+                    color: "#c6cad4"
+                    font.pixelSize: 11
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                GhostButton {
+                    text: "打开 .env"
+                    onClicked: appController.openApiConfigFolder()
+                }
+                GhostButton {
+                    text: "取消"
+                    onClicked: apiPreflightDialog.close()
+                }
+                FlatButton {
+                    visible: apiPreflightDialog.requestedAction === "understanding"
+                    text: "仅做本地分析"
+                    onClicked: {
+                        apiPreflightDialog.close()
+                        appController.startUnderstandingLocalOnly()
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: updateDialog
+        width: 520
+        anchors.centerIn: parent
+        modal: true
+        padding: 22
+        closePolicy: appController.updateBusy ? Popup.NoAutoClose : Popup.CloseOnEscape
+
+        background: Rectangle {
+            radius: 16
+            color: "#15171e"
+            border.color: "#3a3f4c"
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 14
+            Text {
+                text: "StoryCut 版本更新"
+                color: textMain
+                font.pixelSize: 19
+                font.bold: true
+            }
+            Text {
+                Layout.fillWidth: true
+                text: appController.updateStatus
+                color: appController.updateAvailable ? accentLight : textMuted
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                visible: appController.remoteNotes !== ""
+                height: visible ? Math.max(54, updateNotes.implicitHeight + 24) : 0
+                radius: 9
+                color: "#1d2028"
+                border.color: "#303541"
+                Text {
+                    id: updateNotes
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    text: appController.remoteNotes
+                    color: "#c6cad4"
+                    font.pixelSize: 11
+                    wrapMode: Text.WordWrap
+                }
+            }
+            Text {
+                Layout.fillWidth: true
+                visible: appController.updateAvailable
+                text: "更新仅替换 commentary_studio 程序文件，不会修改项目、config.user.yaml、共享 .env 或模型。"
+                color: textMuted
+                font.pixelSize: 10
+                wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                GhostButton {
+                    text: "关闭"
+                    enabled: !appController.updateBusy
+                    onClicked: updateDialog.close()
+                }
+                FlatButton {
+                    visible: appController.updateAvailable
+                    enabled: !appController.updateBusy
+                    text: appController.updateBusy ? "正在安装…" : "下载并安装"
+                    onClicked: appController.installUpdate()
+                }
+            }
+        }
+    }
+
+    Connections {
+        target: appController
+        function onUpdateDialogRequested() {
+            if (!updateDialog.opened)
+                updateDialog.open()
+        }
     }
 
     Dialog {
@@ -866,6 +1016,11 @@ ApplicationWindow {
                             Text { text: appController.notice; color: textMuted; font.pixelSize: 14 }
                         }
                         Item { Layout.fillWidth: true }
+                        GhostButton {
+                            text: appController.updateBusy ? "检查中…" : "检查更新"
+                            enabled: !appController.updateBusy
+                            onClicked: appController.checkForUpdates()
+                        }
                         GhostButton { text: "打开项目"; onClicked: projectDialog.open() }
                         FlatButton { text: "+  创建项目"; onClicked: videoDialog.open() }
                     }
@@ -943,7 +1098,16 @@ ApplicationWindow {
                                     FlatButton {
                                         text: appController.analysisBusy ? "正在理解原片…" : appController.videoPath ? "开始理解原片  →" : "选择视频  →"
                                         enabled: !appController.analysisBusy
-                                        onClicked: appController.videoPath ? appController.startUnderstanding() : videoDialog.open()
+                                        onClicked: {
+                                            if (!appController.videoPath) {
+                                                videoDialog.open()
+                                            } else if (appController.refreshApiConfiguration()) {
+                                                appController.startUnderstanding()
+                                            } else {
+                                                apiPreflightDialog.requestedAction = "understanding"
+                                                apiPreflightDialog.open()
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1079,18 +1243,25 @@ ApplicationWindow {
                             FlatButton {
                                 text: appController.storyBusy ? "正在组织故事…" : "生成故事与英文解说  →"
                                 enabled: !appController.storyBusy
-                                onClicked: appController.generateStory(storyTargetDuration)
+                                onClicked: {
+                                    if (appController.refreshApiConfiguration()) {
+                                        appController.generateStory(storyTargetDuration)
+                                    } else {
+                                        apiPreflightDialog.requestedAction = "story"
+                                        apiPreflightDialog.open()
+                                    }
+                                }
                             }
                         }
                     }
 
                     Rectangle {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: appController.storyBusy ? 64 : 0
-                        visible: appController.storyBusy
+                        visible: appController.storyBusy || appController.storyStatus.indexOf("故事生成失败") === 0
+                        Layout.preferredHeight: visible ? 64 : 0
                         radius: 12
                         color: panel
-                        border.color: "#292c36"
+                        border.color: appController.storyStatus.indexOf("故事生成失败") === 0 ? "#7f3d46" : "#292c36"
                         RowLayout {
                             anchors.fill: parent
                             anchors.margins: 15

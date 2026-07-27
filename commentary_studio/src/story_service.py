@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from .vision_service import _load_env_file
+from .vision_service import api_configuration
 
 
 ProgressCallback = Callable[[float, str], None]
@@ -22,10 +22,10 @@ def generate_story_script(
 ) -> dict[str, Any]:
     from openai import OpenAI
 
-    _load_env_file(app_root, str(config.get("shared", {}).get("env_file", "../.env")))
-    api_key = str(os.getenv("OPENAI_API_KEY", "")).strip()
     story_config = config.get("story", {})
-    base_url = str(story_config.get("base_url") or os.getenv("OPENAI_BASE_URL", "")).strip() or None
+    api = api_configuration(config, app_root, "story")
+    api_key = str(api["api_key"])
+    base_url = str(api["base_url"]).strip() or None
     if not api_key:
         raise RuntimeError("未配置 OPENAI_API_KEY，无法组织故事")
 

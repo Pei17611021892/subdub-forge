@@ -12,6 +12,19 @@ from typing import Any, Callable
 ProgressCallback = Callable[[float, str], None]
 
 
+def api_configuration(config: dict[str, Any], app_root: Path, section: str = "vision") -> dict[str, object]:
+    _load_env_file(app_root, str(config.get("shared", {}).get("env_file", "../.env")))
+    section_config = config.get(section, {})
+    api_key = str(os.getenv("OPENAI_API_KEY", "")).strip()
+    base_url = str(section_config.get("base_url") or os.getenv("OPENAI_BASE_URL", "")).strip()
+    return {
+        "configured": bool(api_key),
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": str(section_config.get("model", "gpt-4o-mini")),
+    }
+
+
 def describe_event_keyframes(
     events_json: Path,
     config: dict[str, Any],
@@ -21,9 +34,9 @@ def describe_event_keyframes(
     from openai import OpenAI
 
     vision = config.get("vision", {})
-    _load_env_file(app_root, str(config.get("shared", {}).get("env_file", "../.env")))
-    api_key = str(os.getenv("OPENAI_API_KEY", "")).strip()
-    base_url = str(vision.get("base_url") or os.getenv("OPENAI_BASE_URL", "")).strip() or None
+    api = api_configuration(config, app_root, "vision")
+    api_key = str(api["api_key"])
+    base_url = str(api["base_url"]).strip() or None
     if not api_key:
         raise RuntimeError("未配置 OPENAI_API_KEY，无法生成关键帧视觉描述")
 

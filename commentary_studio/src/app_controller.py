@@ -19,7 +19,7 @@ from .analysis_service import (
     transcribe_analysis_audio,
 )
 from .media_service import analyze_media, extract_preview_frame, render_subtitle_effect_preview
-from .vision_service import describe_event_keyframes
+from .vision_service import api_configuration, describe_event_keyframes
 from .story_service import generate_story_script
 from .matching_service import (
     apply_voice_timing,
@@ -30,6 +30,7 @@ from .matching_service import (
 )
 from .export_service import render_rough_preview
 from .voice_service import import_narration_audio, import_synced_srt, prepare_tts_package
+from .update_manager import check_for_update, download_and_apply, read_version
 
 
 class AppController(QObject):
@@ -46,6 +47,8 @@ class AppController(QObject):
     voiceChanged = Signal()
     subtitleStyleChanged = Signal()
     subtitleEffectPreviewChanged = Signal()
+    updateChanged = Signal()
+    updateDialogRequested = Signal()
     _mediaReady = Signal(object, str, str, int)
     _previewReady = Signal(str, str, int, float)
     _subtitleEffectPreviewReady = Signal(str, int)
@@ -55,6 +58,8 @@ class AppController(QObject):
     _storyFinished = Signal(bool, str, object, int)
     _exportProgressReady = Signal(float, str, int)
     _exportFinished = Signal(bool, str, object, int)
+    _updateCheckFinished = Signal(bool, str, object)
+    _updateApplyFinished = Signal(bool, str)
 
     def __init__(self, root: Path) -> None:
         super().__init__()
@@ -107,6 +112,15 @@ class AppController(QObject):
         self._subtitle_effect_preview_url = ""
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
+        try:
+            self._app_version = str(read_version().get("version", "0.1.1"))
+        except Exception:
+            self._app_version = "0.1.1"
+        self._update_busy = False
+        self._update_available = False
+        self._update_installed = False
+        self._update_status = f"当前版本 v{self._app_version}"
+        self._remote_update: dict[str, object] = {}
         self._mediaReady.connect(self._apply_media_result)
         self._previewReady.connect(self._apply_preview_result)
         self._subtitleEffectPreviewReady.connect(self._apply_subtitle_effect_preview)
@@ -116,6 +130,8 @@ class AppController(QObject):
         self._storyFinished.connect(self._apply_story_finished)
         self._exportProgressReady.connect(self._apply_export_progress)
         self._exportFinished.connect(self._apply_export_finished)
+        self._updateCheckFinished.connect(self._apply_update_check)
+        self._updateApplyFinished.connect(self._apply_update_install)
         self._analysis_clock = QTimer(self)
         self._analysis_clock.setInterval(1000)
         self._analysis_clock.timeout.connect(self._tick_analysis_clock)
@@ -341,6 +357,103 @@ class AppController(QObject):
     def sourceVideoHeight(self) -> int:
         return int(self._media.get("height", 1080) or 1080)
 
+    @Property(bool, notify=noticeChanged)
+    def apiConfigured(self) -> bool:
+        return bool(api_configuration(self._config, self._root, "story")["configured"])
+
+    @Property(str, notify=noticeChanged)
+    def apiConfigurationHint(self) -> str:
+        api = api_configuration(self._config, self._root, "story")
+        if api["configured"]:
+            endpoint = str(api["base_url"] or "OpenAI 官方接口")
+            return f"API 已配置：{api['model']} · {endpoint}"
+        return "根目录 .env 中未配置 OPENAI_API_KEY"
+
+    @Property(str, notify=updateChanged)
+    def appVersion(self) -> str:
+        return self._app_version
+
+    @Property(bool, notify=updateChanged)
+    def updateBusy(self) -> bool:
+        return self._update_busy
+
+    @Property(bool, notify=updateChanged)
+    def updateAvailable(self) -> bool:
+        return self._update_available
+
+    @Property(bool, notify=updateChanged)
+    def updateInstalled(self) -> bool:
+        return self._update_installed
+
+    @Property(str, notify=updateChanged)
+    def updateStatus(self) -> str:
+        return self._update_status
+
+    @Property(str, notify=updateChanged)
+    def remoteVersion(self) -> str:
+        return str(self._remote_update.get("version", ""))
+
+    @Property(str, notify=updateChanged)
+    def remoteNotes(self) -> str:
+        return str(self._remote_update.get("notes", ""))
+
+    @Slot(result=bool)
+    def refreshApiConfiguration(self) -> bool:
+        configured = self.apiConfigured
+        self.noticeChanged.emit()
+        return configured
+
+    @Slot()
+    def openApiConfigFolder(self) -> None:
+        env_file = self._root.parent / ".env"
+        target = env_file if env_file.exists() else self._root.parent
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    @Slot()
+    def checkForUpdates(self) -> None:
+        if self._update_busy:
+            return
+        self._update_busy = True
+        self._update_installed = False
+        self._update_status = "正在连接 GitHub 检查 StoryCut 更新…"
+        self.updateChanged.emit()
+        self.updateDialogRequested.emit()
+
+        def worker() -> None:
+            try:
+                _local, remote, newer = check_for_update()
+                message = (
+                    f"发现 StoryCut v{remote.get('version')} 新版本"
+                    if newer
+                    else f"当前已是最新版 v{self._app_version}"
+                )
+                self._updateCheckFinished.emit(bool(newer), message, remote)
+            except Exception as exc:
+                self._updateCheckFinished.emit(False, f"检查更新失败：{exc}", {})
+
+        threading.Thread(target=worker, name="storycut-update-check", daemon=True).start()
+
+    @Slot()
+    def installUpdate(self) -> None:
+        if self._update_busy or not self._update_available or not self._remote_update:
+            return
+        self._update_busy = True
+        self._update_status = f"正在安装 StoryCut v{self.remoteVersion}…"
+        self.updateChanged.emit()
+        remote = dict(self._remote_update)
+
+        def worker() -> None:
+            try:
+                download_and_apply(remote)
+                self._updateApplyFinished.emit(
+                    True,
+                    f"StoryCut v{remote.get('version')} 已安装。请关闭并重新启动程序",
+                )
+            except Exception as exc:
+                self._updateApplyFinished.emit(False, f"安装更新失败：{exc}")
+
+        threading.Thread(target=worker, name="storycut-update-install", daemon=True).start()
+
     @Property(str, notify=storyChanged)
     def subtitlePreviewText(self) -> str:
         if self._story_narration:
@@ -477,6 +590,20 @@ class AppController(QObject):
 
     @Slot()
     def startUnderstanding(self) -> None:
+        if bool(self._config.get("vision", {}).get("enabled", True)) and not self.apiConfigured:
+            self._notice = (
+                "未配置 AI 接口：视觉描述不会生成，且第 2 步无法组织故事。"
+                "请配置根目录 .env，或选择仅执行本地分析。"
+            )
+            self.noticeChanged.emit()
+            return
+        self._start_understanding(skip_vision=False)
+
+    @Slot()
+    def startUnderstandingLocalOnly(self) -> None:
+        self._start_understanding(skip_vision=True)
+
+    def _start_understanding(self, skip_vision: bool) -> None:
         if self._analysis_busy or not self._video_path or not self._current_project_file:
             return
         self._analysis_job_id += 1
@@ -559,8 +686,8 @@ class AppController(QObject):
                     analysis_dir / "scenes.json",
                     analysis_dir / "events.json",
                 )
-                vision_warning = ""
-                if bool(self._config.get("vision", {}).get("enabled", True)):
+                vision_warning = "用户选择仅执行本地分析，未调用视觉模型" if skip_vision else ""
+                if bool(self._config.get("vision", {}).get("enabled", True)) and not skip_vision:
                     try:
                         def vision_report(value: float, status: str) -> None:
                             report(0.82 + value * 0.17, status)
@@ -588,7 +715,12 @@ class AppController(QObject):
                 else:
                     payload.get("warnings", {}).pop("vision", None)
                 project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                message = "原片结构化完成；视觉描述未生成" if vision_warning else "原片理解完成，可以开始组织故事"
+                if skip_vision:
+                    message = "本地结构化完成；未生成视觉描述。配置 API 后建议重新理解原片，再组织故事"
+                elif vision_warning:
+                    message = f"原片结构化完成；视觉描述生成失败：{vision_warning}"
+                else:
+                    message = "原片理解完成，可以开始组织故事"
                 status_file.write_text(
                     json.dumps(
                         {
@@ -628,6 +760,13 @@ class AppController(QObject):
     @Slot(int)
     def generateStory(self, target_duration_sec: int) -> None:
         if self._story_busy or not self._current_project_file:
+            return
+        if not self.apiConfigured:
+            message = "未配置 OPENAI_API_KEY，无法生成故事。请在仓库根目录 .env 中配置后重试"
+            self._story_status = f"故事生成失败：{message}"
+            self._notice = self._story_status
+            self.storyChanged.emit()
+            self.noticeChanged.emit()
             return
         events_file = self._current_project_file.parent / "analysis" / "events.json"
         if not events_file.exists():
@@ -1196,6 +1335,26 @@ class AppController(QObject):
             self._refresh_recent_projects()
         self.exportChanged.emit()
         self.noticeChanged.emit()
+
+    @Slot(bool, str, object)
+    def _apply_update_check(self, available: bool, message: str, remote: object) -> None:
+        self._update_busy = False
+        self._update_available = bool(available)
+        if isinstance(remote, dict) and remote:
+            self._remote_update = dict(remote)
+        self._update_status = message
+        self.updateChanged.emit()
+        self.updateDialogRequested.emit()
+
+    @Slot(bool, str)
+    def _apply_update_install(self, success: bool, message: str) -> None:
+        self._update_busy = False
+        self._update_installed = bool(success)
+        if success:
+            self._update_available = False
+        self._update_status = message
+        self.updateChanged.emit()
+        self.updateDialogRequested.emit()
 
     @Slot()
     def _tick_analysis_clock(self) -> None:

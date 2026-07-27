@@ -1,0 +1,7 @@
+{
+  "name": "StoryCut Studio",
+  "version": "0.1.1",
+  "repository": "Pei17611021892/subdub-forge",
+  "update_channel": "stable",
+  "notes": "新增 AI 配置预检、明确的故事生成错误提示和独立版本更新入口。"
+}

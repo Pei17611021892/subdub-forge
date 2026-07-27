@@ -1,0 +1,24 @@
+{
+  "format": 1,
+  "version": "0.1.1",
+  "files": [
+    "README.md",
+    "config.default.yaml",
+    "main.py",
+    "requirements.txt",
+    "src/__init__.py",
+    "src/analysis_service.py",
+    "src/app_controller.py",
+    "src/config_manager.py",
+    "src/export_service.py",
+    "src/matching_service.py",
+    "src/media_service.py",
+    "src/story_service.py",
+    "src/update_manager.py",
+    "src/vision_service.py",
+    "src/voice_service.py",
+    "ui/Main.qml",
+    "update_manifest.json",
+    "version.json"
+  ]
+}
