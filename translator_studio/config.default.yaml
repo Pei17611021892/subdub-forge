@@ -7,7 +7,7 @@ ffmpeg:
   ffprobe_bin: ffprobe
 asr:
   model: large-v3
-  model_dir: ./models/faster-whisper
+  model_dir: ../models/faster-whisper
   local_files_only: true
   language: zh
   device: auto

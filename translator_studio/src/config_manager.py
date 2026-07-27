@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "config.default.yaml"
 USER_CONFIG = ROOT / "config.user.yaml"
 LEGACY_CONFIG = ROOT / "config.yaml"
+LEGACY_REPOSITORY_USER_CONFIG = ROOT.parent / "config.user.yaml"
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -52,7 +53,14 @@ def load_config() -> dict[str, Any]:
         raise FileNotFoundError(f"找不到默认配置：{DEFAULT_CONFIG}")
     defaults = _read_yaml(DEFAULT_CONFIG)
     # Compatibility for an older checkout. New releases use config.user.yaml.
-    user_path = USER_CONFIG if USER_CONFIG.exists() else LEGACY_CONFIG
+    if USER_CONFIG.exists():
+        user_path = USER_CONFIG
+    elif LEGACY_CONFIG.exists():
+        user_path = LEGACY_CONFIG
+    else:
+        # One-release compatibility for checkouts created before the application
+        # moved into translator_studio/.
+        user_path = LEGACY_REPOSITORY_USER_CONFIG
     return deep_merge(defaults, _read_yaml(user_path))
 
 

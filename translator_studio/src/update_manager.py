@@ -13,11 +13,12 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ARCHIVE_APP_PREFIX = "translator_studio/"
 VERSION_FILE = ROOT / "version.json"
 MANIFEST_FILE = ROOT / "update_manifest.json"
 MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
-PROTECTED_FILES = {".env", "config.user.yaml", "config.yaml"}
-PROTECTED_DIRS = {".git", ".agents", ".joycode", "models", "output", "venv", "__pycache__"}
+PROTECTED_FILES = {"config.user.yaml", "config.yaml"}
+PROTECTED_DIRS = {"output", "__pycache__"}
 
 
 class UpdateError(RuntimeError):
@@ -64,7 +65,10 @@ def _request_bytes(url: str, timeout: int = 20) -> bytes:
 def check_for_update() -> tuple[dict[str, Any], dict[str, Any], bool]:
     local = read_version()
     repository = str(local["repository"]).strip(" /")
-    url = f"https://raw.githubusercontent.com/{repository}/main/version.json?time={int(time.time())}"
+    url = (
+        f"https://raw.githubusercontent.com/{repository}/main/"
+        f"{ARCHIVE_APP_PREFIX}version.json?time={int(time.time())}"
+    )
     try:
         remote = json.loads(_request_bytes(url).decode("utf-8"))
     except Exception as exc:
@@ -125,7 +129,7 @@ def download_and_apply(remote: dict[str, Any], progress: Callable[[str], None] |
         raise UpdateError("下载内容不是有效的 ZIP 更新包。") from exc
     with archive:
         _prefix, entries = _zip_entries(archive)
-        manifest_info = entries.get("update_manifest.json")
+        manifest_info = entries.get(ARCHIVE_APP_PREFIX + "update_manifest.json")
         if not manifest_info:
             raise UpdateError("新版缺少 update_manifest.json，不能安全更新。")
         new_manifest = _load_manifest_bytes(archive.read(manifest_info))
@@ -134,7 +138,11 @@ def download_and_apply(remote: dict[str, Any], progress: Callable[[str], None] |
         new_paths = {_safe_relative(str(value)) for value in new_manifest["files"]}
         if Path("update_manifest.json") not in new_paths or Path("version.json") not in new_paths:
             raise UpdateError("更新清单必须管理版本文件和清单自身。")
-        missing = [path.as_posix() for path in new_paths if path.as_posix() not in entries]
+        missing = [
+            path.as_posix()
+            for path in new_paths
+            if ARCHIVE_APP_PREFIX + path.as_posix() not in entries
+        ]
         if missing:
             raise UpdateError("更新包缺少清单文件：" + ", ".join(missing[:8]))
 
@@ -158,7 +166,7 @@ def download_and_apply(remote: dict[str, Any], progress: Callable[[str], None] |
         try:
             report("正在安装新版程序文件……")
             for relative in sorted(new_paths, key=lambda path: path.as_posix()):
-                info = entries[relative.as_posix()]
+                info = entries[ARCHIVE_APP_PREFIX + relative.as_posix()]
                 # Reject Unix symlink entries even though GitHub archives normally contain none.
                 if ((info.external_attr >> 16) & 0o170000) == 0o120000:
                     raise UpdateError(f"更新包包含不允许的符号链接：{relative}")

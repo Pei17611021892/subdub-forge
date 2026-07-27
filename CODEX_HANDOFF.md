@@ -24,6 +24,19 @@ StoryCut Studio 的初版完整流程已经实现并由用户实际验证：
 
 本文后面的阶段记录保留作为历史背景；如与本节冲突，以本节和 `commentary_studio/README.md` 为准。
 
+2026-07-27 仓库结构进一步整理为两个并列应用：
+
+```text
+translator_studio/      旧的一比一翻译工具
+commentary_studio/      StoryCut Studio（v0.1.0 封版）
+models/                  共用模型
+venv/                    共用虚拟环境
+.env                     共用 API 配置
+requirements.txt         共用基础依赖
+```
+
+旧工具的配置、输出、版本清单和更新器均属于 `translator_studio/`；StoryCut 目录在此次整理中没有修改。
+
 ## 1. 项目背景
 
 当前仓库原本是一个中文视频转英文二创工具：识别中文字幕、压缩翻译为英文、导入外部 TTS、调整音画节奏，并输出英文 Shorts。

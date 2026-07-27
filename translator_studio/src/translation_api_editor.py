@@ -9,7 +9,7 @@ from config_manager import load_config, save_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ENV_FILE = ROOT / ".env"
+ENV_FILE = ROOT.parent / ".env"
 
 
 def read_env() -> tuple[list[str], dict[str, str]]:

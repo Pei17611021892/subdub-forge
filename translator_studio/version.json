@@ -3,5 +3,5 @@
   "version": "1.0.1",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "兼容旧版更新器的仓库级版本入口；应用版本文件位于 translator_studio/version.json。"
+  "notes": "新增安全的应用更新：自动检查新版、备份并同步程序文件，个人配置、模型和输出保持不变。"
 }

@@ -17,12 +17,13 @@ from config_manager import load_config, save_config
 from update_manager import check_for_update, download_and_apply
 
 ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = ROOT.parent
 PIPELINE = ROOT / "src" / "pipeline.py"
 STYLE_EDITOR = ROOT / "src" / "style_editor.py"
 AUDIO_FIT_EDITOR = ROOT / "src" / "audio_fit_editor.py"
 TTS_AUDIO_EDITOR = ROOT / "src" / "tts_audio_editor.py"
 TRANSLATION_API_EDITOR = ROOT / "src" / "translation_api_editor.py"
-LAUNCHER_BAT = ROOT / "启动图形界面.bat"
+LAUNCHER_BAT = REPOSITORY_ROOT / "启动图形界面.bat"
 OUTPUT = ROOT / "output"
 INTERNAL = OUTPUT / "_internal"
 VERSION_FILE = ROOT / "version.json"

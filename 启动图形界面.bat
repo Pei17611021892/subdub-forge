@@ -8,6 +8,6 @@ pause
 exit /b 1
 
 :run_app
-"venv\Scripts\python.exe" "src\gui_launcher.py"
+"venv\Scripts\python.exe" "translator_studio\src\gui_launcher.py"
 if errorlevel 1 echo [ERROR] The application exited with an error.
 pause

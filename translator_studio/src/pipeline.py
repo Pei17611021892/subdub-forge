@@ -20,6 +20,7 @@ from config_manager import load_config as load_project_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SHARED_ROOT = ROOT.parent
 
 
 @dataclass
@@ -63,8 +64,8 @@ def load_dotenv_file(path: Path) -> dict[str, str]:
 
 
 def load_runtime_env() -> dict[str, str]:
-    # Project-local .env, for example OPENAI_API_KEY=... and OPENAI_BASE_URL=...
-    return load_dotenv_file(ROOT / ".env")
+    # Both desktop applications share the repository-level API configuration.
+    return load_dotenv_file(SHARED_ROOT / ".env")
 
 
 def resolve_path(value: str | Path, base: Path = ROOT) -> Path:
