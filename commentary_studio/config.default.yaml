@@ -13,9 +13,10 @@ shared:
 story:
   output_language: en
   target_duration_sec: 90
-  narrative_style: concise
+  narrative_style: natural_science_youtube
   model: gpt-4o-mini
   base_url: ''
+  temperature: 0.55
 
 analysis:
   asr_model: large-v3

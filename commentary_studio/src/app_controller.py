@@ -30,7 +30,7 @@ from .matching_service import (
     select_shot_match,
 )
 from .export_service import render_rough_preview
-from .voice_service import import_narration_audio, import_synced_srt, prepare_tts_package
+from .voice_service import import_narration_audio, import_synced_srt, prepare_tts_srt
 from .update_manager import check_for_update, download_and_apply, read_version
 
 
@@ -105,7 +105,7 @@ class AppController(QObject):
         self._export_progress = 0.0
         self._export_status = "等待生成成片预览"
         self._export_path = ""
-        self._voice_status = "等待准备 GPT-SoVITS 文案"
+        self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
         self._narration_audio_path = ""
         self._narration_duration_sec = 0.0
         self._synced_srt_path = ""
@@ -114,9 +114,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.1.2"))
+            self._app_version = str(read_version().get("version", "0.1.3"))
         except Exception:
-            self._app_version = "0.1.2"
+            self._app_version = "0.1.3"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -319,12 +319,6 @@ class AppController(QObject):
     @Property(str, notify=voiceChanged)
     def voiceStatus(self) -> str:
         return self._voice_status
-
-    @Property(bool, notify=voiceChanged)
-    def ttsPackageReady(self) -> bool:
-        if not self._current_project_file:
-            return False
-        return (self._current_project_file.parent / "script" / "tts" / "gpt_sovits_input.txt").exists()
 
     @Property(bool, notify=voiceChanged)
     def narrationAudioReady(self) -> bool:
@@ -599,6 +593,47 @@ class AppController(QObject):
                 self._start_media_analysis(Path(self._video_path), project_file)
         except (OSError, ValueError, TypeError) as exc:
             self._notice = f"无法打开项目：{exc}"
+            self.noticeChanged.emit()
+
+    @Slot(str)
+    def deleteProject(self, url: str) -> None:
+        if not url:
+            return
+        if (
+            self._media_busy
+            or self._preview_busy
+            or self._analysis_busy
+            or self._story_busy
+            or self._matching_busy
+            or self._export_busy
+            or self._subtitle_effect_preview_busy
+        ):
+            self._notice = "当前有任务正在运行，请等待任务完成后再删除项目。"
+            self.noticeChanged.emit()
+            return
+
+        try:
+            project_file = Path(QUrlHelper.to_local_path(url)).resolve()
+            projects_dir = self._projects_dir.resolve()
+            if project_file.name.lower() != "project.json":
+                raise ValueError("目标不是 StoryCut 项目文件")
+            project_dir = project_file.parent
+            if project_dir.parent != projects_dir or not project_file.is_file():
+                raise ValueError("只能删除 StoryCut 项目目录内的项目")
+
+            deleting_current = (
+                self._current_project_file is not None
+                and self._current_project_file.resolve() == project_file
+            )
+            project_name = project_dir.name
+            shutil.rmtree(project_dir)
+            if deleting_current:
+                self._clear_current_project()
+            self._refresh_recent_projects()
+            self._notice = f"项目“{project_name}”及其缓存文件已删除，项目目录外的原始视频未删除。"
+            self.noticeChanged.emit()
+        except (OSError, ValueError) as exc:
+            self._notice = f"删除项目失败：{exc}"
             self.noticeChanged.emit()
 
     @Slot(str)
@@ -986,33 +1021,6 @@ class AppController(QObject):
         if self._export_path and Path(self._export_path).exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._export_path))
 
-    @Slot()
-    def prepareTtsPackage(self) -> None:
-        if not self._current_project_file:
-            return
-        story_file = self._current_project_file.parent / "script" / "story.json"
-        if not story_file.exists():
-            self._notice = "请先完成第 2 步故事组织"
-            self.noticeChanged.emit()
-            return
-        try:
-            output_dir = self._current_project_file.parent / "script" / "tts"
-            result = prepare_tts_package(story_file, output_dir)
-            self._voice_status = (
-                f"GPT-SoVITS 文案已准备：{result['sentence_count']} 句，"
-                "请生成整段英文音频后导入"
-            )
-            payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
-            payload.setdefault("artifacts", {})["tts_input"] = "script/tts/gpt_sovits_input.txt"
-            payload["artifacts"]["tts_reference_srt"] = "script/tts/gpt_sovits_reference.srt"
-            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            self.voiceChanged.emit()
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(output_dir)))
-        except (OSError, ValueError, TypeError) as exc:
-            self._notice = f"无法准备 GPT-SoVITS 文案：{exc}"
-            self.noticeChanged.emit()
-
     @Slot(str)
     def saveTtsSrt(self, url: str) -> None:
         if not url or not self._current_project_file:
@@ -1021,15 +1029,20 @@ class AppController(QObject):
             source = self._current_project_file.parent / "script" / "tts" / "gpt_sovits_reference.srt"
             if not source.exists():
                 story_file = self._current_project_file.parent / "script" / "story.json"
-                prepare_tts_package(story_file, source.parent)
+                prepare_tts_srt(story_file, source.parent)
             destination = Path(QUrlHelper.to_local_path(url))
             if destination.suffix.lower() != ".srt":
                 destination = destination.with_suffix(".srt")
             destination.parent.mkdir(parents=True, exist_ok=True)
             if source.resolve() != destination.resolve():
                 shutil.copy2(source, destination)
-            self._voice_status = f"英文 SRT 已另存为：{destination}"
-            self._notice = "英文 SRT 已保存，可在 GPT-SoVITS 中选择该文件生成配音"
+            payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+            payload.setdefault("artifacts", {}).pop("tts_input", None)
+            payload["artifacts"]["tts_reference_srt"] = "script/tts/gpt_sovits_reference.srt"
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._voice_status = f"GPT-SoVITS SRT 已导出：{destination}"
+            self._notice = "SRT 已导出，可在 GPT-SoVITS 中选择该文件生成配音"
             self.voiceChanged.emit()
             self.noticeChanged.emit()
         except Exception as exc:
@@ -1221,15 +1234,29 @@ class AppController(QObject):
 
     def _refresh_recent_projects(self) -> None:
         projects: list[dict[str, str]] = []
+        stage_names = {
+            "imported": "已导入",
+            "analyzed": "媒体信息已读取",
+            "transcribed": "语音转录完成",
+            "understood": "理解原片完成",
+            "scripted": "故事解说完成",
+            "matched": "镜头匹配完成",
+            "previewed": "成片预览完成",
+            "exported": "成片已导出",
+        }
         for project_file in self._projects_dir.glob("*/project.json"):
             try:
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
+                stage = str(payload.get("stage") or "imported")
+                updated = str(payload.get("updated_at") or payload.get("created_at") or "")
                 projects.append(
                     {
                         "name": str(payload.get("name") or project_file.parent.name),
                         "video": str(payload.get("source_video") or ""),
-                        "stage": str(payload.get("stage") or "imported"),
-                        "updated": str(payload.get("updated_at") or payload.get("created_at") or ""),
+                        "stage": stage,
+                        "stageText": stage_names.get(stage, stage),
+                        "updated": updated,
+                        "updatedText": updated.replace("T", " ")[:16],
                         "projectFile": project_file.as_uri(),
                     }
                 )
@@ -1238,6 +1265,54 @@ class AppController(QObject):
         projects.sort(key=lambda item: item["updated"], reverse=True)
         self._recent_projects = projects[:8]
         self.recentProjectsChanged.emit()
+
+    def _clear_current_project(self) -> None:
+        self._media_job_id += 1
+        self._preview_job_id += 1
+        self._analysis_job_id += 1
+        self._story_job_id += 1
+        self._export_job_id += 1
+        self._subtitle_effect_preview_job_id += 1
+        self._current_project_file = None
+        self._project_name = "尚未创建项目"
+        self._video_path = ""
+        self._media = {}
+        self._cover_url = ""
+        self._preview_url = ""
+        self._preview_position = 0.0
+        self._analysis_progress = 0.0
+        self._analysis_status = "等待开始"
+        self._analysis_started_at = 0.0
+        self._analysis_eta_seconds = -1.0
+        self._analysis_estimated_total = -1.0
+        self._events = []
+        self._story_progress = 0.0
+        self._story_status = "等待组织故事"
+        self._story = {}
+        self._story_outline = []
+        self._story_narration = []
+        self._matching_status = "等待匹配镜头"
+        self._matches = []
+        self._export_progress = 0.0
+        self._export_status = "等待生成成片预览"
+        self._export_path = ""
+        self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
+        self._narration_audio_path = ""
+        self._narration_duration_sec = 0.0
+        self._synced_srt_path = ""
+        self._subtitle_style = self._default_subtitle_style()
+        self._subtitle_effect_preview_url = ""
+        self.projectChanged.emit()
+        self.mediaChanged.emit()
+        self.previewChanged.emit()
+        self.analysisChanged.emit()
+        self.eventsChanged.emit()
+        self.storyChanged.emit()
+        self.matchingChanged.emit()
+        self.exportChanged.emit()
+        self.voiceChanged.emit()
+        self.subtitleStyleChanged.emit()
+        self.subtitleEffectPreviewChanged.emit()
 
     def _start_media_analysis(self, video: Path, project_file: Path) -> None:
         self._media_job_id += 1
@@ -1509,10 +1584,10 @@ class AppController(QObject):
             self._voice_status = f"英文配音与同步字幕已就绪，时长 {self._format_time(self._narration_duration_sec)}"
         elif audio.exists():
             self._voice_status = f"英文配音已就绪，时长 {self._format_time(self._narration_duration_sec)}；建议导入同步 SRT"
-        elif (project_file.parent / "script" / "tts" / "gpt_sovits_input.txt").exists():
-            self._voice_status = "GPT-SoVITS 文案已准备，请生成并导入英文配音"
+        elif (project_file.parent / "script" / "tts" / "gpt_sovits_reference.srt").exists():
+            self._voice_status = "GPT-SoVITS SRT 已准备，请生成并导入英文配音"
         else:
-            self._voice_status = "等待准备 GPT-SoVITS 文案"
+            self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
         self.voiceChanged.emit()
 
     def _default_subtitle_style(self) -> dict[str, object]:

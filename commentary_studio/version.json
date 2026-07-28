@@ -1,7 +1,7 @@
 {
   "name": "StoryCut Studio",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "优化无 API Key 时的引导，可在应用内快速保存 API 配置；明确本地预处理用途，并修复更新弹窗布局警告。"
+  "notes": "优化四步流程首页和故事生成质量，改进 GPT-SoVITS 断句与 SRT 导出，并增加带安全删除功能的最近项目弹窗。"
 }

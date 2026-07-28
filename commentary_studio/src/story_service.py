@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .vision_service import api_configuration
+from .voice_service import MIN_TTS_UNIT_DURATION_SEC, split_gpt_sovits_units
 
 
 ProgressCallback = Callable[[float, str], None]
@@ -47,26 +48,57 @@ def generate_story_script(
     max_words = max(30, round(target_duration_sec * 2.25))
     progress(0.1, "正在评估事件重要度和故事角度…")
     prompt = f"""
-你是一名擅长 YouTube Shorts 的英文解说编剧。根据给定的原片事件，重新组织一个紧凑、准确、具有吸引力的故事。
+You are a native English science YouTube writer and editor.
+Write like a knowledgeable person explaining something interesting to a curious audience.
+Do not sound like a documentary narrator, trailer writer, marketer, lecturer, or essayist.
+Turn the source events into narration that sounds as if it was originally written and spoken by a native English creator.
+The subject may involve science, technology, engineering, astronomy, geography, biology, nature, history, or another factual topic.
 
-目标时长：最多 {target_duration_sec} 秒
-英文旁白总词数：最多 {max_words} 词
-叙事风格：{story_config.get('narrative_style', 'concise')}
+TARGET
+- Maximum duration: {target_duration_sec} seconds.
+- Maximum narration length: {max_words} English words.
+- Requested style profile: {story_config.get('narrative_style', 'natural_science_youtube')}.
+- These limits are ceilings, not targets. Prefer the shortest script that preserves the useful story.
 
-规则：
-1. 只能使用事件中明确出现的信息，不得编造事实。
-2. 允许舍弃重复或无关事件，但故事因果必须清楚。
-3. 开头 1～2 句直接提出冲突、问题或最吸引人的结果。
-4. narration 必须拆成短句，每句绑定 event_ids，供后续匹配镜头。
-5. visual_query 用中文描述这句旁白需要什么画面。
-6. 原片信息不足时宁可缩短成片，不要为了填满目标时长重复或虚构。
-7. text_en 必须是自然、口语化、适合配音的英文。
+CONTENT DISCIPLINE
+1. Use only facts supported by the supplied events. Never invent a fact, cause, result, quotation, or unseen action.
+2. You may omit repetitive or unimportant events, but preserve a clear and accurate line of thought.
+3. If the source does not contain enough information, make the result shorter instead of padding or repeating it.
+4. Technical terms must remain accurate. Explain them naturally only when the source provides enough context.
+5. Do not expand the source merely to approach the duration or word limit.
+6. Every sentence must introduce a fact, explain a mechanism, or create a necessary logical transition.
 
-严格返回一个 JSON 对象，不要 Markdown，格式：
+NARRATION STYLE
+1. Do not translate literally. Understand the core idea and intended feeling, then rewrite it for a native English audience.
+2. Sound like a natural science YouTuber speaking directly and clearly, not a polished TV documentary or generic AI article.
+3. Use natural spoken English with varied rhythm. Mix concise statements with longer flowing thoughts when the subject benefits from it.
+4. Let concrete facts create curiosity. Do not force a dramatic question, conflict, revelation, or exaggerated hook.
+5. Avoid generic AI transitions and repeated opening patterns, especially:
+   "Let's explore", "Let's take a look", "Let's break it down", "In this video",
+   "You will see", "The answer is", "This is why", and "But here's the thing".
+   A common phrase may appear when it is genuinely natural, but never as a reusable template.
+6. Do not add cinematic narration, emotional filler, abstract praise, fake suspense, unnecessary rhetorical questions, or conclusions that repeat the opening.
+7. Natural short expressions such as "Sure.", "Of course.", or "All right," are allowed when they genuinely fit the narration.
+8. Avoid empty uses of "journey into", "the heart of", "fascinating", "remarkable", "innovation", "uncover", and "unique design". Use such wording only when it conveys specific information.
+9. Favor concrete nouns and direct verbs over polished but vague phrases.
+
+INTERNAL WRITING PROCESS
+Perform these steps silently:
+1. Understand the core facts, the most useful story angle, and the intended emotional tone.
+2. Draft the English narration as a coherent whole. Do not make the prose choppy merely for subtitles or TTS.
+3. Remove anything that sounds translated, cinematic, formulaic, promotional, like a school essay, or generically AI-written.
+4. For every sentence, ask: "Does this add information or move the explanation forward?" Delete it if not.
+5. Ask: "Would a knowledgeable native English science YouTuber actually say this aloud?" Rewrite any line that fails.
+
+STRUCTURED OUTPUT
+1. narration items are semantic story beats, not artificial TTS fragments. A beat may contain natural punctuation and more than one clause.
+2. Each narration item must bind to supported event_ids and include a Chinese visual_query for shot matching.
+3. The application will split final text at GPT-SoVITS punctuation afterward. Do not distort the prose to perform that technical split yourself.
+4. Return exactly one JSON object and no Markdown or commentary, using this structure:
 {{
   "title": "英文标题",
   "angle": "中文说明故事切入角度",
-  "hook": "英文开场钩子",
+  "hook": "Natural English opening line; it does not need to be dramatic",
   "selected_event_ids": [1, 2],
   "omitted_event_ids": [3],
   "outline": [
@@ -83,11 +115,12 @@ def generate_story_script(
 
     client = OpenAI(api_key=api_key, base_url=base_url)
     model = str(story_config.get("model", "gpt-4o-mini"))
+    temperature = max(0.0, min(1.2, float(story_config.get("temperature", 0.55))))
     progress(0.35, f"正在使用 {model} 生成故事大纲…")
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.35,
+        temperature=temperature,
     )
     result = _parse_json_object(str(response.choices[0].message.content or ""))
     progress(0.8, "正在校验事件引用和解说时长…")
@@ -114,26 +147,30 @@ def _normalize_story(
     narration = []
     total_words = 0
     total_duration = 0.0
-    for index, item in enumerate(result.get("narration", []), start=1):
+    for item in result.get("narration", []):
         if not isinstance(item, dict):
             continue
         text = str(item.get("text_en", "")).strip()
         if not text:
             continue
-        word_count = len(re.findall(r"\b[\w'-]+\b", text))
+        units = split_gpt_sovits_units(text)
+        unit_word_counts = [max(1, len(re.findall(r"\b[\w'-]+\b", unit))) for unit in units]
+        word_count = sum(unit_word_counts)
         duration = max(0.8, float(item.get("estimated_duration_sec", 0) or word_count / 2.25))
-        total_words += word_count
-        total_duration += duration
-        narration.append(
-            {
-                "id": index,
-                "event_ids": valid_event_ids(item.get("event_ids")),
-                "text_en": text,
-                "visual_query": str(item.get("visual_query", "")).strip(),
-                "estimated_duration_sec": round(duration, 2),
-                "word_count": word_count,
-            }
-        )
+        for unit, unit_words in zip(units, unit_word_counts):
+            unit_duration = max(MIN_TTS_UNIT_DURATION_SEC, duration * unit_words / word_count)
+            total_words += unit_words
+            total_duration += unit_duration
+            narration.append(
+                {
+                    "id": len(narration) + 1,
+                    "event_ids": valid_event_ids(item.get("event_ids")),
+                    "text_en": unit,
+                    "visual_query": str(item.get("visual_query", "")).strip(),
+                    "estimated_duration_sec": round(unit_duration, 2),
+                    "word_count": unit_words,
+                }
+            )
 
     selected = valid_event_ids(result.get("selected_event_ids"))
     omitted = valid_event_ids(result.get("omitted_event_ids"))

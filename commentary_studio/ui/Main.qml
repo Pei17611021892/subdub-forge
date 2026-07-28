@@ -21,6 +21,41 @@ ApplicationWindow {
     property color textMuted: "#9ca3af"
     property int currentStep: 0
     property int storyTargetDuration: 60
+    property bool understandingDone: appController.events.length > 0
+    property bool storyDone: appController.storyNarration.length > 0
+    property bool matchingDone: appController.matches.length > 0
+    property bool exportDone: appController.previewVideoReady
+
+    component StepBadge: Rectangle {
+        id: stepBadge
+        property string stepNumber: "01"
+        property bool completed: false
+        implicitWidth: 64
+        implicitHeight: 54
+        radius: 14
+        color: completed ? "#183729" : "#342257"
+        border.width: 1
+        border.color: completed ? "#347456" : "#6d4ca0"
+
+        Column {
+            anchors.centerIn: parent
+            spacing: 1
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: completed ? "完成" : "STEP"
+                color: completed ? "#8ee3b4" : "#bd9cff"
+                font.pixelSize: 8
+                font.bold: true
+                font.letterSpacing: 1
+            }
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: 4
+                Text { text: stepBadge.stepNumber; color: completed ? "#b8f3cf" : "#ffffff"; font.pixelSize: 18; font.bold: true }
+                Text { visible: stepBadge.completed; text: "✓"; color: "#8ee3b4"; font.pixelSize: 15; font.bold: true }
+            }
+        }
+    }
 
     component PreciseSpinBox: Control {
         id: preciseControl
@@ -227,9 +262,283 @@ ApplicationWindow {
 
     FileDialog {
         id: projectDialog
-        title: "打开 StoryCut 项目"
+        title: "打开其他 StoryCut 项目文件"
         nameFilters: ["StoryCut 项目 (project.json)"]
-        onAccepted: appController.openProject(selectedFile.toString())
+        onAccepted: {
+            appController.openProject(selectedFile.toString())
+            recentProjectsDialog.close()
+        }
+    }
+
+    Dialog {
+        id: recentProjectsDialog
+        objectName: "recentProjectsDialog"
+        width: Math.min(window.width - 80, 780)
+        height: Math.min(
+                    window.height - 70,
+                    Math.max(430, 260 + Math.min(appController.recentProjects.length, 4) * 102)
+                )
+        anchors.centerIn: parent
+        modal: true
+        padding: 0
+        closePolicy: Popup.CloseOnEscape
+
+        background: Rectangle {
+            radius: 18
+            color: "#111319"
+            border.color: "#343843"
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 0
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 78
+                Layout.leftMargin: 24
+                Layout.rightMargin: 20
+                spacing: 12
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 3
+                    Text { text: "最近项目"; color: textMain; font.pixelSize: 21; font.bold: true }
+                    Text {
+                        text: appController.recentProjects.length > 0
+                              ? "选择一个项目继续上次的制作"
+                              : "还没有可继续的 StoryCut 项目"
+                        color: textMuted
+                        font.pixelSize: 12
+                    }
+                }
+                GhostButton { text: "关闭"; onClicked: recentProjectsDialog.close() }
+            }
+
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#292c35" }
+
+            ListView {
+                id: recentProjectsList
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.margins: 18
+                spacing: 10
+                clip: true
+                model: appController.recentProjects
+
+                Text {
+                    anchors.centerIn: parent
+                    visible: recentProjectsList.count === 0
+                    text: "创建项目后，会在这里显示制作进度"
+                    color: "#686d78"
+                    font.pixelSize: 12
+                }
+
+                delegate: Rectangle {
+                    required property var modelData
+                    width: recentProjectsList.width
+                    height: 92
+                    radius: 13
+                    color: projectRowMouse.containsMouse ? panelRaised : panel
+                    border.color: projectRowMouse.containsMouse ? "#51436d" : "#292c36"
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 13
+
+                        Rectangle {
+                            Layout.preferredWidth: 48
+                            Layout.preferredHeight: 48
+                            radius: 11
+                            color: "#292238"
+                            Text { anchors.centerIn: parent; text: "▶"; color: accentLight; font.pixelSize: 17 }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            Text {
+                                Layout.fillWidth: true
+                                text: modelData.name
+                                color: textMain
+                                font.pixelSize: 14
+                                font.bold: true
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: modelData.video
+                                color: textMuted
+                                font.pixelSize: 11
+                                elide: Text.ElideMiddle
+                            }
+                            Text {
+                                text: modelData.stageText + (modelData.updatedText ? "  ·  " + modelData.updatedText : "")
+                                color: "#8b91a0"
+                                font.pixelSize: 10
+                            }
+                        }
+
+                        GhostButton {
+                            text: "继续"
+                            onClicked: {
+                                appController.openProject(modelData.projectFile)
+                                recentProjectsDialog.close()
+                            }
+                        }
+
+                        Button {
+                            id: deleteRecentButton
+                            text: "删除"
+                            implicitWidth: 58
+                            implicitHeight: 36
+                            contentItem: Text {
+                                text: deleteRecentButton.text
+                                color: deleteRecentButton.hovered ? "#fecaca" : "#fca5a5"
+                                font.pixelSize: 12
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                radius: 9
+                                color: deleteRecentButton.hovered ? "#402126" : "transparent"
+                                border.color: "#633039"
+                            }
+                            onClicked: {
+                                deleteProjectDialog.projectName = modelData.name
+                                deleteProjectDialog.projectFile = modelData.projectFile
+                                deleteProjectDialog.open()
+                            }
+                        }
+                    }
+
+                    MouseArea {
+                        id: projectRowMouse
+                        anchors.fill: parent
+                        anchors.rightMargin: 150
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            appController.openProject(modelData.projectFile)
+                            recentProjectsDialog.close()
+                        }
+                    }
+                }
+
+                ScrollBar.vertical: ScrollBar {}
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 24
+                Layout.rightMargin: 24
+                Layout.bottomMargin: 20
+                spacing: 10
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 58
+                    radius: 10
+                    color: "#171923"
+                    border.color: "#2d3140"
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 13
+                        spacing: 10
+                        Text { text: "提示"; color: accentLight; font.pixelSize: 12; font.bold: true }
+                        Text {
+                            Layout.fillWidth: true
+                            text: "项目会自动保存。删除项目将清理分析、配音、预览等内容，不会删除项目目录外的原始视频。"
+                            color: textMuted
+                            font.pixelSize: 11
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                        Layout.fillWidth: true
+                        text: "项目不在列表中？可手动选择该项目目录内的 project.json。"
+                        color: "#747986"
+                        font.pixelSize: 11
+                    }
+                    GhostButton { text: "打开其他项目文件"; onClicked: projectDialog.open() }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: deleteProjectDialog
+        property string projectName: ""
+        property string projectFile: ""
+        width: 470
+        anchors.centerIn: parent
+        modal: true
+        padding: 22
+        closePolicy: Popup.CloseOnEscape
+
+        background: Rectangle {
+            radius: 16
+            color: "#15171e"
+            border.color: "#563039"
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 13
+            Text { text: "确认删除项目？"; color: textMain; font.pixelSize: 19; font.bold: true }
+            Text {
+                Layout.fillWidth: true
+                text: "将永久删除“" + deleteProjectDialog.projectName + "”的项目文件、分析结果、配音、预览和导出缓存。"
+                color: textMuted
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "项目目录外的原始视频不会被删除。此操作无法撤销。"
+                color: "#fca5a5"
+                font.pixelSize: 12
+                font.bold: true
+                wrapMode: Text.WordWrap
+            }
+        }
+
+        footer: Item {
+            implicitHeight: 68
+            Row {
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.rightMargin: 22
+                anchors.bottomMargin: 18
+                spacing: 10
+                GhostButton { text: "取消"; onClicked: deleteProjectDialog.close() }
+                Button {
+                    id: confirmDeleteButton
+                    text: "确认删除"
+                    implicitHeight: 40
+                    leftPadding: 17
+                    rightPadding: 17
+                    contentItem: Text {
+                        text: confirmDeleteButton.text
+                        color: "#ffffff"
+                        font.pixelSize: 13
+                        font.bold: true
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        radius: 9
+                        color: confirmDeleteButton.down ? "#991b1b" : confirmDeleteButton.hovered ? "#dc2626" : "#b91c1c"
+                    }
+                    onClicked: {
+                        appController.deleteProject(deleteProjectDialog.projectFile)
+                        deleteProjectDialog.close()
+                    }
+                }
+            }
+        }
     }
 
     FileDialog {
@@ -248,7 +557,7 @@ ApplicationWindow {
 
     FileDialog {
         id: saveTtsSrtDialog
-        title: "获取英文 SRT · 选择保存位置"
+        title: "导出 SRT 到 GPT-SoVITS · 选择保存位置"
         fileMode: FileDialog.SaveFile
         defaultSuffix: "srt"
         nameFilters: ["SRT 字幕 (*.srt)"]
@@ -1076,17 +1385,61 @@ ApplicationWindow {
                     delegate: Rectangle {
                         required property var modelData
                         required property int index
+                        property bool completed: index === 1 ? understandingDone
+                                                   : index === 2 ? storyDone
+                                                   : index === 3 ? matchingDone
+                                                   : index === 4 ? exportDone
+                                                   : false
+                        property bool unlocked: index === 0
+                                                || (index === 1 && appController.videoPath !== "")
+                                                || (index === 2 && understandingDone)
+                                                || (index === 3 && storyDone)
+                                                || (index === 4 && matchingDone)
                         Layout.fillWidth: true
                         height: 46
                         radius: 10
-                        color: currentStep === index ? "#2b2145" : navMouse.containsMouse ? "#1b1e27" : "transparent"
-                        Row {
+                        color: completed
+                               ? (currentStep === index ? "#214633" : navMouse.containsMouse ? "#1c372a" : "#172b22")
+                               : currentStep === index ? "#2b2145"
+                               : navMouse.containsMouse ? "#1b1e27" : "transparent"
+                        border.width: completed ? 1 : 0
+                        border.color: "#326b4d"
+                        RowLayout {
                             anchors.left: parent.left
+                            anchors.right: parent.right
                             anchors.leftMargin: 14
+                            anchors.rightMargin: 28
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 13
-                            Text { text: modelData.icon; color: currentStep === index ? accentLight : textMuted; font.pixelSize: 18 }
-                            Text { text: modelData.label; color: currentStep === index ? "#ede9fe" : "#c4c6cf"; font.pixelSize: 14 }
+                            Text {
+                                text: modelData.icon
+                                color: completed ? "#8ee3b4" : currentStep === index ? accentLight : unlocked ? textMuted : "#545965"
+                                font.pixelSize: 18
+                            }
+                            Text {
+                                text: modelData.label
+                                color: completed ? "#b8f3cf" : currentStep === index ? "#ede9fe" : unlocked ? "#c4c6cf" : "#6e7380"
+                                font.pixelSize: 14
+                                Layout.fillWidth: true
+                            }
+                            Rectangle {
+                                visible: index > 0
+                                Layout.preferredWidth: 22
+                                Layout.minimumWidth: 22
+                                Layout.maximumWidth: 22
+                                Layout.preferredHeight: 22
+                                radius: 11
+                                color: completed ? "#2d6a4b" : unlocked ? "#30264a" : "#20232b"
+                                border.width: 1
+                                border.color: completed ? "#65b98a" : unlocked ? "#59417f" : "#343843"
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: completed ? "✓" : index
+                                    color: completed ? "#d5f8e3" : unlocked ? "#bca1e8" : "#686d78"
+                                    font.pixelSize: completed ? 12 : 9
+                                    font.bold: true
+                                }
+                            }
                         }
                         MouseArea {
                             id: navMouse
@@ -1107,8 +1460,7 @@ ApplicationWindow {
                 Item { Layout.fillHeight: true }
 
                 Rectangle { Layout.fillWidth: true; height: 1; color: "#292c35" }
-                Text { text: "设置"; color: textMuted; font.pixelSize: 13; Layout.topMargin: 10 }
-                Text { text: "StoryCut Studio  v0.1.0"; color: "#626773"; font.pixelSize: 11; Layout.topMargin: 8 }
+                Text { text: "StoryCut Studio  v" + appController.appVersion; color: "#626773"; font.pixelSize: 11; Layout.topMargin: 12 }
             }
         }
 
@@ -1121,8 +1473,10 @@ ApplicationWindow {
                 id: mainScroll
                 anchors.fill: parent
                 contentWidth: availableWidth
+                contentHeight: mainContent.implicitHeight + mainContent.y + 30
 
                 ColumnLayout {
+                    id: mainContent
                     x: 38
                     y: 30
                     width: parent.width - 76
@@ -1142,7 +1496,7 @@ ApplicationWindow {
                             enabled: !appController.updateBusy
                             onClicked: appController.checkForUpdates()
                         }
-                        GhostButton { text: "打开项目"; onClicked: projectDialog.open() }
+                        GhostButton { text: "最近项目"; onClicked: recentProjectsDialog.open() }
                         FlatButton { text: "+  创建项目"; onClicked: videoDialog.open() }
                     }
 
@@ -1217,67 +1571,14 @@ ApplicationWindow {
                                     Rectangle { width: 116; height: 27; radius: 7; color: "#20242c"; visible: appController.codecText !== ""; Text { anchors.centerIn: parent; text: appController.codecText; color: "#c7cad2"; font.pixelSize: 10 } }
                                     Item { Layout.fillWidth: true }
                                     FlatButton {
-                                        text: appController.analysisBusy ? "正在理解原片…" : appController.videoPath ? "开始理解原片  →" : "选择视频  →"
-                                        enabled: !appController.analysisBusy
-                                        onClicked: {
-                                            if (!appController.videoPath) {
-                                                videoDialog.open()
-                                            } else if (appController.refreshApiConfiguration()) {
-                                                appController.startUnderstanding()
-                                            } else {
-                                                apiPreflightDialog.requestedAction = "understanding"
-                                                apiPreflightDialog.open()
-                                            }
-                                        }
+                                        text: appController.mediaBusy ? "正在读取…" : appController.videoPath ? "更换视频" : "选择视频  →"
+                                        enabled: !appController.mediaBusy
+                                        onClicked: videoDialog.open()
                                     }
                                 }
                             }
                         }
                     }
-
-                    Rectangle {
-                        Layout.fillWidth: true
-                        visible: appController.analysisBusy || appController.analysisProgress > 0
-                        Layout.preferredHeight: visible ? 118 : 0
-                        radius: 12
-                        color: "#15171e"
-                        border.color: "#292c36"
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.margins: 16
-                            spacing: 14
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 8
-                                Text { text: appController.analysisStatus; color: textMain; font.pixelSize: 13; Layout.fillWidth: true; elide: Text.ElideRight }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Text { text: appController.analysisElapsedText; color: textMuted; font.pixelSize: 11 }
-                                    Text { text: "·"; color: "#575b66"; font.pixelSize: 11 }
-                                    Text { text: appController.analysisEstimatedTotalText; color: textMuted; font.pixelSize: 11 }
-                                    Text { text: "·"; color: "#575b66"; font.pixelSize: 11 }
-                                    Text { text: appController.analysisEtaText; color: accentLight; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
-                                }
-                                Text {
-                                    text: "预计用时按低配电脑 CPU 算力估算，准确时间请以实际运行进度为准。"
-                                    color: "#717784"
-                                    font.pixelSize: 10
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                }
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    height: 6
-                                    radius: 3
-                                    color: "#30333d"
-                                    Rectangle { width: parent.width * appController.analysisProgress; height: parent.height; radius: 3; color: accent }
-                                }
-                            }
-                            Text { text: Math.round(appController.analysisProgress * 100) + "%"; color: accentLight; font.pixelSize: 13; font.bold: true }
-                        }
-                    }
-
-                    Text { id: understandingSection; text: "第 1 步 · 理解原片"; color: textMain; font.pixelSize: 18; font.bold: true; Layout.topMargin: 4 }
 
                     GridLayout {
                         Layout.fillWidth: true
@@ -1293,24 +1594,31 @@ ApplicationWindow {
                                 { n: "04", title: "预览导出", desc: "确认配音、字幕与镜头并输出成片", state: appController.previewVideoReady ? "预览已生成" : appController.matches.length > 0 ? "可开始" : "等待镜头匹配" }
                             ]
                             delegate: Rectangle {
+                                id: overviewCard
                                 required property var modelData
                                 required property int index
+                                property bool completed: index === 0 ? understandingDone
+                                                           : index === 1 ? storyDone
+                                                           : index === 2 ? matchingDone
+                                                           : exportDone
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 154
                                 radius: 14
-                                color: panel
-                                border.color: cardMouse.containsMouse ? "#51436d" : "#292c36"
+                                color: completed ? "#14241d" : panel
+                                border.color: completed ? "#326b4d" : cardMouse.containsMouse ? "#51436d" : "#292c36"
                                 Column {
                                     anchors.fill: parent
                                     anchors.margins: 17
-                                    spacing: 10
-                                    Row {
-                                        width: parent.width
-                                        Text { text: modelData.n; color: accentLight; font.pixelSize: 12; font.bold: true }
+                                    spacing: 8
+                                    StepBadge {
+                                        stepNumber: modelData.n
+                                        completed: overviewCard.completed
+                                        width: 58
+                                        height: 44
                                     }
                                     Text { text: modelData.title; color: textMain; font.pixelSize: 16; font.bold: true }
                                     Text { width: parent.width; text: modelData.desc; color: textMuted; font.pixelSize: 12; wrapMode: Text.WordWrap }
-                                    Text { text: modelData.state; color: "#737986"; font.pixelSize: 11 }
+                                    Text { text: modelData.state; color: completed ? "#8ee3b4" : "#737986"; font.pixelSize: 11; font.bold: completed }
                                 }
                                 MouseArea {
                                     id: cardMouse
@@ -1329,47 +1637,80 @@ ApplicationWindow {
                     }
 
                     Rectangle {
-                        id: storySection
+                        id: understandingSection
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 142
+                        Layout.preferredHeight: understandingContent.implicitHeight + 36
                         radius: 14
                         color: panel
-                        border.color: "#292c36"
-                        visible: appController.events.length > 0
+                        border.color: understandingDone ? "#326b4d" : "#292c36"
 
-                        RowLayout {
+                        ColumnLayout {
+                            id: understandingContent
                             anchors.fill: parent
                             anchors.margins: 18
-                            spacing: 18
-                            ColumnLayout {
+                            spacing: 14
+
+                            RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 8
-                                Text { text: "第 2 步 · 组织故事"; color: textMain; font.pixelSize: 17; font.bold: true }
-                                Text { text: "选择目标上限。原片信息不足时会自动生成更短的解说，不会强行填满。"; color: textMuted; font.pixelSize: 12 }
-                                RowLayout {
-                                    spacing: 8
-                                    Repeater {
-                                        model: [60, 90, 120, 180]
-                                        delegate: Rectangle {
-                                            required property int modelData
-                                            width: 66; height: 30; radius: 8
-                                            color: storyTargetDuration === modelData ? "#6d28d9" : "#252832"
-                                            border.color: storyTargetDuration === modelData ? accentLight : "#343843"
-                                            Text { anchors.centerIn: parent; text: modelData + " 秒"; color: storyTargetDuration === modelData ? "white" : "#c4c6cf"; font.pixelSize: 11 }
-                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: storyTargetDuration = modelData }
+                                spacing: 16
+                                StepBadge { stepNumber: "01"; completed: understandingDone }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 4
+                                    Text { text: "理解原片"; color: textMain; font.pixelSize: 18; font.bold: true }
+                                    Text {
+                                        text: understandingDone
+                                              ? appController.analysisStatus
+                                              : appController.videoPath
+                                                ? "识别语音、检测场景并理解关键画面。"
+                                                : "请先在上方选择视频，随后即可开始原片理解。"
+                                        color: understandingDone ? "#8ee3b4" : textMuted
+                                        font.pixelSize: 12
+                                    }
+                                }
+                                FlatButton {
+                                    text: appController.analysisBusy ? "正在理解原片…" : understandingDone ? "重新理解原片" : appController.videoPath ? "开始理解原片  →" : "请先选择视频"
+                                    enabled: appController.videoPath !== "" && !appController.analysisBusy
+                                    onClicked: {
+                                        if (appController.refreshApiConfiguration()) {
+                                            appController.startUnderstanding()
+                                        } else {
+                                            apiPreflightDialog.requestedAction = "understanding"
+                                            apiPreflightDialog.open()
                                         }
                                     }
                                 }
                             }
-                            FlatButton {
-                                text: appController.storyBusy ? "正在组织故事…" : "生成故事与英文解说  →"
-                                enabled: !appController.storyBusy
-                                onClicked: {
-                                    if (appController.refreshApiConfiguration()) {
-                                        appController.generateStory(storyTargetDuration)
-                                    } else {
-                                        apiPreflightDialog.requestedAction = "story"
-                                        apiPreflightDialog.open()
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                visible: appController.analysisBusy || appController.analysisProgress > 0
+                                spacing: 8
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Text { text: appController.analysisElapsedText; color: textMuted; font.pixelSize: 11 }
+                                    Text { text: "·"; color: "#575b66"; font.pixelSize: 11 }
+                                    Text { text: appController.analysisEstimatedTotalText; color: textMuted; font.pixelSize: 11 }
+                                    Text { text: "·"; color: "#575b66"; font.pixelSize: 11 }
+                                    Text { text: appController.analysisEtaText; color: accentLight; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    Text { text: Math.round(appController.analysisProgress * 100) + "%"; color: understandingDone ? "#8ee3b4" : accentLight; font.pixelSize: 12; font.bold: true }
+                                }
+                                Text {
+                                    visible: appController.analysisBusy
+                                    text: "预计用时按低配电脑 CPU 算力估算，准确时间请以实际运行进度为准。"
+                                    color: "#717784"
+                                    font.pixelSize: 10
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 6
+                                    radius: 3
+                                    color: "#30333d"
+                                    Rectangle {
+                                        width: parent.width * appController.analysisProgress
+                                        height: parent.height
+                                        radius: 3
+                                        color: understandingDone ? "#58b982" : accent
                                     }
                                 }
                             }
@@ -1377,96 +1718,180 @@ ApplicationWindow {
                     }
 
                     Rectangle {
+                        id: storySection
                         Layout.fillWidth: true
-                        visible: appController.storyBusy || appController.storyStatus.indexOf("故事生成失败") === 0
-                        Layout.preferredHeight: visible ? 64 : 0
-                        radius: 12
+                        Layout.preferredHeight: storyContent.implicitHeight + 36
+                        radius: 14
                         color: panel
-                        border.color: appController.storyStatus.indexOf("故事生成失败") === 0 ? "#7f3d46" : "#292c36"
-                        RowLayout {
+                        border.color: storyDone ? "#326b4d" : "#292c36"
+
+                        ColumnLayout {
+                            id: storyContent
                             anchors.fill: parent
-                            anchors.margins: 15
-                            ColumnLayout {
+                            anchors.margins: 18
+                            spacing: 14
+
+                            RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 7
-                                Text { text: appController.storyStatus; color: textMain; font.pixelSize: 12 }
-                                Rectangle {
-                                    Layout.fillWidth: true; height: 5; radius: 3; color: "#30333d"
-                                    Rectangle { width: parent.width * appController.storyProgress; height: parent.height; radius: 3; color: accent }
+                                spacing: 16
+                                StepBadge { stepNumber: "02"; completed: storyDone }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 4
+                                    Text { text: "组织故事"; color: textMain; font.pixelSize: 18; font.bold: true }
+                                    Text {
+                                        text: storyDone
+                                              ? appController.storyStatus
+                                              : understandingDone
+                                                ? "选择目标上限，生成自然英文解说与故事结构。"
+                                                : "完成第 1 步理解原片后，才能生成故事与英文解说。"
+                                        color: storyDone ? "#8ee3b4" : textMuted
+                                        font.pixelSize: 12
+                                    }
+                                }
+                                FlatButton {
+                                    text: appController.storyBusy ? "正在组织故事…" : storyDone ? "重新生成故事" : understandingDone ? "生成故事与英文解说  →" : "等待理解原片"
+                                    enabled: understandingDone && !appController.storyBusy
+                                    onClicked: {
+                                        if (appController.refreshApiConfiguration()) {
+                                            appController.generateStory(storyTargetDuration)
+                                        } else {
+                                            apiPreflightDialog.requestedAction = "story"
+                                            apiPreflightDialog.open()
+                                        }
+                                    }
                                 }
                             }
-                            Text { text: Math.round(appController.storyProgress * 100) + "%"; color: accentLight; font.pixelSize: 12; font.bold: true }
-                        }
-                    }
 
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 12
-                        visible: appController.storyNarration.length > 0
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            ColumnLayout {
+                            RowLayout {
                                 Layout.fillWidth: true
-                                Text { text: appController.storyTitle; color: textMain; font.pixelSize: 20; font.bold: true }
-                                Text { text: appController.storyAngle; color: textMuted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                spacing: 8
+                                enabled: understandingDone && !appController.storyBusy
+                                opacity: enabled ? 1 : 0.45
+                                Text { text: "目标上限"; color: textMuted; font.pixelSize: 11; Layout.rightMargin: 4 }
+                                Repeater {
+                                    model: [60, 90, 120, 180]
+                                    delegate: Rectangle {
+                                        required property int modelData
+                                        Layout.preferredWidth: 66
+                                        Layout.preferredHeight: 30
+                                        radius: 8
+                                        color: storyTargetDuration === modelData ? "#6d28d9" : "#252832"
+                                        border.color: storyTargetDuration === modelData ? accentLight : "#343843"
+                                        Text { anchors.centerIn: parent; text: modelData + " 秒"; color: storyTargetDuration === modelData ? "white" : "#c4c6cf"; font.pixelSize: 11 }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            enabled: understandingDone && !appController.storyBusy
+                                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                            onClicked: storyTargetDuration = modelData
+                                        }
+                                    }
+                                }
+                                Text { text: "原片信息不足时会自动缩短，不会强行填满。"; color: "#737986"; font.pixelSize: 10; Layout.fillWidth: true }
                             }
+
                             Rectangle {
-                                width: 130; height: 30; radius: 8; color: "#252832"
-                                Text { anchors.centerIn: parent; text: appController.storyStats; color: accentLight; font.pixelSize: 11 }
-                            }
-                        }
-
-                        Text { text: "故事大纲"; color: textMain; font.pixelSize: 15; font.bold: true }
-                        Repeater {
-                            model: appController.storyOutline
-                            delegate: Rectangle {
-                                required property var modelData
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 52
+                                visible: appController.storyBusy || appController.storyStatus.indexOf("故事生成失败") === 0
+                                Layout.preferredHeight: visible ? 62 : 0
                                 radius: 10
                                 color: "#15171e"
-                                border.color: "#292c36"
+                                border.color: appController.storyStatus.indexOf("故事生成失败") === 0 ? "#7f3d46" : "#292c36"
                                 RowLayout {
-                                    anchors.fill: parent; anchors.margins: 12; spacing: 12
-                                    Text { text: modelData.order; color: accentLight; font.pixelSize: 13; font.bold: true }
-                                    Text { text: modelData.purpose; color: "#a1a6b2"; font.pixelSize: 11; Layout.preferredWidth: 70 }
-                                    Text { text: modelData.summary; color: textMain; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
-                                    Text { text: "事件 " + modelData.event_ids.join(", "); color: textMuted; font.pixelSize: 10 }
+                                    anchors.fill: parent
+                                    anchors.margins: 13
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 7
+                                        Text { text: appController.storyStatus; color: textMain; font.pixelSize: 12 }
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 5
+                                            radius: 3
+                                            color: "#30333d"
+                                            Rectangle { width: parent.width * appController.storyProgress; height: parent.height; radius: 3; color: accent }
+                                        }
+                                    }
+                                    Text { text: Math.round(appController.storyProgress * 100) + "%"; color: accentLight; font.pixelSize: 12; font.bold: true }
                                 }
                             }
-                        }
 
-                        Text { text: "英文解说 · 点击文字可以修改，离开输入框自动保存"; color: textMain; font.pixelSize: 15; font.bold: true; Layout.topMargin: 4 }
-                        Repeater {
-                            model: appController.storyNarration
-                            delegate: Rectangle {
-                                required property var modelData
-                                required property int index
+                            ColumnLayout {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 112
-                                radius: 11
-                                color: "#15171e"
-                                border.color: narrationEditor.activeFocus ? accent : "#292c36"
+                                spacing: 12
+                                visible: storyDone
+
                                 RowLayout {
-                                    anchors.fill: parent; anchors.margins: 12; spacing: 12
-                                    Rectangle {
-                                        width: 32; height: 32; radius: 9; color: "#292238"
-                                        Text { anchors.centerIn: parent; text: modelData.id; color: accentLight; font.pixelSize: 12; font.bold: true }
-                                    }
+                                    Layout.fillWidth: true
                                     ColumnLayout {
-                                        Layout.fillWidth: true; Layout.fillHeight: true; spacing: 5
-                                        TextArea {
-                                            id: narrationEditor
-                                            Layout.fillWidth: true; Layout.fillHeight: true
-                                            text: modelData.text_en
-                                            color: textMain
-                                            font.pixelSize: 13
-                                            wrapMode: TextEdit.WordWrap
-                                            background: Rectangle { color: "transparent" }
-                                            onActiveFocusChanged: if (!activeFocus && text !== modelData.text_en) appController.updateNarration(index, text)
+                                        Layout.fillWidth: true
+                                        Text { text: appController.storyTitle; color: textMain; font.pixelSize: 20; font.bold: true }
+                                        Text { text: appController.storyAngle; color: textMuted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                                    }
+                                    Rectangle {
+                                        Layout.preferredWidth: 130
+                                        Layout.preferredHeight: 30
+                                        radius: 8
+                                        color: "#252832"
+                                        Text { anchors.centerIn: parent; text: appController.storyStats; color: accentLight; font.pixelSize: 11 }
+                                    }
+                                }
+
+                                Text { text: "故事大纲"; color: textMain; font.pixelSize: 15; font.bold: true }
+                                Repeater {
+                                    model: appController.storyOutline
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 52
+                                        radius: 10
+                                        color: "#15171e"
+                                        border.color: "#292c36"
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.margins: 12; spacing: 12
+                                            Text { text: modelData.order; color: accentLight; font.pixelSize: 13; font.bold: true }
+                                            Text { text: modelData.purpose; color: "#a1a6b2"; font.pixelSize: 11; Layout.preferredWidth: 70 }
+                                            Text { text: modelData.summary; color: textMain; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                                            Text { text: "事件 " + modelData.event_ids.join(", "); color: textMuted; font.pixelSize: 10 }
                                         }
-                                        Text { text: "画面：" + modelData.visual_query + "  ·  约 " + modelData.estimated_duration_sec + " 秒  ·  事件 " + modelData.event_ids.join(", "); color: textMuted; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    }
+                                }
+
+                                Text { text: "英文解说 · 点击文字可以修改，离开输入框自动保存"; color: textMain; font.pixelSize: 15; font.bold: true; Layout.topMargin: 4 }
+                                Repeater {
+                                    model: appController.storyNarration
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        required property int index
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 112
+                                        radius: 11
+                                        color: "#15171e"
+                                        border.color: narrationEditor.activeFocus ? accent : "#292c36"
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.margins: 12; spacing: 12
+                                            Rectangle {
+                                                Layout.preferredWidth: 42
+                                                Layout.preferredHeight: 28
+                                                radius: 8
+                                                color: "#252832"
+                                                Text { anchors.centerIn: parent; text: "句 " + modelData.id; color: "#b9a0df"; font.pixelSize: 10; font.bold: true }
+                                            }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true; Layout.fillHeight: true; spacing: 5
+                                                TextArea {
+                                                    id: narrationEditor
+                                                    Layout.fillWidth: true; Layout.fillHeight: true
+                                                    text: modelData.text_en
+                                                    color: textMain
+                                                    font.pixelSize: 13
+                                                    wrapMode: TextEdit.WordWrap
+                                                    background: Rectangle { color: "transparent" }
+                                                    onActiveFocusChanged: if (!activeFocus && text !== modelData.text_en) appController.updateNarration(index, text)
+                                                }
+                                                Text { text: "画面：" + modelData.visual_query + "  ·  约 " + modelData.estimated_duration_sec + " 秒  ·  事件 " + modelData.event_ids.join(", "); color: textMuted; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1479,7 +1904,7 @@ ApplicationWindow {
                         Layout.preferredHeight: matchingContent.implicitHeight + 36
                         radius: 14
                         color: panel
-                        border.color: "#292c36"
+                        border.color: matchingDone ? "#326b4d" : "#292c36"
                         ColumnLayout {
                             id: matchingContent
                             anchors.fill: parent
@@ -1488,13 +1913,10 @@ ApplicationWindow {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 16
-                                Rectangle {
-                                    width: 42; height: 42; radius: 12; color: "#292238"
-                                    Text { anchors.centerIn: parent; text: "03"; color: accentLight; font.pixelSize: 13; font.bold: true }
-                                }
+                                StepBadge { stepNumber: "03"; completed: matchingDone }
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    Text { text: "第 3 步 · 匹配镜头"; color: textMain; font.pixelSize: 17; font.bold: true }
+                                    Text { text: "匹配镜头"; color: textMain; font.pixelSize: 18; font.bold: true }
                                     Text {
                                         text: appController.matches.length > 0
                                               ? appController.matchingStatus
@@ -1613,7 +2035,7 @@ ApplicationWindow {
                         Layout.preferredHeight: appController.matches.length > 0 ? 260 : 116
                         radius: 14
                         color: panel
-                        border.color: "#292c36"
+                        border.color: exportDone ? "#326b4d" : "#292c36"
                         ColumnLayout {
                             anchors.fill: parent
                             anchors.margins: 18
@@ -1621,13 +2043,10 @@ ApplicationWindow {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 16
-                                Rectangle {
-                                    width: 42; height: 42; radius: 12; color: "#292238"
-                                    Text { anchors.centerIn: parent; text: "04"; color: accentLight; font.pixelSize: 13; font.bold: true }
-                                }
+                                StepBadge { stepNumber: "04"; completed: exportDone }
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    Text { text: "第 4 步 · 预览导出"; color: textMain; font.pixelSize: 17; font.bold: true }
+                                    Text { text: "预览导出"; color: textMain; font.pixelSize: 18; font.bold: true }
                                     Text {
                                         text: appController.matches.length > 0
                                               ? "使用 GPT-SoVITS 英文解说；保持原视频分辨率和画面，不缩放、不补边、不裁切。"
@@ -1656,19 +2075,15 @@ ApplicationWindow {
                                 visible: appController.matches.length > 0
                                 spacing: 9
                                 GhostButton {
-                                    text: appController.ttsPackageReady ? "重新准备 GPT-SoVITS 文案" : "1  准备 GPT-SoVITS 文案"
-                                    onClicked: appController.prepareTtsPackage()
-                                }
-                                GhostButton {
-                                    text: "2  获取英文 SRT"
+                                    text: "1  导出 SRT 到 GPT-SoVITS"
                                     onClicked: saveTtsSrtDialog.open()
                                 }
                                 GhostButton {
-                                    text: appController.narrationAudioReady ? "重新导入英文配音" : "3  导入英文配音"
+                                    text: appController.narrationAudioReady ? "重新导入英文配音" : "2  导入英文配音"
                                     onClicked: narrationAudioDialog.open()
                                 }
                                 GhostButton {
-                                    text: appController.syncedSrtReady ? "重新导入同步 SRT" : "4  导入同步 SRT（可选）"
+                                    text: appController.syncedSrtReady ? "重新导入同步 SRT" : "3  导入同步 SRT（可选）"
                                     onClicked: narrationSrtDialog.open()
                                 }
                                 Text {
@@ -1756,74 +2171,6 @@ ApplicationWindow {
                         }
                     }
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Layout.topMargin: 6
-                        visible: appController.recentProjects.length > 0
-                        Text { text: "最近项目"; color: textMain; font.pixelSize: 18; font.bold: true }
-                        Item { Layout.fillWidth: true }
-                        Text { text: appController.recentProjects.length + " 个项目"; color: textMuted; font.pixelSize: 12 }
-                    }
-
-                    GridLayout {
-                        Layout.fillWidth: true
-                        columns: 2
-                        columnSpacing: 14
-                        rowSpacing: 12
-                        visible: appController.recentProjects.length > 0
-
-                        Repeater {
-                            model: appController.recentProjects
-                            delegate: Rectangle {
-                                required property var modelData
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 92
-                                radius: 13
-                                color: recentMouse.containsMouse ? panelRaised : panel
-                                border.color: recentMouse.containsMouse ? "#51436d" : "#292c36"
-
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.margins: 15
-                                    spacing: 14
-                                    Rectangle {
-                                        width: 48; height: 48; radius: 11
-                                        color: "#292238"
-                                        Text { anchors.centerIn: parent; text: "▶"; color: accentLight; font.pixelSize: 17 }
-                                    }
-                                    ColumnLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 5
-                                        Text { Layout.fillWidth: true; text: modelData.name; color: textMain; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight }
-                                        Text { Layout.fillWidth: true; text: modelData.video; color: textMuted; font.pixelSize: 11; elide: Text.ElideMiddle }
-                                        Text { text: "阶段：" + modelData.stage; color: "#8b91a0"; font.pixelSize: 10 }
-                                    }
-                                }
-                                MouseArea {
-                                    id: recentMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: appController.openProject(modelData.projectFile)
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 84
-                        radius: 14
-                        color: "#12141a"
-                        border.color: "#262933"
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.margins: 18
-                            Text { text: "提示"; color: accentLight; font.pixelSize: 13; font.bold: true }
-                            Text { text: "项目文件、分析结果和粗剪时间线会分别保存，关闭应用后可以随时继续。"; color: textMuted; font.pixelSize: 13; Layout.fillWidth: true }
-                            Text { text: "本地优先"; color: "#a7f3d0"; font.pixelSize: 12 }
-                        }
-                    }
                 }
             }
         }

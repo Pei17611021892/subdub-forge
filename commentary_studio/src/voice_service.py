@@ -10,32 +10,29 @@ from typing import Any
 from .media_service import _resolve_tool
 
 
-def prepare_tts_package(story_json: Path, output_dir: Path) -> dict[str, Any]:
+MIN_TTS_UNIT_DURATION_SEC = 0.6
+
+
+def prepare_tts_srt(story_json: Path, output_dir: Path) -> dict[str, Any]:
     story = json.loads(story_json.read_text(encoding="utf-8"))
     narration = [dict(item) for item in story.get("narration", []) if isinstance(item, dict)]
     if not narration:
         raise ValueError("故事稿中没有英文解说")
     output_dir.mkdir(parents=True, exist_ok=True)
-    text_path = output_dir / "gpt_sovits_input.txt"
     srt_path = output_dir / "gpt_sovits_reference.srt"
-    plain_path = output_dir / "gpt_sovits_plain.txt"
 
-    numbered_lines = []
-    plain_lines = []
     srt_blocks = []
     cursor = 0.0
     subtitle_index = 1
-    for index, item in enumerate(narration, start=1):
+    for item in narration:
         text = str(item.get("text_en", "")).strip()
-        duration = max(0.5, float(item.get("estimated_duration_sec", 0) or 0))
-        numbered_lines.append(f"{index}. {text}")
-        sentences = _split_english_sentences(text)
+        duration = max(MIN_TTS_UNIT_DURATION_SEC, float(item.get("estimated_duration_sec", 0) or 0))
+        sentences = split_gpt_sovits_units(text)
         weights = [max(1, len(re.findall(r"\b[\w'-]+\b", sentence))) for sentence in sentences]
         weight_total = sum(weights)
         sentence_cursor = cursor
         for sentence, weight in zip(sentences, weights):
             sentence_duration = duration * weight / weight_total
-            plain_lines.append(sentence)
             srt_blocks.append(
                 f"{subtitle_index}\n"
                 f"{_srt_time(sentence_cursor)} --> {_srt_time(sentence_cursor + sentence_duration)}\n"
@@ -45,14 +42,9 @@ def prepare_tts_package(story_json: Path, output_dir: Path) -> dict[str, Any]:
             subtitle_index += 1
         cursor += duration
 
-    text_path.write_text("\n".join(numbered_lines) + "\n", encoding="utf-8")
-    plain_path.write_text("\n".join(plain_lines) + "\n", encoding="utf-8")
     srt_path.write_text("\n\n".join(srt_blocks) + "\n", encoding="utf-8")
     return {
-        "text_path": str(text_path),
-        "plain_text_path": str(plain_path),
         "reference_srt_path": str(srt_path),
-        "sentence_count": len(narration),
         "subtitle_count": len(srt_blocks),
         "estimated_duration_sec": round(cursor, 3),
     }
@@ -186,10 +178,41 @@ def _parse_srt_time(value: str) -> float:
     return hours * 3600 + minutes * 60 + seconds + millis / (10 ** len(match.group(4)))
 
 
-def _split_english_sentences(text: str) -> list[str]:
-    sentences = [
-        value.strip()
-        for value in re.split(r"(?<=[.!?])\s+", text.strip())
-        if value.strip()
-    ]
-    return sentences or [text.strip()]
+def split_gpt_sovits_units(text: str) -> list[str]:
+    """Match the punctuation-based sentence splitting used by the TTS workflow."""
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+    punctuation = set(",.!?;:")
+    closing_marks = set("\"'”’)]}")
+    units: list[str] = []
+    start = 0
+    index = 0
+    while index < len(cleaned):
+        char = cleaned[index]
+        if char not in punctuation:
+            index += 1
+            continue
+        previous = cleaned[index - 1] if index > 0 else ""
+        following = cleaned[index + 1] if index + 1 < len(cleaned) else ""
+        if char in ".,:" and previous.isdigit() and following.isdigit():
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(cleaned) and cleaned[end] in punctuation:
+            end += 1
+        while end < len(cleaned) and cleaned[end] in closing_marks:
+            end += 1
+        unit = cleaned[start:end].strip()
+        if unit:
+            units.append(unit)
+        while end < len(cleaned) and cleaned[end].isspace():
+            end += 1
+        start = end
+        index = end
+
+    tail = cleaned[start:].strip()
+    if tail:
+        units.append(tail)
+    return units or [cleaned]
