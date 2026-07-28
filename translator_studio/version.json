@@ -1,7 +1,7 @@
 {
   "name": "声画译匠 · SubDub Forge",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "新增安全的应用更新：自动检查新版、备份并同步程序文件，个人配置、模型和输出保持不变。"
+  "notes": "启动时后台静默检查更新，发现新版时在更新按钮显示提示；增加无 CMD 窗口启动入口。"
 }

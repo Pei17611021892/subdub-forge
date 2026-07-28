@@ -26,6 +26,7 @@
     "translator_studio/version.json",
     "update_manifest.json",
     "version.json",
-    "启动图形界面.bat"
+    "点我启动StoryCut.vbs",
+    "点我启动翻译工具.vbs"
   ]
 }

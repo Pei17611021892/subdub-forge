@@ -1324,12 +1324,13 @@ ApplicationWindow {
 
     component GhostButton: Button {
         id: control
+        property color foreground: "#d4d4d8"
         implicitHeight: 40
         leftPadding: 16
         rightPadding: 16
         contentItem: Text {
             text: control.text
-            color: control.hovered ? textMain : "#d4d4d8"
+            color: control.hovered ? textMain : control.foreground
             font.pixelSize: 13
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
@@ -1492,7 +1493,12 @@ ApplicationWindow {
                         }
                         Item { Layout.fillWidth: true }
                         GhostButton {
-                            text: appController.updateBusy ? "检查中…" : "检查更新"
+                            text: appController.updateBusy
+                                  ? "检查中…"
+                                  : appController.updateAvailable
+                                    ? "●  可更新 v" + appController.remoteVersion
+                                    : "检查更新"
+                            foreground: appController.updateAvailable ? "#86efac" : "#d4d4d8"
                             enabled: !appController.updateBusy
                             onClicked: appController.checkForUpdates()
                         }

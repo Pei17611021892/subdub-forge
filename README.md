@@ -15,17 +15,17 @@ requirements.txt         共用基础依赖
 
 ### Translator Studio
 
-旧的一比一/压缩翻译工具，当前版本 `v1.0.1`。
+旧的一比一/压缩翻译工具，当前版本 `v1.0.2`。
 
-- 启动：双击 `启动图形界面.bat`
+- 启动：双击 `点我启动翻译工具.vbs`
 - 代码与配置：[translator_studio/README.md](translator_studio/README.md)
 - 本地输出：`translator_studio/output/`
 
 ### StoryCut Studio
 
-AI 解说剪辑工具，当前版本 `v0.1.3`，已经完成初版封版。
+AI 解说剪辑工具，当前版本 `v0.1.4`，已经完成初版封版。
 
-- 启动：双击 `启动解说剪辑台.bat`
+- 启动：双击 `点我启动StoryCut.vbs`
 - 代码与配置：[commentary_studio/README.md](commentary_studio/README.md)
 - 本地项目：`commentary_studio/projects/`
 
@@ -60,6 +60,8 @@ Faster-Whisper 模型统一放在 `models/faster-whisper/`，具体参见
 - `commentary_studio/projects/`
 
 两个应用拥有各自的默认配置和用户配置，只有 API 密钥、模型、虚拟环境和 FFmpeg 等大型依赖共享。
+
+两个应用启动约 1 秒后会在后台检查更新；有新版本时，原“检查更新”按钮会显示可更新标识，不会自动弹窗。两个 `.vbs` 均使用 `pythonw.exe`，启动和运行期间不会显示 CMD；依赖缺失时会直接弹窗说明。
 
 根目录的 `version.json` 和 `update_manifest.json` 仅用于兼容旧版 Translator 更新器；
 Translator 当前实际使用的版本与更新清单位于 `translator_studio/`。

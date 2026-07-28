@@ -23,7 +23,7 @@ STYLE_EDITOR = ROOT / "src" / "style_editor.py"
 AUDIO_FIT_EDITOR = ROOT / "src" / "audio_fit_editor.py"
 TTS_AUDIO_EDITOR = ROOT / "src" / "tts_audio_editor.py"
 TRANSLATION_API_EDITOR = ROOT / "src" / "translation_api_editor.py"
-LAUNCHER_BAT = REPOSITORY_ROOT / "启动图形界面.bat"
+LAUNCHER_VBS = REPOSITORY_ROOT / "点我启动翻译工具.vbs"
 OUTPUT = ROOT / "output"
 INTERNAL = OUTPUT / "_internal"
 VERSION_FILE = ROOT / "version.json"
@@ -56,10 +56,14 @@ class Launcher(tk.Tk):
         self.running = False
         self.worker: threading.Thread | None = None
         self.status_labels: dict[str, ttk.Label] = {}
+        self.update_button: ttk.Button | None = None
+        self._update_check_running = False
+        self._cached_update_result: tuple[dict, dict, bool] | None = None
 
         self._build_ui()
         self.refresh_status()
         self.after(100, self._drain_log_queue)
+        self.after(1200, self._start_silent_update_check)
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=12)
@@ -122,6 +126,8 @@ class Launcher(tk.Tk):
             b = ttk.Button(btn_frame, text=text, command=cmd)
             b.grid(row=i // 4, column=i % 4, padx=5, pady=5, sticky=tk.EW)
             self.buttons.append(b)
+            if text == "检查应用更新":
+                self.update_button = b
         for c in range(4):
             btn_frame.columnconfigure(c, weight=1)
 
@@ -370,20 +376,50 @@ class Launcher(tk.Tk):
         self.log_text.delete("1.0", tk.END)
 
     def check_app_update(self) -> None:
-        self._start_worker(self._worker_check_update)
+        if self._cached_update_result and self._cached_update_result[2]:
+            local, remote, newer = self._cached_update_result
+            self._show_update_result(local, remote, newer)
+            return
+        self._start_worker(lambda: self._worker_check_update(silent=False))
 
-    def _worker_check_update(self) -> None:
+    def _start_silent_update_check(self) -> None:
+        if self._update_check_running:
+            return
+        self._update_check_running = True
+        threading.Thread(
+            target=lambda: self._worker_check_update(silent=True),
+            name="translator-update-check",
+            daemon=True,
+        ).start()
+
+    def _worker_check_update(self, silent: bool) -> None:
         try:
-            self._log("正在连接 GitHub 检查应用更新……")
+            if not silent:
+                self._log("正在连接 GitHub 检查应用更新……")
             local, remote, newer = check_for_update()
-            self._log(f"本地版本：v{local['version']}；GitHub 版本：v{remote['version']}")
-            self.after(200, lambda: self._show_update_result(local, remote, newer))
+            self._cached_update_result = (local, remote, newer)
+            if silent:
+                self.after(0, lambda: self._apply_silent_update_result(remote, newer))
+            else:
+                self._log(f"本地版本：v{local['version']}；GitHub 版本：v{remote['version']}")
+                self.after(200, lambda: self._show_update_result(local, remote, newer))
         except Exception as exc:
             error = str(exc)
-            self._log(f"检查更新失败：{error}")
-            self.after(200, lambda: messagebox.showerror("检查更新失败", error))
+            if not silent:
+                self._log(f"检查更新失败：{error}")
+                self.after(200, lambda: messagebox.showerror("检查更新失败", error))
         finally:
-            self.log_queue.put("__DONE__")
+            self._update_check_running = False
+            if not silent:
+                self.log_queue.put("__DONE__")
+
+    def _apply_silent_update_result(self, remote: dict, newer: bool) -> None:
+        if self.update_button is None:
+            return
+        if newer:
+            self.update_button.configure(text=f"↑ 可更新 v{remote.get('version', '')}")
+        else:
+            self.update_button.configure(text="检查应用更新")
 
     def _show_update_result(self, local: dict, remote: dict, newer: bool) -> None:
         if not newer:
@@ -418,10 +454,10 @@ class Launcher(tk.Tk):
         if not restart:
             return
         try:
-            os.startfile(str(LAUNCHER_BAT))  # type: ignore[attr-defined]
+            os.startfile(str(LAUNCHER_VBS))  # type: ignore[attr-defined]
             self.destroy()
         except Exception as exc:
-            messagebox.showerror("无法自动重启", f"请手动关闭并双击“启动图形界面.bat”。\n\n{exc}")
+            messagebox.showerror("无法自动重启", f"请手动关闭并双击“点我启动翻译工具.vbs”。\n\n{exc}")
 
     def open_style_editor(self) -> None:
         try:

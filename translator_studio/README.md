@@ -1,6 +1,6 @@
 # 声画译匠 · SubDub Forge
 
-当前版本：`v1.0.1`
+当前版本：`v1.0.2`
 
 这是一个面向 Windows 的视频翻译与二创辅助工具。它可以识别视频中的中文语音、翻译并压缩为英文字幕、接收外部 TTS 生成的英文配音和同步字幕，最后完成原字幕擦除、英文字幕烧录、音画节奏适配和成片导出。
 
@@ -116,12 +116,12 @@ asr:
 双击项目根目录中的：
 
 ```text
-启动图形界面.bat
+点我启动翻译工具.vbs
 ```
 
-这是项目唯一保留的 BAT 入口。旧的分步 BAT、命令行启动 BAT和独立样式编辑 BAT均已移除，对应功能都已集成到主界面。
+该入口使用 `pythonw.exe`，启动和运行期间不会显示 CMD；依赖缺失时会直接弹窗说明。
 
-如果双击后提示找不到 `python`，需要安装 Python并加入 PATH，或者修改 BAT 中的 Python 路径。
+如果启动器提示找不到项目虚拟环境，请先在仓库根目录创建 `venv` 并安装依赖。
 
 ## 三、选择和更换视频
 
@@ -449,7 +449,8 @@ output/_internal/
 
 ```text
 video_translate_auto/
-  启动图形界面.bat              根目录快捷入口
+  点我启动翻译工具.vbs          无 CMD 的启动入口
+  点我启动StoryCut.vbs          StoryCut 无 CMD 启动入口
   LICENSE                       MIT 开源许可证
   requirements.txt              Python 依赖
   MODEL_DOWNLOAD.md             Whisper 模型与离线加载说明
@@ -485,6 +486,8 @@ video_translate_auto/
 更新器只同步 `translator_studio/update_manifest.json` 中列出的旧工具程序文件，不会修改
 StoryCut 或仓库根目录。共享的 `.env`、`models/`、`venv/` 以及旧工具自己的
 `config.user.yaml`、`output/` 均不会被更新器修改或删除。
+
+程序启动约 1 秒后也会在后台静默检查一次；发现新版时，原更新按钮会变为“↑ 可更新 v版本号”，不会自动弹窗。
 
 ## 十五、GitHub 发布注意事项
 

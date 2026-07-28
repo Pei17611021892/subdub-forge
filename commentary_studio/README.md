@@ -1,4 +1,4 @@
-# StoryCut Studio v0.1.3
+# StoryCut Studio v0.1.4
 
 StoryCut Studio 是独立的 AI 解说剪辑工具，用于把较长的中文原片整理成适合 YouTube Shorts 等平台发布的精简英文解说视频。
 
@@ -9,6 +9,8 @@ StoryCut Studio 是独立的 AI 解说剪辑工具，用于把较长的中文原
 v0.1.2 将缺少 API 时的次要选项明确为“仅做本地预处理”，用于提前完成语音转写、场景切分和关键帧提取等耗时任务；默认引导用户在应用内快速设置 API Key 和可选接口地址，保存后立即继续原操作。同时修复版本更新弹窗的 QML 高度循环警告。
 
 v0.1.3 优化了四步流程首页和故事生成质量，统一步骤卡片与完成状态，改进 GPT-SoVITS 标点断句和 SRT 导出，并增加带确认删除的“最近项目”弹窗。
+
+v0.1.4 增加启动时静默更新检查和可更新标识，并提供基于 `pythonw.exe` 的无 CMD 启动入口。
 
 首页顶部的“最近项目”会弹出可滚动列表，可直接继续已有项目；列表外的项目仍可手动选择其 `project.json` 打开。删除项目需要二次确认，会清理该项目目录内的分析结果、配音、预览、导出等文件，但不会删除目录外的原始视频。
 
@@ -69,14 +71,18 @@ venv\Scripts\python.exe -m pip install -r commentary_studio/requirements.txt
 双击仓库根目录：
 
 ```text
-启动解说剪辑台.bat
+点我启动StoryCut.vbs
 ```
+
+该入口使用 `pythonw.exe`，启动和运行期间不会显示 CMD；依赖缺失时会直接弹窗说明。
 
 也可以运行：
 
 ```powershell
 venv\Scripts\python.exe commentary_studio/main.py
 ```
+
+程序启动约 1 秒后会在后台静默检查更新；有新版时，首页按钮会显示绿色“● 可更新 v版本号”，不会自动弹出更新窗口。
 
 ## 配置与本地数据
 

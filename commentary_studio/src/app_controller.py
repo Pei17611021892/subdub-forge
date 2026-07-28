@@ -114,14 +114,15 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.1.3"))
+            self._app_version = str(read_version().get("version", "0.1.4"))
         except Exception:
-            self._app_version = "0.1.3"
+            self._app_version = "0.1.4"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
         self._update_status = f"当前版本 v{self._app_version}"
         self._remote_update: dict[str, object] = {}
+        self._show_update_dialog_after_check = True
         self._mediaReady.connect(self._apply_media_result)
         self._previewReady.connect(self._apply_preview_result)
         self._subtitleEffectPreviewReady.connect(self._apply_subtitle_effect_preview)
@@ -137,6 +138,7 @@ class AppController(QObject):
         self._analysis_clock.setInterval(1000)
         self._analysis_clock.timeout.connect(self._tick_analysis_clock)
         self._refresh_recent_projects()
+        QTimer.singleShot(1200, self.checkForUpdatesSilently)
 
     @Property(str, notify=projectChanged)
     def projectName(self) -> str:
@@ -446,13 +448,22 @@ class AppController(QObject):
 
     @Slot()
     def checkForUpdates(self) -> None:
+        self._start_update_check(show_dialog=True)
+
+    @Slot()
+    def checkForUpdatesSilently(self) -> None:
+        self._start_update_check(show_dialog=False)
+
+    def _start_update_check(self, show_dialog: bool) -> None:
         if self._update_busy:
             return
+        self._show_update_dialog_after_check = show_dialog
         self._update_busy = True
         self._update_installed = False
         self._update_status = "正在连接 GitHub 检查 StoryCut 更新…"
         self.updateChanged.emit()
-        self.updateDialogRequested.emit()
+        if show_dialog:
+            self.updateDialogRequested.emit()
 
         def worker() -> None:
             try:
@@ -1460,7 +1471,8 @@ class AppController(QObject):
             self._remote_update = dict(remote)
         self._update_status = message
         self.updateChanged.emit()
-        self.updateDialogRequested.emit()
+        if self._show_update_dialog_after_check:
+            self.updateDialogRequested.emit()
 
     @Slot(bool, str)
     def _apply_update_install(self, success: bool, message: str) -> None:
