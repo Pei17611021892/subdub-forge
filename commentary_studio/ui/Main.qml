@@ -1559,7 +1559,20 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 spacing: 10
-                                Text { text: appController.projectName; color: textMain; font.pixelSize: 21; font.bold: true }
+                                Text {
+                                    id: importedVideoTitle
+                                    Layout.fillWidth: true
+                                    text: appController.projectName
+                                    color: textMain
+                                    font.pixelSize: 21
+                                    font.bold: true
+                                    wrapMode: Text.WrapAnywhere
+                                    maximumLineCount: 2
+                                    elide: Text.ElideRight
+                                    ToolTip.visible: importedVideoTitleHover.hovered && appController.videoPath !== ""
+                                    ToolTip.text: appController.videoPath
+                                    HoverHandler { id: importedVideoTitleHover }
+                                }
                                 Text {
                                     Layout.fillWidth: true
                                     text: appController.videoPath || "导入后，程序会识别语音、检测场景，并把长视频整理成可用于解说的事件列表。"
@@ -1706,6 +1719,46 @@ ApplicationWindow {
                                     text: "预计用时按低配电脑 CPU 算力估算，准确时间请以实际运行进度为准。"
                                     color: "#717784"
                                     font.pixelSize: 10
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: appController.modelDownloadHint
+                                    color: "#717784"
+                                    font.pixelSize: 10
+                                    wrapMode: Text.WordWrap
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    visible: appController.modelDownloadVisible
+                                    spacing: 5
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: appController.modelDownloadStatus
+                                            color: accentLight
+                                            font.pixelSize: 11
+                                            elide: Text.ElideRight
+                                        }
+                                        Text {
+                                            text: Math.round(appController.modelDownloadProgress * 100) + "%"
+                                            color: accentLight
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                        }
+                                    }
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 6
+                                        radius: 3
+                                        color: "#30333d"
+                                        Rectangle {
+                                            width: parent.width * appController.modelDownloadProgress
+                                            height: parent.height
+                                            radius: 3
+                                            color: "#42b883"
+                                        }
+                                    }
                                 }
                                 Rectangle {
                                     Layout.fillWidth: true

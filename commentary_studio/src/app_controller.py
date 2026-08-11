@@ -54,6 +54,7 @@ class AppController(QObject):
     _previewReady = Signal(str, str, int, float)
     _subtitleEffectPreviewReady = Signal(str, int)
     _analysisProgressReady = Signal(float, str, float, int)
+    _modelDownloadProgressReady = Signal(float, str, bool, int)
     _analysisFinished = Signal(bool, str, int)
     _storyProgressReady = Signal(float, str, int)
     _storyFinished = Signal(bool, str, object, int)
@@ -89,6 +90,9 @@ class AppController(QObject):
         self._analysis_eta_seconds = -1.0
         self._analysis_eta_updated_at = 0.0
         self._analysis_estimated_total = -1.0
+        self._model_download_progress = 0.0
+        self._model_download_status = ""
+        self._model_download_visible = False
         self._events: list[dict[str, object]] = []
         self._story_job_id = 0
         self._story_busy = False
@@ -114,9 +118,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.1.4"))
+            self._app_version = str(read_version().get("version", "0.1.5"))
         except Exception:
-            self._app_version = "0.1.4"
+            self._app_version = "0.1.5"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -127,6 +131,7 @@ class AppController(QObject):
         self._previewReady.connect(self._apply_preview_result)
         self._subtitleEffectPreviewReady.connect(self._apply_subtitle_effect_preview)
         self._analysisProgressReady.connect(self._apply_analysis_progress)
+        self._modelDownloadProgressReady.connect(self._apply_model_download_progress)
         self._analysisFinished.connect(self._apply_analysis_finished)
         self._storyProgressReady.connect(self._apply_story_progress)
         self._storyFinished.connect(self._apply_story_finished)
@@ -238,6 +243,26 @@ class AppController(QObject):
         if self._analysis_estimated_total < 0:
             return "预计总用时：计算中"
         return f"预计总用时约 {self._format_time(self._analysis_estimated_total)}"
+
+    @Property(float, notify=analysisChanged)
+    def modelDownloadProgress(self) -> float:
+        return self._model_download_progress
+
+    @Property(str, notify=analysisChanged)
+    def modelDownloadStatus(self) -> str:
+        return self._model_download_status
+
+    @Property(bool, notify=analysisChanged)
+    def modelDownloadVisible(self) -> bool:
+        return self._model_download_visible
+
+    @Property(str, notify=analysisChanged)
+    def modelDownloadHint(self) -> str:
+        analysis = self._config.get("analysis", {})
+        model_name = str(analysis.get("asr_model", "large-v3"))
+        if bool(analysis.get("auto_download_model", True)):
+            return f"本地缺少 {model_name} 时会自动下载；下载完成后自动继续，无需重新点击。"
+        return f"模型自动下载已关闭；开始前请把 {model_name} 放入 models/faster-whisper。"
 
     @Property("QVariantList", notify=eventsChanged)
     def events(self) -> list[dict[str, object]]:
@@ -700,6 +725,9 @@ class AppController(QObject):
         self._analysis_status = "准备理解原片…"
         self._analysis_started_at = time.monotonic()
         self._analysis_estimated_total = self._estimate_analysis_total(self.durationSeconds)
+        self._model_download_progress = 0.0
+        self._model_download_status = ""
+        self._model_download_visible = False
         self._analysis_eta_seconds = self._analysis_estimated_total
         self._analysis_eta_updated_at = self._analysis_started_at
         self._analysis_clock.start()
@@ -739,6 +767,9 @@ class AppController(QObject):
                         eta += self.durationSeconds * 0.12
                     report(0.10 + value * 0.50, status, eta)
 
+                def model_download_report(value: float, status: str, visible: bool) -> None:
+                    self._modelDownloadProgressReady.emit(value, status, visible, job_id)
+
                 transcribe_analysis_audio(
                     audio,
                     analysis_dir / "transcript.json",
@@ -747,6 +778,7 @@ class AppController(QObject):
                     self._config,
                     self._root,
                     transcribe_report,
+                    model_download_report,
                 )
                 report(0.62, "语音转录完成，开始检测场景变化…")
                 scene_started = time.monotonic()
@@ -1296,6 +1328,9 @@ class AppController(QObject):
         self._analysis_started_at = 0.0
         self._analysis_eta_seconds = -1.0
         self._analysis_estimated_total = -1.0
+        self._model_download_progress = 0.0
+        self._model_download_status = ""
+        self._model_download_visible = False
         self._events = []
         self._story_progress = 0.0
         self._story_status = "等待组织故事"
@@ -1400,6 +1435,17 @@ class AppController(QObject):
             self._analysis_eta_updated_at = time.monotonic()
         self.analysisChanged.emit()
 
+    @Slot(float, str, bool, int)
+    def _apply_model_download_progress(
+        self, value: float, status: str, visible: bool, job_id: int
+    ) -> None:
+        if job_id != self._analysis_job_id:
+            return
+        self._model_download_progress = min(max(value, 0.0), 1.0)
+        self._model_download_status = status
+        self._model_download_visible = visible
+        self.analysisChanged.emit()
+
     @Slot(bool, str, int)
     def _apply_analysis_finished(self, success: bool, message: str, job_id: int) -> None:
         if job_id != self._analysis_job_id:
@@ -1411,6 +1457,7 @@ class AppController(QObject):
             self._analysis_eta_updated_at = time.monotonic()
         self._analysis_progress = 1.0 if success else self._analysis_progress
         self._analysis_status = message if success else f"分析失败：{message}"
+        self._model_download_visible = False
         self._notice = self._analysis_status
         if success:
             self._refresh_recent_projects()

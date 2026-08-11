@@ -23,7 +23,7 @@ requirements.txt         共用基础依赖
 
 ### StoryCut Studio
 
-AI 解说剪辑工具，当前版本 `v0.1.4`，已经完成初版封版。
+AI 解说剪辑工具，当前版本 `v0.1.5`，已经完成初版封版。
 
 - 启动：双击 `点我启动StoryCut.vbs`
 - 代码与配置：[commentary_studio/README.md](commentary_studio/README.md)

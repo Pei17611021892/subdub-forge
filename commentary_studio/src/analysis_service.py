@@ -11,6 +11,7 @@ from .media_service import _resolve_tool
 
 
 ProgressCallback = Callable[[float, str], None]
+ModelDownloadCallback = Callable[[float, str, bool], None]
 
 
 def extract_analysis_audio(
@@ -52,6 +53,7 @@ def transcribe_analysis_audio(
     config: dict[str, Any],
     app_root: Path,
     progress: ProgressCallback,
+    model_download_progress: ModelDownloadCallback | None = None,
 ) -> dict[str, Any]:
     from faster_whisper import WhisperModel
 
@@ -62,7 +64,32 @@ def transcribe_analysis_audio(
     if not model_dir.is_absolute():
         model_dir = (app_root / model_dir).resolve()
     model_source = _find_model_source(model_dir, model_name)
-    local_only = bool(analysis.get("local_files_only", True))
+    auto_download = bool(analysis.get("auto_download_model", True))
+    if model_source is None:
+        if not auto_download:
+            raise FileNotFoundError(
+                f"找不到本地 Faster-Whisper 模型：{model_name}（{model_dir}）。"
+                "已关闭自动下载，请放入完整模型，或在 config.user.yaml 中设置 "
+                "analysis.auto_download_model: true。"
+            )
+        if model_download_progress:
+            model_download_progress(
+                0.0,
+                f"未检测到 {model_name}，正在准备自动下载；完成后会自动继续",
+                True,
+            )
+        try:
+            model_source = _download_model(
+                model_dir,
+                model_name,
+                model_download_progress,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Faster-Whisper 模型 {model_name} 自动下载失败：{exc}。"
+                "请检查网络后重新点击，已下载的完整文件会被复用；也可以手动放入模型目录。"
+            ) from exc
+    local_only = True
     device = _select_device(str(analysis.get("device", "auto")))
     compute_type = str(
         analysis.get("cpu_compute_type", "int8")
@@ -116,6 +143,66 @@ def transcribe_analysis_audio(
     transcript_srt.write_text(_segments_to_srt(segments), encoding="utf-8")
     progress(1.0, f"转录完成，共 {len(segments)} 段字幕")
     return payload
+
+
+def _download_model(
+    model_dir: Path,
+    model_name: str,
+    progress: ModelDownloadCallback | None,
+) -> str:
+    """Download one Faster-Whisper model and report completed-file progress."""
+    from faster_whisper.utils import _MODELS
+    from huggingface_hub import snapshot_download
+    from tqdm.auto import tqdm
+
+    repo_id = model_name if "/" in model_name else _MODELS.get(model_name)
+    if not repo_id:
+        raise ValueError(f"不支持的 Faster-Whisper 模型名称：{model_name}")
+
+    target_dir = model_dir / model_name.replace("/", "--")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    class DownloadProgressBar(tqdm):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["disable"] = False
+            super().__init__(*args, **kwargs)
+            self._report()
+
+        def update(self, n: int | float = 1) -> bool | None:
+            changed = super().update(n)
+            self._report()
+            return changed
+
+        def _report(self) -> None:
+            if not progress:
+                return
+            total = float(self.total or 0)
+            value = min(0.99, float(self.n) / total) if total > 0 else 0.0
+            detail = f"（{int(self.n)}/{int(total)} 个文件）" if total > 0 else ""
+            progress(value, f"正在下载 {model_name} {detail}", True)
+
+        def display(self, msg: str | None = None, pos: int | None = None) -> None:
+            # The GUI owns progress presentation; do not write tqdm output to a hidden console.
+            return
+
+    downloaded = snapshot_download(
+        repo_id,
+        local_dir=str(target_dir),
+        allow_patterns=[
+            "config.json",
+            "preprocessor_config.json",
+            "model.bin",
+            "tokenizer.json",
+            "vocabulary.*",
+        ],
+        tqdm_class=DownloadProgressBar,
+    )
+    source = _find_model_source(Path(downloaded), model_name)
+    if source is None:
+        raise RuntimeError("下载已结束，但模型文件不完整（缺少 model.bin 或 config.json）")
+    if progress:
+        progress(1.0, f"{model_name} 下载完成，正在自动继续识别", True)
+    return source
 
 
 def detect_scenes_and_keyframes(
@@ -291,7 +378,7 @@ def build_timeline_events(
     return payload
 
 
-def _find_model_source(model_dir: Path, model_name: str) -> str:
+def _find_model_source(model_dir: Path, model_name: str) -> str | None:
     manual_candidates = (
         model_dir,
         model_dir / model_name,
@@ -306,7 +393,7 @@ def _find_model_source(model_dir: Path, model_name: str) -> str:
         for candidate in candidates:
             if (candidate / "model.bin").exists() and (candidate / "config.json").exists():
                 return str(candidate)
-    raise FileNotFoundError(f"找不到本地 Faster-Whisper 模型：{model_name}（{model_dir}）")
+    return None
 
 
 def _select_device(configured: str) -> str:

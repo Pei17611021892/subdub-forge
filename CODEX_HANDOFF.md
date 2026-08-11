@@ -40,6 +40,8 @@ StoryCut v0.1.3 优化四步流程首页、故事生成口吻、GPT-SoVITS 标�
 
 StoryCut v0.1.4 与 Translator v1.0.2 增加启动时静默更新检查和无 CMD 的 VBS 启动入口；旧 BAT 已从仓库删除。历史章节中的 BAT 记录仅作为早期开发背景。
 
+StoryCut v0.1.5 增加缺少 Faster-Whisper 模型时的默认自动下载、独立 GUI 下载进度和下载后自动续跑，并修复超长视频名称撑开首页布局。可通过 `analysis.auto_download_model` 关闭自动下载。
+
 2026-07-28 首页项目入口完成整理：
 
 - 顶部“打开项目”改为“最近项目”，点击后弹出可滚动的最近项目列表。

@@ -21,6 +21,7 @@ story:
 analysis:
   asr_model: large-v3
   model_dir: ../models/faster-whisper
+  auto_download_model: true
   local_files_only: true
   language: zh
   device: auto

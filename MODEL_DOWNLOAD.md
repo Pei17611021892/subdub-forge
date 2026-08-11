@@ -1,6 +1,6 @@
 # Faster-Whisper 模型与离线加载说明
 
-本项目默认使用 Faster-Whisper `large-v3` 识别中文语音，也可在第三步选择用同一套识别引擎生成英文同步字幕。
+两套工具默认使用 Faster-Whisper `large-v3` 识别语音。StoryCut 从 v0.1.5 起在缺少模型时默认自动下载，并在界面显示下载进度；下载完成后会自动继续原片分析。
 
 ## 当前默认配置
 
@@ -21,6 +21,18 @@ asr:
 - `compute_type: float16`：CUDA 模式使用半精度；
 - `cpu_compute_type: int8`：CPU 模式使用 int8，减少内存并提高速度；
 - `cpu_model`：GPU 不可用时使用的模型，当前仍使用已经下载好的 `large-v3`。
+
+StoryCut 使用独立的 `analysis` 配置，默认值为：
+
+```yaml
+analysis:
+  asr_model: large-v3
+  model_dir: ../models/faster-whisper
+  auto_download_model: true
+  local_files_only: true
+```
+
+其中 `local_files_only` 用于已经存在的模型；如果模型缺失且 `auto_download_model: true`，StoryCut 会联网补齐模型。设置为 `false` 可禁止自动下载。
 
 ## 模型目录
 
@@ -118,6 +130,15 @@ vocabulary.json 或 vocabulary.txt
 
 ## 允许自动下载
 
+StoryCut 已默认开启，无需改配置。首次下载时会显示独立进度条，完成后自动进入语音识别，无需重新点击“开始理解原片”。如需禁止联网，可在 `commentary_studio/config.user.yaml` 中写入：
+
+```yaml
+analysis:
+  auto_download_model: false
+```
+
+旧翻译工具如需允许自动下载，仍可在其本机配置中覆盖：
+
 如果确实希望程序联网下载，可以在本机 `config.user.yaml` 中覆盖：
 
 ```yaml
@@ -138,7 +159,7 @@ medium         Systran/faster-whisper-medium          精度和速度折中
 small          Systran/faster-whisper-small           CPU 更轻量，需要单独下载
 ```
 
-项目不会从 `large-v3` 自动生成 `small` 模型。配置为哪个模型，就必须存在该模型的完整文件，或者允许联网下载。
+项目不会从 `large-v3` 自动生成 `small` 模型。配置为哪个模型，就会检查或下载哪个模型。
 
 ## GPU 与驱动
 
