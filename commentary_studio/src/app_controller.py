@@ -9,6 +9,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from PySide6.QtCore import QObject, Property, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
@@ -118,9 +119,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.1.5"))
+            self._app_version = str(read_version().get("version", "0.1.6"))
         except Exception:
-            self._app_version = "0.1.5"
+            self._app_version = "0.1.6"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -395,6 +396,19 @@ class AppController(QObject):
     def apiBaseUrl(self) -> str:
         return str(api_configuration(self._config, self._root, "story")["base_url"])
 
+    @Property(str, notify=noticeChanged)
+    def apiKey(self) -> str:
+        return str(api_configuration(self._config, self._root, "story")["api_key"])
+
+    @Property(str, notify=noticeChanged)
+    def apiKeyMasked(self) -> str:
+        key = self.apiKey
+        if not key:
+            return "未配置"
+        if len(key) <= 8:
+            return "••••••••"
+        return f"{key[:3]}••••••{key[-4:]}"
+
     @Property(str, notify=updateChanged)
     def appVersion(self) -> str:
         return self._app_version
@@ -447,6 +461,12 @@ class AppController(QObject):
             self._notice = "API 配置不能包含换行符"
             self.noticeChanged.emit()
             return False
+        try:
+            cleaned_url = self._normalize_api_base_url(cleaned_url)
+        except ValueError as exc:
+            self._notice = str(exc)
+            self.noticeChanged.emit()
+            return False
 
         env_file = self._root.parent / ".env"
         try:
@@ -463,7 +483,7 @@ class AppController(QObject):
                 os.environ["OPENAI_BASE_URL"] = cleaned_url
             else:
                 os.environ.pop("OPENAI_BASE_URL", None)
-            self._notice = "API 配置已保存，可以继续处理"
+            self._notice = "API 配置已保存并立即生效"
             self.noticeChanged.emit()
             return True
         except Exception as exc:
@@ -1765,6 +1785,22 @@ class AppController(QObject):
         temporary = env_file.with_name(env_file.name + ".update_tmp")
         temporary.write_text("\n".join(updated).rstrip() + "\n", encoding="utf-8")
         os.replace(temporary, env_file)
+
+    @staticmethod
+    def _normalize_api_base_url(value: str) -> str:
+        if not value:
+            return ""
+        candidate = value.strip().rstrip("/")
+        lowered = candidate.lower()
+        suffix = "/chat/completions"
+        if lowered.endswith(suffix):
+            candidate = candidate[: -len(suffix)].rstrip("/")
+        parsed = urlsplit(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("接口地址格式不正确：应填写以 http:// 或 https:// 开头的 API 根地址")
+        if parsed.query or parsed.fragment:
+            raise ValueError("接口地址不能包含查询参数或 # 片段，请填写 API 根地址")
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
 
     def _estimate_analysis_total(self, duration: float) -> float:
         samples: list[tuple[float, float]] = []

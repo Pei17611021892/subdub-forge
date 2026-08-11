@@ -42,6 +42,8 @@ StoryCut v0.1.4 与 Translator v1.0.2 增加启动时静默更新检查和无 CM
 
 StoryCut v0.1.5 增加缺少 Faster-Whisper 模型时的默认自动下载、独立 GUI 下载进度和下载后自动续跑，并修复超长视频名称撑开首页布局。可通过 `analysis.auto_download_model` 关闭自动下载。
 
+StoryCut v0.1.6 在首页增加常驻 API 设置，可直接管理共享 `.env` 中的 API Key 和根地址；Key 默认遮盖，配置保存后立即生效。视觉描述和故事生成遇到 405 时会提示检查 `/chat/completions` 路由、服务商地址及视觉能力。
+
 2026-07-28 首页项目入口完成整理：
 
 - 顶部“打开项目”改为“最近项目”，点击后弹出可滚动的最近项目列表。

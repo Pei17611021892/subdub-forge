@@ -648,8 +648,8 @@ ApplicationWindow {
 
     Dialog {
         id: apiKeySetupDialog
-        property string requestedAction: "understanding"
-        width: 520
+        property string requestedAction: "settings"
+        width: 560
         anchors.centerIn: parent
         modal: true
         padding: 22
@@ -658,11 +658,10 @@ ApplicationWindow {
         function saveAndContinue() {
             if (!appController.saveApiConfiguration(apiKeyInput.text, apiBaseUrlInput.text))
                 return
-            apiKeyInput.text = ""
             close()
             if (requestedAction === "understanding")
                 appController.startUnderstanding()
-            else
+            else if (requestedAction === "story")
                 appController.generateStory(storyTargetDuration)
         }
 
@@ -675,23 +674,48 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 12
             Text {
-                text: "快速设置 API"
+                text: apiKeySetupDialog.requestedAction === "settings" ? "API 设置" : "快速设置 API"
                 color: textMain
                 font.pixelSize: 19
                 font.bold: true
             }
             Text {
                 Layout.fillWidth: true
-                text: "配置会保存到仓库根目录的 .env，并立即在当前应用中生效。该文件不会提交到 Git。"
+                text: "在这里直接管理 API Key 和接口地址。保存后立即生效，无需寻找或手动编辑 .env。"
                 color: textMuted
                 font.pixelSize: 12
                 wrapMode: Text.WordWrap
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 58
+                radius: 9
+                color: appController.apiConfigured ? "#172b22" : "#2a2023"
+                border.color: appController.apiConfigured ? "#326b4d" : "#604047"
+                Column {
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 4
+                    Text {
+                        text: appController.apiConfigured ? "● 当前已配置  " + appController.apiKeyMasked : "● 当前未配置 API Key"
+                        color: appController.apiConfigured ? "#8ee3b4" : "#f0a6b2"
+                        font.pixelSize: 11
+                        font.bold: true
+                    }
+                    Text {
+                        width: parent.width
+                        text: appController.apiBaseUrl || "OpenAI 官方接口（未填写自定义地址）"
+                        color: "#aeb4c0"
+                        font.pixelSize: 10
+                        elide: Text.ElideMiddle
+                    }
+                }
             }
             Text { text: "API Key"; color: "#d4d4d8"; font.pixelSize: 12 }
             TextField {
                 id: apiKeyInput
                 Layout.fillWidth: true
-                placeholderText: "粘贴 OPENAI_API_KEY"
+                placeholderText: "粘贴 API Key"
                 echoMode: showApiKey.checked ? TextInput.Normal : TextInput.Password
                 selectByMouse: true
                 color: textMain
@@ -731,6 +755,13 @@ ApplicationWindow {
                     border.color: apiBaseUrlInput.activeFocus ? accent : "#3a3f4c"
                 }
             }
+            Text {
+                Layout.fillWidth: true
+                text: "填写 API 根地址，例如 https://api.openai.com/v1。不要填写服务商网页、管理后台或完整的 /chat/completions 地址；若误填完整地址，保存时会自动修正。"
+                color: "#858b98"
+                font.pixelSize: 10
+                wrapMode: Text.WordWrap
+            }
             RowLayout {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
@@ -739,7 +770,7 @@ ApplicationWindow {
                     onClicked: apiKeySetupDialog.close()
                 }
                 FlatButton {
-                    text: "保存并继续"
+                    text: apiKeySetupDialog.requestedAction === "settings" ? "保存配置" : "保存并继续"
                     enabled: apiKeyInput.text.trim() !== ""
                     onClicked: apiKeySetupDialog.saveAndContinue()
                 }
@@ -748,8 +779,11 @@ ApplicationWindow {
 
         onOpened: {
             apiBaseUrlInput.text = appController.apiBaseUrl
+            apiKeyInput.text = appController.apiKey
+            showApiKey.checked = false
             apiKeyInput.forceActiveFocus()
         }
+        onClosed: apiKeyInput.text = ""
     }
 
     Dialog {
@@ -1501,6 +1535,14 @@ ApplicationWindow {
                             foreground: appController.updateAvailable ? "#86efac" : "#d4d4d8"
                             enabled: !appController.updateBusy
                             onClicked: appController.checkForUpdates()
+                        }
+                        GhostButton {
+                            text: appController.apiConfigured ? "●  API 已配置" : "API 设置"
+                            foreground: appController.apiConfigured ? "#86efac" : "#d4d4d8"
+                            onClicked: {
+                                apiKeySetupDialog.requestedAction = "settings"
+                                apiKeySetupDialog.open()
+                            }
                         }
                         GhostButton { text: "最近项目"; onClicked: recentProjectsDialog.open() }
                         FlatButton { text: "+  创建项目"; onClicked: videoDialog.open() }

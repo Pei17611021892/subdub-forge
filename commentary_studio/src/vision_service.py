@@ -16,7 +16,7 @@ def api_configuration(config: dict[str, Any], app_root: Path, section: str = "vi
     _load_env_file(app_root, str(config.get("shared", {}).get("env_file", "../.env")))
     section_config = config.get(section, {})
     api_key = str(os.getenv("OPENAI_API_KEY", "")).strip()
-    base_url = str(section_config.get("base_url") or os.getenv("OPENAI_BASE_URL", "")).strip()
+    base_url = str(os.getenv("OPENAI_BASE_URL", "") or section_config.get("base_url", "")).strip()
     return {
         "configured": bool(api_key),
         "api_key": api_key,
@@ -74,11 +74,14 @@ def describe_event_keyframes(
                 }
             )
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": content}],
-            temperature=0.1,
-        )
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": content}],
+                temperature=0.1,
+            )
+        except Exception as exc:
+            raise friendly_api_error(exc, base_url, "视觉描述") from exc
         text = str(response.choices[0].message.content or "")
         descriptions = _parse_json_array(text)
         by_id = {int(item.get("id", 0)): str(item.get("description", "")).strip() for item in descriptions}
@@ -94,6 +97,20 @@ def describe_event_keyframes(
     return payload
 
 
+def friendly_api_error(exc: Exception, base_url: str | None, operation: str) -> RuntimeError:
+    message = str(exc).strip()
+    status_code = getattr(exc, "status_code", None)
+    if status_code == 405 or "405 Not Allowed" in message or "405 Method Not Allowed" in message:
+        endpoint = base_url or "OpenAI 官方接口"
+        return RuntimeError(
+            f"{operation}接口返回 405：当前地址“{endpoint}”拼接出的 /chat/completions 路由不接受 POST 请求。"
+            "可能是地址并非 OpenAI 兼容 API 根地址、服务商路由发生变化，或当前渠道不支持视觉对话。"
+            "请打开首页“API 设置”核对服务商提供的根地址（通常以 /v1 结尾）；"
+            "不要填写服务商网页、管理后台或以 /chat/completions 结尾的完整请求地址。"
+        )
+    return RuntimeError(f"{operation}接口请求失败：{message or type(exc).__name__}")
+
+
 def _load_env_file(app_root: Path, configured: str) -> None:
     path = Path(configured)
     if not path.is_absolute():
@@ -105,7 +122,9 @@ def _load_env_file(app_root: Path, configured: str) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        # The shared .env is the user-facing source of truth and may be edited while
+        # StoryCut is running, so refresh existing process values as well.
+        os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 
 def _image_data_url(path: Path) -> str:

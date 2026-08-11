@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from .vision_service import api_configuration
+from .vision_service import api_configuration, friendly_api_error
 from .voice_service import MIN_TTS_UNIT_DURATION_SEC, split_gpt_sovits_units
 
 
@@ -117,11 +117,14 @@ STRUCTURED OUTPUT
     model = str(story_config.get("model", "gpt-4o-mini"))
     temperature = max(0.0, min(1.2, float(story_config.get("temperature", 0.55))))
     progress(0.35, f"正在使用 {model} 生成故事大纲…")
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+        )
+    except Exception as exc:
+        raise friendly_api_error(exc, base_url, "故事生成") from exc
     result = _parse_json_object(str(response.choices[0].message.content or ""))
     progress(0.8, "正在校验事件引用和解说时长…")
     normalized = _normalize_story(result, events, target_duration_sec, model)
