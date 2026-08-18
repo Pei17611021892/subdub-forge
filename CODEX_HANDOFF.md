@@ -27,7 +27,7 @@ StoryCut v0.1.1 补充了发布后体验修复：
 - “理解原片”前检查根目录 `.env` 的 `OPENAI_API_KEY`。
 - 缺少 API 时明确说明本地分析、视觉描述和组织故事之间的区别，并允许用户主动选择仅做本地分析。
 - 第 2 步缺少 API 或请求失败时显示持久错误，不再表现为按钮无反应。
-- 首页提供 StoryCut 独立版本更新入口，更新范围仅限 `commentary_studio/`。
+- 首页提供 StoryCut 独立版本更新入口，更新范围仅限 `storycut_v2/`。
 
 StoryCut v0.1.2 继续优化首次配置体验：
 
@@ -44,29 +44,59 @@ StoryCut v0.1.5 增加缺少 Faster-Whisper 模型时的默认自动下载、独
 
 StoryCut v0.1.6 在首页增加常驻 API 设置，可直接管理共享 `.env` 中的 API Key 和根地址；Key 默认遮盖，配置保存后立即生效。视觉描述和故事生成遇到 405 时会提示检查 `/chat/completions` 路由、服务商地址及视觉能力。
 
+v0.1.6 之后的待发布增强：API 设置支持分别选择故事与视觉模型，异步调用中转站 `/models` 并以可搜索弹窗展示，选择结果合并写入 `config.user.yaml`；列表接口不可用时保留手动输入。当前 `ai.comfly.org` 已实测可返回约 850 个模型。
+
+同一待发布版本增加两种内容理解路线：默认“语音与画面”保持 Whisper + 关键帧流程；新增“纯画面叙事”，跳过 Whisper，使用场景关键帧和定时采样帧详细分析人物姿态、动作过程、工具/机器交互、环境变化、可见障碍、结果与连续性，再用专用反臆测提示词组织英文故事。纯画面模式没有有效视觉描述时禁止进入故事生成。镜头匹配继续自动执行，并加入时间顺序与重复使用惩罚，人工候选改为默认隐藏的高级调整。四步卡片可折叠，主页面滚轮距离提高。
+
+针对 319 秒、122 个事件的实测项目，旧提示词在 180 秒设置下只生成 178 词、选择 5 个事件，并因信任模型自报时长错误显示 22.4 秒。现已修复：纯画面模式以约 1.9-2.25 词/秒形成目标词数区间，要求按时长覆盖足够事件和故事阶段，过短/覆盖不足会自动请求一次完整重写；重写后仍严重不足则拒绝结果。程序时长估算改为至少采用实际词数 / 2.25，原178词稿可正确估算约79.8秒。语音模式继续保持“时长为上限、信息不足可缩短”。
+
+同一实测稿中“Next,”、“Finally,”等逗号短语被误计为独立解说单元，造成“26句”观感失真。`split_gpt_sovits_units` 现会把少于3词的碎片合并到相邻单元，避免单词/连接词独占一个 GPT-SoVITS 语音单元。
+
+2026-08-17 纯画面故事生成进一步改为两阶段编辑流程：第一次模型调用只负责通读完整事件时间线，规划人物眼前目标、可见阻碍、尝试、转折、结果和余味，并保存 `script/story_plan.json`；第二次由可单独配置的最终故事编辑模型生成沉浸式第三人称英文解说。新提示词明确反对逐项读屏，允许有证据的潜台词、比喻和拟人，同时禁止凭空创造时间、天气、声音、气味、失败次数、身份、经历和画外结果。最终稿仍会校验词数、事件覆盖与故事阶段，失败时由编辑模型整篇重编。API 设置新增可选“最终故事编辑模型”，留空则复用故事生成模型；语音与画面模式保持原有科普压缩路线。
+
+同日实测 60 秒目标时，GPT-5.4 虽生成了明显更完整的故事弧，但忽略 114-135 词要求，输出 337 词、约 149.8 秒。现已补齐硬性最大词数和精彩事件数量上限：60 秒默认规划约 12-20 个实际旁白事件，初稿超过 135 词或引用过多事件即自动整篇压缩重编；重编后仍超过约 151 词则拒绝结果。提示词同时要求只保留高价值转折，避免逐项枚举清理、检查和工具操作，并提醒英文逗号也是 GPT-SoVITS 分段点。
+
+随后用户确认：60/90/120 秒不应成为破坏长片故事的硬上限，真正的产品限制是 Shorts 成片必须在三分钟内。现已将纯画面选项改为“期望时长”，允许故事为保持完整性而超过期望值，但生成结果的预计旁白与第四步实际导入配音均采用 179 秒安全上限；超限会重编或阻止生成预览。旁白时长估算曾短暂采用“约 2.1 词/秒且每单元至少 2 秒”，但这会把 `All right.` 等短语错误拉长；现已升级为单词数、英文音节数和标点停顿的混合估算，短语可自然低于 2 秒，完整长句随发音负担增长。打开旧项目时会在本地自动升级 `story.json` 的旧时间估算，不需要重新请求故事 API；参考 SRT 也会重新计算旧稿时长，导入真实同步 SRT 后仍以真实音频时间轴为准。337 词实测稿按最新算法约 149.5 秒，处于 Shorts 安全线内。
+
+第四步新增“仅字幕测试预览”：无需导入 GPT-SoVITS 音频，程序会用最新估算生成参考 SRT、按该时间轴重新校准镜头；默认输出无声烧录字幕视频。真实 FFmpeg 回归结果为 12.03 秒、1922×1080、仅视频流、字幕已烧录；正式导入配音和同步 SRT 后仍走原有真实时间轴流程。
+
+第四步另增项目级“保留原片声音”开关，默认关闭并随项目保存。开启后，程序会按每个粗剪镜头的源入点/出点同步裁剪原声音轨；仅字幕测试使用完整原声音量，已有英文配音时则以默认 0.22 音量将原声作为背景混入旁白。无音轨视频会拒绝开启。已用真实 12.03 秒视频分别验证 `original_clips` 和 `narration_with_original`，两种输出均包含 H.264 视频流与 AAC 音频流。
+
+第四步按钮过多造成横向溢出后，操作区已拆成独立行并移除左侧占位空白。五分钟实测项目的原视频从桌面移动到 `D:\videoEdit` 后导致 FFmpeg `No such file or directory`；现于预览和抽帧前检查源文件，按同名与原始文件大小在项目/仓库附近自动恢复，否则弹出重新选择窗口，并用时长和分辨率校验是否为原视频。该实测项目已自动重新关联到现存文件，无需重新理解原片或生成故事。
+
+字幕样式弹窗此前固定按 16:9 容器计算字幕、底板和拖拽坐标，竖屏原片使用 `PreserveAspectFit` 后会让这些元素跑进两侧黑边。现增加按源视频宽高比计算的实际视频视口，图片、字幕、底板、字号/边距缩放和拖拽均绑定该视口；导出逻辑未改。已用 544×960 实测项目离屏截图确认字幕完整位于竖屏画面内，QML 检查无错误。
+
+两套应用的用户可见产物统一放到仓库根目录 `export/`。StoryCut V2 正式预览为 `<项目名>_storycut_final_preview.mp4`，仅字幕测试为 `<项目名>_storycut_subtitle_test.mp4`，GPT-SoVITS 参考字幕默认命名为 `<项目名>_gpt_sovits.srt`。SRT 保存对话框打开前会创建根 `export/` 并预填完整文件名；预览导出也会自动创建该目录。项目 JSON 保存从项目目录指向根 `export/` 的相对产物路径，加载时继续兼容旧的项目内 `export/` 和 `exports/rough_preview.mp4`。根 `.gitignore` 忽略整个 `export/`。StoryCut V1 现阶段仍使用自身 `output/`，后续可将其对外成品接入同一根 `export/`。
+
+2026-08-17 仓库应用目录完成正式命名：旧一比一翻译工具由 `translator_studio/` 改为 `storycut_v1/`，长视频 AI 解说剪辑工具由 `commentary_studio/` 改为 `storycut_v2/`。启动器、更新器归档前缀、更新清单、依赖入口和文档已同步更名。本机数据仍保留在对应应用目录中，没有清理或覆盖用户项目。
+
+StoryCut V2 新项目不再使用视频文件名，而是按创建日期自动命名为 `v2-MMDD`；当天已有同名项目时依次追加 `-1`、`-2`。首页顶部提供项目名编辑框，手动修改会同步重命名项目目录、项目 JSON 和最近项目显示；之后的根 `export/` 产物使用新项目名前缀。任务运行期间禁止改名，防止后台线程继续写入旧路径。
+
+v0.1.7 / V1 v1.0.3 将两个应用的更新按钮升级为仓库级自动同步。`repository_updater.py` 直接下载 GitHub `main` 分支 ZIP，依据根 `update_manifest.json` 新增或替换两个应用、根启动器和文档，并删除旧清单或 `remove` 中已废弃的程序文件。严格保护 `.env`、`models/`、`venv/`、`projects/`、`output/`、`export/`、`cache/` 和 `config.user.yaml`，受影响程序文件先备份到 `.update_backups/`。旧 `commentary_studio/` 和 `translator_studio/` 保留最小化一次性更新桥接：旧版用户点击原更新按钮后，重启旧入口即会自动同步根仓库并打开新应用。发布时必须同时创建 `storycut-v0.1.7` 和 `v1.0.3` 标签，供旧更新器完成首次桥接。
+
 2026-07-28 首页项目入口完成整理：
 
 - 顶部“打开项目”改为“最近项目”，点击后弹出可滚动的最近项目列表。
 - 每个项目可直接继续，也可经二次确认删除整个 StoryCut 项目目录及其缓存；原始视频不受影响。
-- 删除接口严格限制在 `commentary_studio/projects/*/project.json`，任务运行期间拒绝删除。
+- 删除接口严格限制在 `storycut_v2/projects/*/project.json`，任务运行期间拒绝删除。
 - 原首页底部最近项目区已移除；手动选择 `project.json` 的入口和项目保存/删除说明移入弹窗。
 
 2026-07-28 两个应用增加启动时静默更新检查：发现新版时只在原更新按钮显示可更新标识，不主动弹窗。根目录增加 `.vbs` 无 CMD 启动入口，原 `.bat` 保留用于排错。
 
-本文后面的阶段记录保留作为历史背景；如与本节冲突，以本节和 `commentary_studio/README.md` 为准。
+本文后面的阶段记录保留作为历史背景；如与本节冲突，以本节和 `storycut_v2/README.md` 为准。
 
 2026-07-27 仓库结构进一步整理为两个并列应用：
 
 ```text
-translator_studio/      旧的一比一翻译工具
-commentary_studio/      StoryCut Studio（v0.1.0 封版）
+storycut_v1/      旧的一比一翻译工具
+storycut_v2/      StoryCut Studio（v0.1.0 封版）
 models/                  共用模型
 venv/                    共用虚拟环境
 .env                     共用 API 配置
 requirements.txt         共用基础依赖
 ```
 
-旧工具的配置、输出、版本清单和更新器均属于 `translator_studio/`；StoryCut 目录在此次整理中没有修改。
+旧工具的配置、输出、版本清单和更新器均属于 `storycut_v1/`；StoryCut 目录在此次整理中没有修改。
 
 ## 1. 项目背景
 
@@ -90,7 +120,7 @@ requirements.txt         共用基础依赖
 subdub-forge/
 ├── apps/
 │   ├── translator/
-│   └── commentary_studio/
+│   └── storycut_v2/
 ├── shared/
 ├── models/
 ├── tools/
@@ -105,7 +135,7 @@ video_translate_auto/
 ├── src/                         旧翻译工具，暂不移动
 ├── config.default.yaml
 ├── config.user.yaml
-├── commentary_studio/           新解说工具
+├── storycut_v2/           新解说工具
 ├── models/                      两个工具共用
 ├── venv/                        两个工具共用，不提交 Git
 ├── .env                         API 密钥共用，不提交 Git
@@ -134,7 +164,7 @@ video_translate_auto/
 ## 4. 当前新增文件
 
 ```text
-commentary_studio/
+storycut_v2/
 ├── main.py
 ├── config.default.yaml
 ├── requirements.txt
@@ -168,7 +198,7 @@ CODEX_HANDOFF.md
 
 ### 5.2 项目创建
 
-导入视频后会在 `commentary_studio/projects/` 下创建：
+导入视频后会在 `storycut_v2/projects/` 下创建：
 
 ```text
 项目名称/
@@ -178,7 +208,7 @@ CODEX_HANDOFF.md
 ├── script/
 ├── timeline/
 ├── cache/
-└── exports/
+└── export/
 ```
 
 `project.json` 当前保存：
@@ -201,8 +231,8 @@ CODEX_HANDOFF.md
 
 StoryCut 使用自己的：
 
-- `commentary_studio/config.default.yaml`
-- `commentary_studio/config.user.yaml`（本地文件，不提交）
+- `storycut_v2/config.default.yaml`
+- `storycut_v2/config.user.yaml`（本地文件，不提交）
 
 共享：
 
@@ -274,12 +304,12 @@ models/faster-whisper/                   模型权重
 ```text
 M  .gitignore
 M  启动图形界面.bat
-?? commentary_studio/
+?? storycut_v2/
 ?? 启动解说剪辑台.bat
 ?? CODEX_HANDOFF.md
 ```
 
-`venv/`、`models/`、`.env`、`commentary_studio/projects/` 均不应提交。
+`venv/`、`models/`、`.env`、`storycut_v2/projects/` 均不应提交。
 
 ## 10. 开发进度与下一阶段计划
 
@@ -480,7 +510,7 @@ M  启动图形界面.bat
 2. 处理字幕。
 3. 自动竖屏裁切与主体跟踪。
 4. FFmpeg 合成 1080×1920 Shorts。
-5. 输出到项目 `exports/`。
+5. 输出到项目 `export/`。
 
 ## 11. 开发原则
 
@@ -509,4 +539,4 @@ Get-Content CODEX_HANDOFF.md
 venv\Scripts\python.exe -c "import yaml, faster_whisper, openai; from PySide6.QtQuickControls2 import QQuickStyle; print('OK')"
 ```
 
-当前不要从早期阶段重新开发。先阅读本文第 0 节和 `commentary_studio/README.md`，运行回归检查后，再从 v0.1.0 后续增强开始；也不要移动旧项目目录。
+当前不要从早期阶段重新开发。先阅读本文第 0 节和 `storycut_v2/README.md`，运行回归检查后，再从 v0.1.0 后续增强开始；也不要移动旧项目目录。

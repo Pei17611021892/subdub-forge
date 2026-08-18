@@ -1,12 +1,12 @@
 # 声画译匠 · SubDub Forge
 
-当前版本：`v1.0.2`
+当前版本：`v1.0.3`
 
 这是一个面向 Windows 的视频翻译与二创辅助工具。它可以识别视频中的中文语音、翻译并压缩为英文字幕、接收外部 TTS 生成的英文配音和同步字幕，最后完成原字幕擦除、英文字幕烧录、音画节奏适配和成片导出。
 
 项目以图形界面为唯一推荐入口，无需依次运行多个脚本。
 
-本工具位于仓库的 `translator_studio/`，与 `commentary_studio/` 相互独立；两者只共享
+本工具位于仓库的 `storycut_v1/`，与 `storycut_v2/` 相互独立；两者只共享
 仓库根目录的虚拟环境、`.env`、`models/` 和 FFmpeg。
 
 ## 主要功能
@@ -116,7 +116,7 @@ asr:
 双击项目根目录中的：
 
 ```text
-点我启动翻译工具.vbs
+点我启动StoryCut V1（一比一翻译）.vbs
 ```
 
 该入口使用 `pythonw.exe`，启动和运行期间不会显示 CMD；依赖缺失时会直接弹窗说明。
@@ -449,8 +449,8 @@ output/_internal/
 
 ```text
 video_translate_auto/
-  点我启动翻译工具.vbs          无 CMD 的启动入口
-  点我启动StoryCut.vbs          StoryCut 无 CMD 启动入口
+  点我启动StoryCut V1（一比一翻译）.vbs       V1 无 CMD 启动入口
+  点我启动StoryCut V2（AI解说剪辑）.vbs       V2 无 CMD 启动入口
   LICENSE                       MIT 开源许可证
   requirements.txt              Python 依赖
   MODEL_DOWNLOAD.md             Whisper 模型与离线加载说明
@@ -458,7 +458,7 @@ video_translate_auto/
   .gitignore                    Git 忽略规则
   models/                       两个应用共用模型
   .env                          两个应用共用 API 配置
-  translator_studio/
+  storycut_v1/
     config.default.yaml         旧工具默认配置
     config.user.yaml            旧工具本机配置
     version.json                旧工具版本
@@ -469,8 +469,8 @@ video_translate_auto/
       gui_launcher.py           主图形界面
       pipeline.py               识别、翻译、适配和合成主流程
       style_editor.py           字幕擦除、位置和样式设置
-      update_manager.py         旧工具独立更新器
-  commentary_studio/            StoryCut Studio
+      update_manager.py         仓库级更新器入口
+  storycut_v2/            StoryCut Studio
 ```
 
 ## 十四、应用更新
@@ -478,14 +478,12 @@ video_translate_auto/
 点击主界面的“检查应用更新”按钮，程序会读取 GitHub `main` 分支上的版本信息：
 
 - 没有新版时，提示当前已是最新版；
-- 有新版时，显示版本号和更新说明，确认后下载对应的 GitHub Release 标签源码包；
+- 有新版时，显示版本号和更新说明，确认后下载 GitHub `main` 分支最新源码包；
 - 安装完成后提示重启，选择“是”会重新启动图形界面；
-- 更新前会把可能改变的旧程序文件备份到 `output/_internal/update_backups/`；
+- 更新前会把可能改变的旧程序文件备份到根目录 `.update_backups/`；
 - 如果安装中途失败，程序会尽力自动恢复旧文件。
 
-更新器只同步 `translator_studio/update_manifest.json` 中列出的旧工具程序文件，不会修改
-StoryCut 或仓库根目录。共享的 `.env`、`models/`、`venv/` 以及旧工具自己的
-`config.user.yaml`、`output/` 均不会被更新器修改或删除。
+更新器依据根 `update_manifest.json` 同步 StoryCut V1、V2、根目录启动器和文档，同时删除清单中已废弃的旧程序文件。共享的 `.env`、`models/`、`venv/`、两套用户配置、项目、`output/` 和 `export/` 均不会被修改或删除。
 
 程序启动约 1 秒后也会在后台静默检查一次；发现新版时，原更新按钮会变为“↑ 可更新 v版本号”，不会自动弹窗。
 

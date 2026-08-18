@@ -59,7 +59,7 @@ def load_config() -> dict[str, Any]:
         user_path = LEGACY_CONFIG
     else:
         # One-release compatibility for checkouts created before the application
-        # moved into translator_studio/.
+        # moved into storycut_v1/.
         user_path = LEGACY_REPOSITORY_USER_CONFIG
     return deep_merge(defaults, _read_yaml(user_path))
 

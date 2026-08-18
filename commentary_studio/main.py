@@ -1,34 +1,32 @@
 from __future__ import annotations
 
+import ctypes
+import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtQuickControls2 import QQuickStyle
-
-from src.app_controller import AppController
-from src import __version__
+from src.update_manager import migrate_repository
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parent
+NEW_MAIN = REPOSITORY_ROOT / "storycut_v2" / "main.py"
+
+
+def show_error(message: str) -> None:
+    ctypes.windll.user32.MessageBoxW(0, message, "StoryCut 自动迁移", 0x10)
 
 
 def main() -> int:
-    QQuickStyle.setStyle("Basic")
-    app = QGuiApplication(sys.argv)
-    app.setApplicationName(f"StoryCut Studio {__version__}")
-    app.setOrganizationName("SubDub Forge")
-
-    engine = QQmlApplicationEngine()
-    controller = AppController(ROOT)
-    engine.rootContext().setContextProperty("appController", controller)
-    engine.load(QUrl.fromLocalFile(str(ROOT / "ui" / "Main.qml")))
-
-    if not engine.rootObjects():
+    try:
+        migrate_repository()
+        if not NEW_MAIN.exists():
+            raise RuntimeError("更新完成后仍找不到 storycut_v2/main.py")
+        subprocess.Popen([sys.executable, str(NEW_MAIN)], cwd=str(REPOSITORY_ROOT))
+        return 0
+    except Exception as exc:
+        show_error(f"旧版自动迁移失败：\n\n{exc}\n\n请检查网络后重新启动。")
         return 1
-    return app.exec()
 
 
 if __name__ == "__main__":

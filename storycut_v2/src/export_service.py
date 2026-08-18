@@ -35,9 +35,12 @@ def render_rough_preview(
     if not ffmpeg:
         raise RuntimeError("未找到 FFmpeg，无法生成粗剪预览")
 
-    if narration_audio is None or not narration_audio.exists():
-        raise ValueError("缺少英文配音，最终视频不会使用原片声音")
+    has_narration = bool(narration_audio and narration_audio.exists())
     export_config = config.get("export", {})
+    preserve_original_audio = bool(export_config.get("preserve_original_audio", False))
+    original_audio_mix_volume = min(
+        1.0, max(0.0, float(export_config.get("original_audio_mix_volume", 0.22) or 0.22))
+    )
     configured_width = int(export_config.get("width", 1080) or 1080)
     configured_height = int(export_config.get("height", 1920) or 1920)
     fps = int(export_config.get("fps", 30) or 30)
@@ -51,6 +54,7 @@ def render_rough_preview(
         cleanup_mode = "none"
     filters: list[str] = []
     concat_inputs: list[str] = []
+    original_audio_inputs: list[str] = []
     for index, clip in enumerate(clips):
         start = float(clip.get("source_start", 0))
         end = float(clip.get("source_end", 0))
@@ -76,6 +80,12 @@ def render_rough_preview(
             f"{fit_filter + ',' if fit_filter else ''}setsar=1,format=yuv420p[v{index}]"
         )
         concat_inputs.append(f"[v{index}]")
+        if preserve_original_audio:
+            filters.append(
+                f"[0:a]atrim=start={start:.3f}:end={end:.3f},"
+                f"asetpts=PTS-STARTPTS,aresample=48000[aorig{index}]"
+            )
+            original_audio_inputs.append(f"[aorig{index}]")
 
     valid_count = len([value for value in filters if value.startswith("[0:v]")])
     if valid_count == 0:
@@ -88,6 +98,11 @@ def render_rough_preview(
         + f"concat=n={valid_count}:v=1:a=0"
         + concat_video_output
     )
+    if preserve_original_audio:
+        filters.append(
+            "".join(original_audio_inputs)
+            + f"concat=n={valid_count}:v=0:a=1[aoriginal]"
+        )
     if needs_cleanup:
         cleanup_x_ratio = min(0.95, max(0.0, float(export_config.get("original_subtitle_cleanup_x", 0.08) or 0.08)))
         cleanup_y_ratio = min(0.95, max(0.0, float(export_config.get("original_subtitle_cleanup_y", 0.82) or 0.82)))
@@ -138,10 +153,23 @@ def render_rough_preview(
         ass_path = output_video.parent / "_internal" / "shorts_subtitles.ass"
         _build_shorts_ass(subtitle_srt, ass_path, width, height, export_config)
         filters.append(f"[vbase]subtitles='{_escape_subtitle_path(ass_path)}'[vout]")
-    filters.append(
-        f"[1:a]atrim=start=0:end={total_duration:.3f},"
-        "asetpts=PTS-STARTPTS,aresample=48000[aout]"
-    )
+    if has_narration:
+        filters.append(
+            f"[1:a]atrim=start=0:end={total_duration:.3f},"
+            "asetpts=PTS-STARTPTS,aresample=48000[anarration]"
+        )
+    if has_narration and preserve_original_audio:
+        filters.extend(
+            [
+                f"[aoriginal]volume={original_audio_mix_volume:.3f}[abackground]",
+                "[abackground][anarration]amix=inputs=2:duration=first:"
+                "dropout_transition=0:normalize=0[aout]",
+            ]
+        )
+    elif has_narration:
+        filters.append("[anarration]anull[aout]")
+    elif preserve_original_audio:
+        filters.append("[aoriginal]anull[aout]")
 
     output_video.parent.mkdir(parents=True, exist_ok=True)
     command = [
@@ -153,7 +181,8 @@ def render_rough_preview(
         "-i",
         str(source_video),
     ]
-    command.extend(["-i", str(narration_audio)])
+    if has_narration:
+        command.extend(["-i", str(narration_audio)])
     command.extend(
         [
             "-filter_complex",
@@ -162,7 +191,9 @@ def render_rough_preview(
         "[vout]",
         ]
     )
-    command.extend(["-map", "[aout]"])
+    has_output_audio = has_narration or preserve_original_audio
+    if has_output_audio:
+        command.extend(["-map", "[aout]"])
     command.extend(
         [
             "-c:v",
@@ -175,7 +206,10 @@ def render_rough_preview(
             "yuv420p",
         ]
     )
-    command.extend(["-c:a", "aac", "-b:a", str(export_config.get("audio_bitrate", "192k"))])
+    if has_output_audio:
+        command.extend(["-c:a", "aac", "-b:a", str(export_config.get("audio_bitrate", "192k"))])
+    else:
+        command.append("-an")
     command.extend(["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output_video)])
 
     progress(0.03, f"正在裁剪并拼接 {valid_count} 个镜头…")
@@ -209,8 +243,16 @@ def render_rough_preview(
         "duration_sec": total_duration,
         "clip_count": valid_count,
         "file_size": output_video.stat().st_size,
-        "has_audio": True,
-        "audio_mode": "narration_only",
+        "has_audio": has_output_audio,
+        "audio_mode": (
+            "narration_with_original"
+            if has_narration and preserve_original_audio
+            else "narration_only"
+            if has_narration
+            else "original_clips"
+            if preserve_original_audio
+            else "silent_subtitle_test"
+        ),
         "width": width,
         "height": height,
         "fit_mode": fit_mode,

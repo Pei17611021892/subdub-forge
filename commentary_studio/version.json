@@ -1,7 +1,7 @@
 {
-  "name": "StoryCut Studio",
-  "version": "0.1.6",
+  "name": "StoryCut Studio Legacy Update Bridge",
+  "version": "0.1.7",
   "repository": "Pei17611021892/subdub-forge",
-  "update_channel": "stable",
-  "notes": "首页增加 API 设置，可直接查看并管理共享 .env 中的 URL 与 Key；自动校验接口根地址，并为 405 路由错误提供明确诊断。"
+  "update_channel": "migration",
+  "notes": "一次性迁移到 storycut_v2，并启用仓库级自动更新。"
 }

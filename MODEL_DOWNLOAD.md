@@ -130,7 +130,7 @@ vocabulary.json 或 vocabulary.txt
 
 ## 允许自动下载
 
-StoryCut 已默认开启，无需改配置。首次下载时会显示独立进度条，完成后自动进入语音识别，无需重新点击“开始理解原片”。如需禁止联网，可在 `commentary_studio/config.user.yaml` 中写入：
+StoryCut 已默认开启，无需改配置。首次下载时会显示独立进度条，完成后自动进入语音识别，无需重新点击“开始理解原片”。如需禁止联网，可在 `storycut_v2/config.user.yaml` 中写入：
 
 ```yaml
 analysis:

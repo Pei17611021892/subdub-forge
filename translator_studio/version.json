@@ -1,7 +1,7 @@
 {
-  "name": "声画译匠 · SubDub Forge",
-  "version": "1.0.2",
+  "name": "SubDub Forge Legacy Update Bridge",
+  "version": "1.0.3",
   "repository": "Pei17611021892/subdub-forge",
-  "update_channel": "stable",
-  "notes": "启动时后台静默检查更新，发现新版时在更新按钮显示提示；增加无 CMD 窗口启动入口。"
+  "update_channel": "migration",
+  "notes": "一次性迁移到 storycut_v1，并启用仓库级自动更新。"
 }

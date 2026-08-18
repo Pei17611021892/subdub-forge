@@ -1,3 +1,1 @@
-"""StoryCut Studio Python backend."""
-
-__version__ = "0.1.6"
+"""Legacy StoryCut update bridge. The real application lives in storycut_v2."""

@@ -10,7 +10,7 @@ ApplicationWindow {
     height: 800
     minimumWidth: 1040
     minimumHeight: 680
-    title: "StoryCut Studio v" + appController.appVersion + " · AI 解说剪辑"
+    title: "StoryCut V2 v" + appController.appVersion + " · AI 解说剪辑"
     color: "#0b0c10"
 
     property color accent: "#8b5cf6"
@@ -25,6 +25,7 @@ ApplicationWindow {
     property bool storyDone: appController.storyNarration.length > 0
     property bool matchingDone: appController.matches.length > 0
     property bool exportDone: appController.previewVideoReady
+    property bool matchingAdvancedVisible: false
 
     component StepBadge: Rectangle {
         id: stepBadge
@@ -154,6 +155,13 @@ ApplicationWindow {
         title: "选择原始视频"
         nameFilters: ["视频文件 (*.mp4 *.mkv *.mov *.avi *.webm *.m4v)", "所有文件 (*)"]
         onAccepted: appController.importVideo(selectedFile.toString())
+    }
+
+    FileDialog {
+        id: relinkVideoDialog
+        title: "重新选择当前项目的原视频"
+        nameFilters: ["视频文件 (*.mp4 *.mkv *.mov *.avi *.webm *.m4v)", "所有文件 (*)"]
+        onAccepted: appController.relinkSourceVideo(selectedFile.toString())
     }
 
     Dialog {
@@ -340,6 +348,17 @@ ApplicationWindow {
                     color: projectRowMouse.containsMouse ? panelRaised : panel
                     border.color: projectRowMouse.containsMouse ? "#51436d" : "#292c36"
 
+                    MouseArea {
+                        id: projectRowMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            appController.openProject(modelData.projectFile)
+                            recentProjectsDialog.close()
+                        }
+                    }
+
                     RowLayout {
                         anchors.fill: parent
                         anchors.margins: 14
@@ -408,18 +427,6 @@ ApplicationWindow {
                                 deleteProjectDialog.projectFile = modelData.projectFile
                                 deleteProjectDialog.open()
                             }
-                        }
-                    }
-
-                    MouseArea {
-                        id: projectRowMouse
-                        anchors.fill: parent
-                        anchors.rightMargin: 150
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            appController.openProject(modelData.projectFile)
-                            recentProjectsDialog.close()
                         }
                     }
                 }
@@ -648,15 +655,22 @@ ApplicationWindow {
 
     Dialog {
         id: apiKeySetupDialog
+        objectName: "apiKeySetupDialog"
         property string requestedAction: "settings"
-        width: 560
+        width: 600
+        height: Math.min(window.height - 50, 740)
         anchors.centerIn: parent
         modal: true
         padding: 22
         closePolicy: Popup.CloseOnEscape
 
         function saveAndContinue() {
-            if (!appController.saveApiConfiguration(apiKeyInput.text, apiBaseUrlInput.text))
+            if (!appController.saveApiConfiguration(
+                    apiKeyInput.text,
+                    apiBaseUrlInput.text,
+                    storyModelInput.text,
+                    visionModelInput.text,
+                    editorModelInput.text))
                 return
             close()
             if (requestedAction === "understanding")
@@ -671,7 +685,13 @@ ApplicationWindow {
             border.color: "#3a3f4c"
         }
 
-        contentItem: ColumnLayout {
+        contentItem: ScrollView {
+            clip: true
+            contentWidth: availableWidth
+            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+            ColumnLayout {
+            width: parent.width
             spacing: 12
             Text {
                 text: apiKeySetupDialog.requestedAction === "settings" ? "API 设置" : "快速设置 API"
@@ -762,6 +782,102 @@ ApplicationWindow {
                 font.pixelSize: 10
                 wrapMode: Text.WordWrap
             }
+            Text { text: "故事生成模型"; color: "#d4d4d8"; font.pixelSize: 12 }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                TextField {
+                    id: storyModelInput
+                    Layout.fillWidth: true
+                    placeholderText: "例如 gpt-4o-mini"
+                    selectByMouse: true
+                    color: textMain
+                    placeholderTextColor: "#71717a"
+                    background: Rectangle {
+                        implicitHeight: 40
+                        radius: 9
+                        color: "#1d2028"
+                        border.color: storyModelInput.activeFocus ? accent : "#3a3f4c"
+                    }
+                }
+                GhostButton {
+                    text: "选择模型"
+                    onClicked: {
+                        modelListDialog.selectionTarget = "story"
+                        modelListDialog.open()
+                        appController.fetchApiModels(apiKeyInput.text, apiBaseUrlInput.text)
+                    }
+                }
+            }
+            Text { text: "最终故事编辑模型（可选）"; color: "#d4d4d8"; font.pixelSize: 12 }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                TextField {
+                    id: editorModelInput
+                    objectName: "editorModelInput"
+                    Layout.fillWidth: true
+                    placeholderText: "留空则复用故事生成模型"
+                    selectByMouse: true
+                    color: textMain
+                    placeholderTextColor: "#71717a"
+                    background: Rectangle {
+                        implicitHeight: 40
+                        radius: 9
+                        color: "#1d2028"
+                        border.color: editorModelInput.activeFocus ? accent : "#3a3f4c"
+                    }
+                }
+                GhostButton {
+                    text: "选择模型"
+                    onClicked: {
+                        modelListDialog.selectionTarget = "editor"
+                        modelListDialog.open()
+                        appController.fetchApiModels(apiKeyInput.text, apiBaseUrlInput.text)
+                    }
+                }
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "纯画面模式会先规划全片故事，再由最终编辑重写解说。这里适合选择更强的模型；留空则复用上面的故事模型。"
+                color: "#858b98"
+                font.pixelSize: 10
+                wrapMode: Text.WordWrap
+            }
+            Text { text: "视觉理解模型"; color: "#d4d4d8"; font.pixelSize: 12 }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                TextField {
+                    id: visionModelInput
+                    Layout.fillWidth: true
+                    placeholderText: "请选择支持图片输入的模型"
+                    selectByMouse: true
+                    color: textMain
+                    placeholderTextColor: "#71717a"
+                    background: Rectangle {
+                        implicitHeight: 40
+                        radius: 9
+                        color: "#1d2028"
+                        border.color: visionModelInput.activeFocus ? accent : "#3a3f4c"
+                    }
+                }
+                GhostButton {
+                    text: "选择模型"
+                    onClicked: {
+                        modelListDialog.selectionTarget = "vision"
+                        modelListDialog.open()
+                        appController.fetchApiModels(apiKeyInput.text, apiBaseUrlInput.text)
+                    }
+                }
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "提示：中转站返回模型名称，并不代表每个模型都支持图片。视觉理解请选择明确支持视觉输入的模型。"
+                color: "#d5a95f"
+                font.pixelSize: 10
+                wrapMode: Text.WordWrap
+            }
             RowLayout {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
@@ -775,15 +891,172 @@ ApplicationWindow {
                     onClicked: apiKeySetupDialog.saveAndContinue()
                 }
             }
+            }
         }
 
         onOpened: {
             apiBaseUrlInput.text = appController.apiBaseUrl
             apiKeyInput.text = appController.apiKey
+            storyModelInput.text = appController.storyApiModel
+            editorModelInput.text = appController.storyEditorApiModel
+            visionModelInput.text = appController.visionApiModel
             showApiKey.checked = false
             apiKeyInput.forceActiveFocus()
         }
         onClosed: apiKeyInput.text = ""
+    }
+
+    Dialog {
+        id: modelListDialog
+        property string selectionTarget: "story"
+        property var filteredModels: {
+            var query = modelSearchInput.text.trim().toLowerCase()
+            if (query === "")
+                return appController.apiModels
+            return appController.apiModels.filter(function(item) {
+                return String(item).toLowerCase().indexOf(query) >= 0
+            })
+        }
+        width: 600
+        height: Math.min(window.height - 70, 600)
+        anchors.centerIn: parent
+        modal: true
+        padding: 20
+        closePolicy: appController.apiModelsBusy ? Popup.NoAutoClose : Popup.CloseOnEscape
+
+        background: Rectangle {
+            radius: 16
+            color: "#15171e"
+            border.color: "#3a3f4c"
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 12
+            RowLayout {
+                Layout.fillWidth: true
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 3
+                    Text {
+                        text: modelListDialog.selectionTarget === "vision"
+                              ? "选择视觉理解模型"
+                              : modelListDialog.selectionTarget === "editor"
+                                ? "选择最终故事编辑模型"
+                                : "选择故事生成模型"
+                        color: textMain
+                        font.pixelSize: 19
+                        font.bold: true
+                    }
+                    Text {
+                        text: appController.apiModelsStatus
+                        color: appController.apiModels.length > 0 ? "#8ee3b4" : textMuted
+                        font.pixelSize: 11
+                    }
+                }
+                GhostButton {
+                    text: appController.apiModelsBusy ? "获取中…" : "重新获取"
+                    enabled: !appController.apiModelsBusy
+                    onClicked: appController.fetchApiModels(apiKeyInput.text, apiBaseUrlInput.text)
+                }
+            }
+            ProgressBar {
+                Layout.fillWidth: true
+                visible: appController.apiModelsBusy
+                indeterminate: true
+            }
+            TextField {
+                id: modelSearchInput
+                Layout.fillWidth: true
+                enabled: !appController.apiModelsBusy && appController.apiModels.length > 0
+                placeholderText: "搜索模型名称"
+                selectByMouse: true
+                color: textMain
+                placeholderTextColor: "#71717a"
+                background: Rectangle {
+                    implicitHeight: 40
+                    radius: 9
+                    color: "#1d2028"
+                    border.color: modelSearchInput.activeFocus ? accent : "#3a3f4c"
+                }
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 10
+                color: "#101218"
+                border.color: "#2d313c"
+
+                ListView {
+                    id: availableModelsList
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    clip: true
+                    spacing: 4
+                    model: modelListDialog.filteredModels
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    delegate: Rectangle {
+                        required property string modelData
+                        width: availableModelsList.width
+                        height: 42
+                        radius: 8
+                        color: modelMouse.containsMouse ? "#29233a" : "transparent"
+                        Text {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: modelData
+                            color: "#e5e7eb"
+                            font.pixelSize: 12
+                            elide: Text.ElideMiddle
+                        }
+                        MouseArea {
+                            id: modelMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (modelListDialog.selectionTarget === "vision")
+                                    visionModelInput.text = modelData
+                                else if (modelListDialog.selectionTarget === "editor")
+                                    editorModelInput.text = modelData
+                                else
+                                    storyModelInput.text = modelData
+                                modelListDialog.close()
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    anchors.centerIn: parent
+                    width: parent.width - 40
+                    visible: !appController.apiModelsBusy && modelListDialog.filteredModels.length === 0
+                    text: appController.apiModelsStatus
+                    color: textMuted
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    Layout.fillWidth: true
+                    text: "找不到需要的模型时，可关闭列表后手动输入模型名称。"
+                    color: "#858b98"
+                    font.pixelSize: 10
+                }
+                GhostButton {
+                    text: "关闭"
+                    enabled: !appController.apiModelsBusy
+                    onClicked: modelListDialog.close()
+                }
+            }
+        }
+
+        onOpened: modelSearchInput.text = ""
     }
 
     Dialog {
@@ -838,7 +1111,7 @@ ApplicationWindow {
             Text {
                 Layout.fillWidth: true
                 visible: appController.updateAvailable
-                text: "更新仅替换 commentary_studio 程序文件，不会修改项目、config.user.yaml、共享 .env 或模型。"
+                text: "更新会自动同步 GitHub 上的两个应用、启动器和程序文件，并删除清单中已废弃的旧文件。项目、用户设置、.env、模型和导出不会被修改。"
                 color: textMuted
                 font.pixelSize: 10
                 wrapMode: Text.WordWrap
@@ -866,6 +1139,10 @@ ApplicationWindow {
         function onUpdateDialogRequested() {
             if (!updateDialog.opened)
                 updateDialog.open()
+        }
+        function onSourceVideoRelinkRequested() {
+            if (!relinkVideoDialog.visible)
+                relinkVideoDialog.open()
         }
     }
 
@@ -945,78 +1222,128 @@ ApplicationWindow {
                         radius: 13
                         color: "#05060a"
                         clip: true
-                        Image {
-                            id: subtitleEffectImage
-                            anchors.fill: parent
-                            source: appController.subtitleEffectPreviewUrl
-                            fillMode: Image.PreserveAspectFit
-                            asynchronous: true
-                        }
-                        Rectangle {
-                            visible: appController.subtitleStyle.cleanupMode !== "none"
-                            x: parent.width * appController.subtitleStyle.cleanupX
-                            width: parent.width * appController.subtitleStyle.cleanupWidth
-                            y: parent.height * appController.subtitleStyle.cleanupY
-                            height: parent.height * appController.subtitleStyle.cleanupHeight
-                            color: appController.subtitleEffectPreviewReady ? "transparent"
-                                   : appController.subtitleStyle.cleanupMode === "mask"
-                                     ? Qt.rgba(0, 0, 0, appController.subtitleStyle.cleanupOpacity)
-                                     : Qt.rgba(0.08, 0.08, 0.1, Math.max(0.32, appController.subtitleStyle.cleanupOpacity * 0.62))
-                            Text {
-                                anchors.centerIn: parent
-                                text: appController.subtitleStyle.cleanupMode === "blur" ? "局部柔化 / 模糊"
-                                      : appController.subtitleStyle.cleanupMode === "delogo" ? "Delogo 周边像素修复" : ""
-                                visible: text !== "" && !appController.subtitleEffectPreviewReady
-                                color: "#b8bbc5"
-                                font.pixelSize: 10
-                            }
-                            MouseArea {
+                        Item {
+                            id: subtitleVideoViewport
+                            property real sourceAspect: Math.max(1, appController.sourceVideoWidth)
+                                                        / Math.max(1, appController.sourceVideoHeight)
+                            property real frameAspect: subtitlePreviewFrame.width
+                                                       / Math.max(1, subtitlePreviewFrame.height)
+                            width: sourceAspect >= frameAspect
+                                   ? subtitlePreviewFrame.width
+                                   : subtitlePreviewFrame.height * sourceAspect
+                            height: sourceAspect >= frameAspect
+                                    ? subtitlePreviewFrame.width / sourceAspect
+                                    : subtitlePreviewFrame.height
+                            anchors.centerIn: parent
+                            clip: true
+
+                            Image {
+                                id: subtitleEffectImage
                                 anchors.fill: parent
-                                cursorShape: Qt.SizeAllCursor
-                                property point pressPoint
-                                property real startX: 0
-                                property real startY: 0
-                                property string lockedAxis: ""
-                                onPressed: function(mouse) {
-                                    pressPoint = mapToItem(subtitlePreviewFrame, mouse.x, mouse.y)
-                                    startX = appController.subtitleStyle.cleanupX
-                                    startY = appController.subtitleStyle.cleanupY
-                                    lockedAxis = ""
+                                source: appController.subtitleEffectPreviewUrl
+                                fillMode: Image.Stretch
+                                asynchronous: true
+                            }
+                            Rectangle {
+                                visible: appController.subtitleStyle.cleanupMode !== "none"
+                                x: parent.width * appController.subtitleStyle.cleanupX
+                                width: parent.width * appController.subtitleStyle.cleanupWidth
+                                y: parent.height * appController.subtitleStyle.cleanupY
+                                height: parent.height * appController.subtitleStyle.cleanupHeight
+                                color: appController.subtitleEffectPreviewReady ? "transparent"
+                                       : appController.subtitleStyle.cleanupMode === "mask"
+                                         ? Qt.rgba(0, 0, 0, appController.subtitleStyle.cleanupOpacity)
+                                         : Qt.rgba(0.08, 0.08, 0.1, Math.max(0.32, appController.subtitleStyle.cleanupOpacity * 0.62))
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: appController.subtitleStyle.cleanupMode === "blur" ? "局部柔化 / 模糊"
+                                          : appController.subtitleStyle.cleanupMode === "delogo" ? "Delogo 周边像素修复" : ""
+                                    visible: text !== "" && !appController.subtitleEffectPreviewReady
+                                    color: "#b8bbc5"
+                                    font.pixelSize: 10
                                 }
-                                onPositionChanged: function(mouse) {
-                                    if (!pressed)
-                                        return
-                                    var current = mapToItem(subtitlePreviewFrame, mouse.x, mouse.y)
-                                    var dx = current.x - pressPoint.x
-                                    var dy = current.y - pressPoint.y
-                                    if (lockedAxis === "") {
-                                        if (Math.max(Math.abs(dx), Math.abs(dy)) < 7)
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.SizeAllCursor
+                                    property point pressPoint
+                                    property real startX: 0
+                                    property real startY: 0
+                                    property string lockedAxis: ""
+                                    onPressed: function(mouse) {
+                                        pressPoint = mapToItem(subtitleVideoViewport, mouse.x, mouse.y)
+                                        startX = appController.subtitleStyle.cleanupX
+                                        startY = appController.subtitleStyle.cleanupY
+                                        lockedAxis = ""
+                                    }
+                                    onPositionChanged: function(mouse) {
+                                        if (!pressed)
                                             return
-                                        lockedAxis = Math.abs(dx) > Math.abs(dy) * 1.15 ? "x" : "y"
+                                        var current = mapToItem(subtitleVideoViewport, mouse.x, mouse.y)
+                                        var dx = current.x - pressPoint.x
+                                        var dy = current.y - pressPoint.y
+                                        if (lockedAxis === "") {
+                                            if (Math.max(Math.abs(dx), Math.abs(dy)) < 7)
+                                                return
+                                            lockedAxis = Math.abs(dx) > Math.abs(dy) * 1.15 ? "x" : "y"
+                                        }
+                                        if (lockedAxis === "x") {
+                                            var nextX = Math.max(0, Math.min(1 - appController.subtitleStyle.cleanupWidth,
+                                                                            startX + dx / subtitleVideoViewport.width))
+                                            var centerX = (1 - appController.subtitleStyle.cleanupWidth) / 2
+                                            if (Math.abs(nextX) < 0.015)
+                                                nextX = 0
+                                            else if (Math.abs(nextX - centerX) < 0.015)
+                                                nextX = centerX
+                                            else if (Math.abs(nextX - (1 - appController.subtitleStyle.cleanupWidth)) < 0.015)
+                                                nextX = 1 - appController.subtitleStyle.cleanupWidth
+                                            appController.updateSubtitleStyle("cleanupX", nextX)
+                                        } else {
+                                            var nextY = Math.max(0, Math.min(1 - appController.subtitleStyle.cleanupHeight,
+                                                                            startY + dy / subtitleVideoViewport.height))
+                                            var centerY = (1 - appController.subtitleStyle.cleanupHeight) / 2
+                                            if (Math.abs(nextY) < 0.015)
+                                                nextY = 0
+                                            else if (Math.abs(nextY - centerY) < 0.015)
+                                                nextY = centerY
+                                            else if (Math.abs(nextY - (1 - appController.subtitleStyle.cleanupHeight)) < 0.015)
+                                                nextY = 1 - appController.subtitleStyle.cleanupHeight
+                                            appController.updateSubtitleStyle("cleanupY", nextY)
+                                        }
                                     }
-                                    if (lockedAxis === "x") {
-                                        var nextX = Math.max(0, Math.min(1 - appController.subtitleStyle.cleanupWidth,
-                                                                        startX + dx / subtitlePreviewFrame.width))
-                                        var centerX = (1 - appController.subtitleStyle.cleanupWidth) / 2
-                                        if (Math.abs(nextX) < 0.015)
-                                            nextX = 0
-                                        else if (Math.abs(nextX - centerX) < 0.015)
-                                            nextX = centerX
-                                        else if (Math.abs(nextX - (1 - appController.subtitleStyle.cleanupWidth)) < 0.015)
-                                            nextX = 1 - appController.subtitleStyle.cleanupWidth
-                                        appController.updateSubtitleStyle("cleanupX", nextX)
-                                    } else {
-                                        var nextY = Math.max(0, Math.min(1 - appController.subtitleStyle.cleanupHeight,
-                                                                        startY + dy / subtitlePreviewFrame.height))
-                                        var centerY = (1 - appController.subtitleStyle.cleanupHeight) / 2
-                                        if (Math.abs(nextY) < 0.015)
-                                            nextY = 0
-                                        else if (Math.abs(nextY - centerY) < 0.015)
-                                            nextY = centerY
-                                        else if (Math.abs(nextY - (1 - appController.subtitleStyle.cleanupHeight)) < 0.015)
-                                            nextY = 1 - appController.subtitleStyle.cleanupHeight
-                                        appController.updateSubtitleStyle("cleanupY", nextY)
-                                    }
+                                }
+                            }
+                            Rectangle {
+                                id: subtitlePreviewBubble
+                                width: parent.width * Math.max(
+                                           0.2,
+                                           1 - appController.subtitleStyle.horizontalMargin * 2
+                                               / Math.max(1, appController.sourceVideoWidth))
+                                height: subtitlePreviewLabel.implicitHeight + 18
+                                x: (parent.width - width) / 2
+                                y: Math.max(8, parent.height - height
+                                            - appController.subtitleStyle.bottomMargin
+                                              / Math.max(1, appController.sourceVideoHeight) * parent.height)
+                                radius: appController.subtitleStyle.backgroundEnabled ? 7 : 0
+                                color: appController.subtitleStyle.backgroundEnabled
+                                       ? Qt.rgba(0, 0, 0, appController.subtitleStyle.backgroundOpacity)
+                                       : "transparent"
+                                Text {
+                                    id: subtitlePreviewLabel
+                                    width: parent.width - 24
+                                    anchors.centerIn: parent
+                                    text: appController.subtitlePreviewText
+                                    color: "white"
+                                    font.family: appController.subtitleStyle.fontFamily
+                                    font.pixelSize: Math.max(
+                                                        6,
+                                                        appController.subtitleStyle.fontSize
+                                                        / Math.max(1, appController.sourceVideoHeight)
+                                                        * subtitleVideoViewport.height)
+                                    font.bold: appController.subtitleStyle.bold
+                                    horizontalAlignment: Text.AlignHCenter
+                                    wrapMode: Text.WordWrap
+                                    style: Text.Outline
+                                    styleColor: "#dd000000"
                                 }
                             }
                         }
@@ -1029,31 +1356,6 @@ ApplicationWindow {
                                 text: "正在调用 FFmpeg 生成真实效果…"
                                 color: "white"
                                 font.pixelSize: 12
-                            }
-                        }
-                        Rectangle {
-                            id: subtitlePreviewBubble
-                            width: parent.width * Math.max(0.55, 1 - appController.subtitleStyle.horizontalMargin * 2 / Math.max(1, appController.sourceVideoHeight * 16 / 9))
-                            height: subtitlePreviewLabel.implicitHeight + 18
-                            x: (parent.width - width) / 2
-                            y: Math.max(8, parent.height - height - appController.subtitleStyle.bottomMargin / Math.max(1, appController.sourceVideoHeight) * parent.height)
-                            radius: appController.subtitleStyle.backgroundEnabled ? 7 : 0
-                            color: appController.subtitleStyle.backgroundEnabled
-                                   ? Qt.rgba(0, 0, 0, appController.subtitleStyle.backgroundOpacity)
-                                   : "transparent"
-                            Text {
-                                id: subtitlePreviewLabel
-                                width: parent.width - 24
-                                anchors.centerIn: parent
-                                text: appController.subtitlePreviewText
-                                color: "white"
-                                font.family: appController.subtitleStyle.fontFamily
-                                font.pixelSize: Math.max(10, appController.subtitleStyle.fontSize / Math.max(1, appController.sourceVideoHeight) * subtitlePreviewFrame.height)
-                                font.bold: appController.subtitleStyle.bold
-                                horizontalAlignment: Text.AlignHCenter
-                                wrapMode: Text.WordWrap
-                                style: Text.Outline
-                                styleColor: "#dd000000"
                             }
                         }
                     }
@@ -1495,7 +1797,7 @@ ApplicationWindow {
                 Item { Layout.fillHeight: true }
 
                 Rectangle { Layout.fillWidth: true; height: 1; color: "#292c35" }
-                Text { text: "StoryCut Studio  v" + appController.appVersion; color: "#626773"; font.pixelSize: 11; Layout.topMargin: 12 }
+                Text { text: "StoryCut V2  v" + appController.appVersion; color: "#626773"; font.pixelSize: 11; Layout.topMargin: 12 }
             }
         }
 
@@ -1509,6 +1811,22 @@ ApplicationWindow {
                 anchors.fill: parent
                 contentWidth: availableWidth
                 contentHeight: mainContent.implicitHeight + mainContent.y + 30
+                ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.NoButton
+                    propagateComposedEvents: true
+                    onWheel: function(event) {
+                        var flickable = mainScroll.contentItem
+                        var delta = event.pixelDelta.y !== 0
+                                  ? event.pixelDelta.y * 2.2
+                                  : event.angleDelta.y / 120 * 150
+                        var maximum = Math.max(0, flickable.contentHeight - flickable.height)
+                        flickable.contentY = Math.max(0, Math.min(maximum, flickable.contentY - delta))
+                        event.accepted = true
+                    }
+                }
 
                 ColumnLayout {
                     id: mainContent
@@ -1524,6 +1842,33 @@ ApplicationWindow {
                             spacing: 5
                             Text { text: "下午好，开始一个新故事"; color: textMain; font.pixelSize: 27; font.weight: Font.DemiBold }
                             Text { text: appController.notice; color: textMuted; font.pixelSize: 14 }
+                            RowLayout {
+                                visible: appController.videoPath !== ""
+                                spacing: 7
+                                Text { text: "项目名"; color: textMuted; font.pixelSize: 11 }
+                                TextField {
+                                    id: projectNameInput
+                                    Layout.preferredWidth: 220
+                                    implicitHeight: 36
+                                    text: appController.projectName
+                                    maximumLength: 64
+                                    selectByMouse: true
+                                    color: textMain
+                                    font.pixelSize: 13
+                                    onAccepted: {
+                                        appController.renameProject(text)
+                                        focus = false
+                                    }
+                                    onEditingFinished: appController.renameProject(text)
+                                    background: Rectangle {
+                                        radius: 9
+                                        color: "#171922"
+                                        border.color: projectNameInput.activeFocus ? accent : "#343843"
+                                    }
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: "可直接修改项目名，按 Enter 保存"
+                                }
+                            }
                         }
                         Item { Layout.fillWidth: true }
                         GhostButton {
@@ -1544,7 +1889,11 @@ ApplicationWindow {
                                 apiKeySetupDialog.open()
                             }
                         }
-                        GhostButton { text: "最近项目"; onClicked: recentProjectsDialog.open() }
+                        GhostButton {
+                            objectName: "recentProjectsButton"
+                            text: "最近项目"
+                            onClicked: recentProjectsDialog.open()
+                        }
                         FlatButton { text: "+  创建项目"; onClicked: videoDialog.open() }
                     }
 
@@ -1699,8 +2048,9 @@ ApplicationWindow {
 
                     Rectangle {
                         id: understandingSection
+                        property bool expanded: true
                         Layout.fillWidth: true
-                        Layout.preferredHeight: understandingContent.implicitHeight + 36
+                        Layout.preferredHeight: expanded ? understandingContent.implicitHeight + 36 : 90
                         radius: 14
                         color: panel
                         border.color: understandingDone ? "#326b4d" : "#292c36"
@@ -1728,6 +2078,11 @@ ApplicationWindow {
                                         color: understandingDone ? "#8ee3b4" : textMuted
                                         font.pixelSize: 12
                                     }
+                                    TapHandler { onTapped: understandingSection.expanded = !understandingSection.expanded }
+                                }
+                                GhostButton {
+                                    text: understandingSection.expanded ? "收起  ▴" : "展开  ▾"
+                                    onClicked: understandingSection.expanded = !understandingSection.expanded
                                 }
                                 FlatButton {
                                     text: appController.analysisBusy ? "正在理解原片…" : understandingDone ? "重新理解原片" : appController.videoPath ? "开始理解原片  →" : "请先选择视频"
@@ -1743,9 +2098,44 @@ ApplicationWindow {
                                 }
                             }
 
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: understandingSection.expanded
+                                spacing: 9
+                                Text { text: "内容类型"; color: textMuted; font.pixelSize: 11; Layout.rightMargin: 4 }
+                                Repeater {
+                                    model: [
+                                        { value: "speech", label: "语音与画面" },
+                                        { value: "visual", label: "纯画面叙事" }
+                                    ]
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        Layout.preferredWidth: 112
+                                        Layout.preferredHeight: 30
+                                        radius: 8
+                                        color: appController.analysisContentMode === modelData.value ? "#6d28d9" : "#252832"
+                                        border.color: appController.analysisContentMode === modelData.value ? accentLight : "#343843"
+                                        Text { anchors.centerIn: parent; text: modelData.label; color: "white"; font.pixelSize: 11 }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            enabled: !appController.analysisBusy
+                                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                            onClicked: appController.setAnalysisContentMode(modelData.value)
+                                        }
+                                    }
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: appController.analysisContentModeHint
+                                    color: "#858b98"
+                                    font.pixelSize: 10
+                                    elide: Text.ElideRight
+                                }
+                            }
+
                             ColumnLayout {
                                 Layout.fillWidth: true
-                                visible: appController.analysisBusy || appController.analysisProgress > 0
+                                visible: understandingSection.expanded && (appController.analysisBusy || appController.analysisProgress > 0)
                                 spacing: 8
                                 RowLayout {
                                     Layout.fillWidth: true
@@ -1820,8 +2210,9 @@ ApplicationWindow {
 
                     Rectangle {
                         id: storySection
+                        property bool expanded: true
                         Layout.fillWidth: true
-                        Layout.preferredHeight: storyContent.implicitHeight + 36
+                        Layout.preferredHeight: expanded ? storyContent.implicitHeight + 36 : 90
                         radius: 14
                         color: panel
                         border.color: storyDone ? "#326b4d" : "#292c36"
@@ -1844,11 +2235,16 @@ ApplicationWindow {
                                         text: storyDone
                                               ? appController.storyStatus
                                               : understandingDone
-                                                ? "选择目标上限，生成自然英文解说与故事结构。"
+                                                ? "选择期望时长，生成自然英文解说与故事结构；最终严格控制在三分钟内。"
                                                 : "完成第 1 步理解原片后，才能生成故事与英文解说。"
                                         color: storyDone ? "#8ee3b4" : textMuted
                                         font.pixelSize: 12
                                     }
+                                    TapHandler { onTapped: storySection.expanded = !storySection.expanded }
+                                }
+                                GhostButton {
+                                    text: storySection.expanded ? "收起  ▴" : "展开  ▾"
+                                    onClicked: storySection.expanded = !storySection.expanded
                                 }
                                 FlatButton {
                                     text: appController.storyBusy ? "正在组织故事…" : storyDone ? "重新生成故事" : understandingDone ? "生成故事与英文解说  →" : "等待理解原片"
@@ -1866,10 +2262,16 @@ ApplicationWindow {
 
                             RowLayout {
                                 Layout.fillWidth: true
+                                visible: storySection.expanded
                                 spacing: 8
                                 enabled: understandingDone && !appController.storyBusy
                                 opacity: enabled ? 1 : 0.45
-                                Text { text: "目标上限"; color: textMuted; font.pixelSize: 11; Layout.rightMargin: 4 }
+                                Text {
+                                    text: appController.analysisContentMode === "visual" ? "期望时长" : "目标上限"
+                                    color: textMuted
+                                    font.pixelSize: 11
+                                    Layout.rightMargin: 4
+                                }
                                 Repeater {
                                     model: [60, 90, 120, 180]
                                     delegate: Rectangle {
@@ -1888,12 +2290,19 @@ ApplicationWindow {
                                         }
                                     }
                                 }
-                                Text { text: "原片信息不足时会自动缩短，不会强行填满。"; color: "#737986"; font.pixelSize: 10; Layout.fillWidth: true }
+                                Text {
+                                    text: appController.analysisContentMode === "visual"
+                                          ? "长片会优先保证故事完整，允许超过期望值，但绝不会超过 Shorts 三分钟上限。"
+                                          : "原片信息不足时会自动缩短，不会强行填满。"
+                                    color: "#737986"
+                                    font.pixelSize: 10
+                                    Layout.fillWidth: true
+                                }
                             }
 
                             Rectangle {
                                 Layout.fillWidth: true
-                                visible: appController.storyBusy || appController.storyStatus.indexOf("故事生成失败") === 0
+                                visible: storySection.expanded && (appController.storyBusy || appController.storyStatus.indexOf("故事生成失败") === 0)
                                 Layout.preferredHeight: visible ? 62 : 0
                                 radius: 10
                                 color: "#15171e"
@@ -1920,7 +2329,7 @@ ApplicationWindow {
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: 12
-                                visible: storyDone
+                                visible: storySection.expanded && storyDone
 
                                 RowLayout {
                                     Layout.fillWidth: true
@@ -2001,8 +2410,9 @@ ApplicationWindow {
 
                     Rectangle {
                         id: matchingSection
+                        property bool expanded: true
                         Layout.fillWidth: true
-                        Layout.preferredHeight: matchingContent.implicitHeight + 36
+                        Layout.preferredHeight: expanded ? matchingContent.implicitHeight + 36 : 90
                         radius: 14
                         color: panel
                         border.color: matchingDone ? "#326b4d" : "#292c36"
@@ -2022,31 +2432,46 @@ ApplicationWindow {
                                         text: appController.matches.length > 0
                                               ? appController.matchingStatus
                                               : appController.storyNarration.length > 0
-                                                ? "按故事事件绑定和画面描述，为每句解说提供最多 5 个原片候选。"
+                                                ? "自动从全部场景中选取镜头；需要时可展开高级调整人工纠错。"
                                                 : "完成故事与英文解说后，才能开始镜头匹配。"
                                         color: textMuted; font.pixelSize: 12
                                     }
+                                    TapHandler { onTapped: matchingSection.expanded = !matchingSection.expanded }
+                                }
+                                GhostButton {
+                                    text: matchingSection.expanded ? "收起  ▴" : "展开  ▾"
+                                    onClicked: matchingSection.expanded = !matchingSection.expanded
                                 }
                                 FlatButton {
-                                    text: appController.matchingBusy ? "正在匹配…" : appController.matches.length > 0 ? "重新匹配" : "生成镜头匹配  →"
+                                    text: appController.matchingBusy ? "正在自动匹配…" : appController.matches.length > 0 ? "重新自动匹配" : "自动匹配镜头  →"
                                     enabled: appController.storyNarration.length > 0 && !appController.matchingBusy
                                     onClicked: appController.generateMatches()
                                 }
                             }
-                            Text {
-                                visible: appController.matches.length > 0
-                                text: appController.roughCutSummary
-                                color: accentLight
-                                font.pixelSize: 11
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: matchingSection.expanded && appController.matches.length > 0
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: appController.roughCutSummary + " · 已自动完成，无需逐句选择"
+                                    color: accentLight
+                                    font.pixelSize: 11
+                                }
+                                GhostButton {
+                                    text: matchingAdvancedVisible ? "隐藏高级调整" : "高级调整（可选）"
+                                    onClicked: matchingAdvancedVisible = !matchingAdvancedVisible
+                                }
                             }
 
                             Repeater {
                                 model: appController.matches
+                                visible: matchingSection.expanded && matchingAdvancedVisible
                                 delegate: Rectangle {
                                     id: matchingItem
                                     required property var modelData
+                                    visible: matchingSection.expanded && matchingAdvancedVisible
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: 292
+                                    Layout.preferredHeight: visible ? 292 : 0
                                     radius: 12
                                     color: "#15171e"
                                     border.color: "#292c36"
@@ -2132,8 +2557,9 @@ ApplicationWindow {
 
                     Rectangle {
                         id: exportSection
+                        property bool expanded: true
                         Layout.fillWidth: true
-                        Layout.preferredHeight: appController.matches.length > 0 ? 260 : 116
+                        Layout.preferredHeight: expanded ? (appController.matches.length > 0 ? 348 : 116) : 90
                         radius: 14
                         color: panel
                         border.color: exportDone ? "#326b4d" : "#292c36"
@@ -2154,17 +2580,33 @@ ApplicationWindow {
                                               : "完成镜头匹配后，才能生成粗剪预览。"
                                         color: textMuted; font.pixelSize: 12
                                     }
+                                    TapHandler { onTapped: exportSection.expanded = !exportSection.expanded }
                                 }
+                                GhostButton {
+                                    text: exportSection.expanded ? "收起  ▴" : "展开  ▾"
+                                    onClicked: exportSection.expanded = !exportSection.expanded
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: exportSection.expanded && appController.matches.length > 0
+                                spacing: 9
                                 FlatButton {
                                     text: appController.exportBusy ? "正在生成…" : appController.previewVideoReady ? "重新生成成片预览" : "生成成片预览  →"
                                     enabled: appController.narrationAudioReady && !appController.exportBusy
                                     onClicked: appController.generateRoughPreview()
                                 }
                                 GhostButton {
+                                    text: "仅字幕测试预览"
+                                    enabled: appController.matches.length > 0 && !appController.exportBusy
+                                    onClicked: appController.generateSubtitleOnlyPreview()
+                                }
+                                GhostButton {
                                     text: "字幕样式"
-                                    enabled: appController.syncedSrtReady
+                                    enabled: appController.storyNarration.length > 0
                                     onClicked: subtitleStyleDialog.open()
                                 }
+                                Item { Layout.fillWidth: true }
                                 GhostButton {
                                     visible: appController.previewVideoReady
                                     text: "用播放器打开"
@@ -2173,11 +2615,14 @@ ApplicationWindow {
                             }
                             RowLayout {
                                 Layout.fillWidth: true
-                                visible: appController.matches.length > 0
+                                visible: exportSection.expanded && appController.matches.length > 0
                                 spacing: 9
                                 GhostButton {
                                     text: "1  导出 SRT 到 GPT-SoVITS"
-                                    onClicked: saveTtsSrtDialog.open()
+                                    onClicked: {
+                                        saveTtsSrtDialog.currentFile = appController.prepareTtsSrtExportUrl()
+                                        saveTtsSrtDialog.open()
+                                    }
                                 }
                                 GhostButton {
                                     text: appController.narrationAudioReady ? "重新导入英文配音" : "2  导入英文配音"
@@ -2202,9 +2647,34 @@ ApplicationWindow {
                                     font.bold: true
                                 }
                             }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: exportSection.expanded && appController.matches.length > 0
+                                spacing: 10
+                                Text {
+                                    text: "保留原片声音"
+                                    color: textMain
+                                    font.pixelSize: 11
+                                    font.bold: true
+                                }
+                                Switch {
+                                    checked: appController.preserveOriginalAudio
+                                    onToggled: appController.setPreserveOriginalAudio(checked)
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: appController.preserveOriginalAudio
+                                          ? (appController.narrationAudioReady
+                                             ? "已开启：原声将降低音量并与英文解说混合。"
+                                             : "已开启：仅字幕测试将保留剪辑镜头的原声。")
+                                          : "默认关闭：成片不包含原片声音。"
+                                    color: textMuted
+                                    font.pixelSize: 10
+                                }
+                            }
                             ColumnLayout {
                                 Layout.fillWidth: true
-                                visible: appController.matches.length > 0
+                                visible: exportSection.expanded && appController.matches.length > 0
                                 spacing: 7
                                 RowLayout {
                                     Layout.fillWidth: true
@@ -2223,7 +2693,7 @@ ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true
                         Layout.topMargin: 8
-                        visible: appController.events.length > 0
+                        visible: understandingSection.expanded && appController.events.length > 0
                         Text { text: "原片事件"; color: textMain; font.pixelSize: 18; font.bold: true }
                         Text { text: appController.events.length + " 个场景事件"; color: textMuted; font.pixelSize: 12 }
                         Item { Layout.fillWidth: true }
@@ -2235,7 +2705,7 @@ ApplicationWindow {
                         columns: 2
                         columnSpacing: 14
                         rowSpacing: 12
-                        visible: appController.events.length > 0
+                        visible: understandingSection.expanded && appController.events.length > 0
 
                         Repeater {
                             model: appController.events.slice(0, 12)

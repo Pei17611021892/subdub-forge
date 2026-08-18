@@ -44,6 +44,7 @@ def describe_event_keyframes(
     batch_size = max(1, min(8, int(vision.get("batch_size", 4))))
     payload = json.loads(events_json.read_text(encoding="utf-8"))
     events = list(payload.get("events", []))
+    content_mode = str(payload.get("content_mode", "speech"))
     project_analysis_dir = events_json.parent
     targets = [event for event in events if str(event.get("keyframe", "")).strip()]
     if not targets:
@@ -52,27 +53,59 @@ def describe_event_keyframes(
     client = OpenAI(api_key=api_key, base_url=base_url)
     for offset in range(0, len(targets), batch_size):
         batch = targets[offset : offset + batch_size]
+        if content_mode == "visual":
+            instruction = (
+                "下面是按时间顺序排列的视频场景，每个场景可能包含起始关键帧和后续采样帧。"
+                "请把同一事件的多张图当作短动作序列分析，而不是互不相关的图片。"
+                "只依据可见证据，详细记录：人物外观与可区分特征；身体姿态、朝向、视线、手部动作；"
+                "人与机器、工具、水体、植被及其他物体的交互；机器或环境在前后帧中的状态变化；"
+                "地形、天气、光线、水流、污染物和潜在障碍；动作是否受阻、重复、完成或产生可见结果；"
+                "镜头景别及有助于前后场景衔接的线索。不要编造姓名、职业、动机、机器用途、因果或画外事件。"
+                "无法确定时使用“似乎”“可能”并写入 uncertainty。description 使用详细中文事实描述；"
+                "story_value 概括这一段对故事推进的价值；continuity 写与前后镜头可衔接的主体、动作或环境线索。"
+                "严格返回 JSON 数组："
+                "[{\"id\":1,\"description\":\"...\",\"story_value\":\"...\","
+                "\"continuity\":\"...\",\"uncertainty\":\"...\"}]。"
+            )
+        else:
+            instruction = (
+                "依次分析下面的关键帧。只描述画面中可见的人物、动作、物体、环境和镜头类型，"
+                "不要猜测看不到的剧情。每条用简洁中文，适合视频剪辑检索。"
+                "严格返回 JSON 数组，格式为 [{\"id\":1,\"description\":\"...\"}]。"
+            )
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
-                "text": (
-                    "依次分析下面的关键帧。只描述画面中可见的人物、动作、物体、环境和镜头类型，"
-                    "不要猜测看不到的剧情。每条用简洁中文，适合视频剪辑检索。"
-                    "严格返回 JSON 数组，格式为 [{\"id\":1,\"description\":\"...\"}]。"
-                ),
+                "text": instruction,
             }
         ]
         for event in batch:
-            keyframe = project_analysis_dir / str(event["keyframe"])
-            if not keyframe.exists():
+            frame_paths = [str(event.get("keyframe", ""))]
+            if content_mode == "visual":
+                frame_paths.extend(str(value) for value in event.get("visual_samples", [])[:2])
+            existing_frames = [
+                project_analysis_dir / value for value in frame_paths
+                if value and (project_analysis_dir / value).exists()
+            ]
+            if not existing_frames:
                 continue
-            content.append({"type": "text", "text": f"事件 {event['id']}，时间 {event['start']}-{event['end']} 秒："})
             content.append(
                 {
-                    "type": "image_url",
-                    "image_url": {"url": _image_data_url(keyframe), "detail": "low"},
+                    "type": "text",
+                    "text": (
+                        f"事件 {event['id']}，时间 {event['start']}-{event['end']} 秒，"
+                        f"共 {len(existing_frames)} 张时间顺序画面："
+                    ),
                 }
             )
+            for frame_index, frame_path in enumerate(existing_frames, start=1):
+                content.append({"type": "text", "text": f"事件 {event['id']} · 画面 {frame_index}："})
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_url(frame_path), "detail": "low"},
+                    }
+                )
 
         try:
             response = client.chat.completions.create(
@@ -84,9 +117,16 @@ def describe_event_keyframes(
             raise friendly_api_error(exc, base_url, "视觉描述") from exc
         text = str(response.choices[0].message.content or "")
         descriptions = _parse_json_array(text)
-        by_id = {int(item.get("id", 0)): str(item.get("description", "")).strip() for item in descriptions}
+        by_id = {int(item.get("id", 0)): item for item in descriptions}
         for event in batch:
-            event["visual_description"] = by_id.get(int(event["id"]), event.get("visual_description", ""))
+            description = by_id.get(int(event["id"]), {})
+            event["visual_description"] = str(
+                description.get("description", event.get("visual_description", ""))
+            ).strip()
+            if content_mode == "visual":
+                event["story_value"] = str(description.get("story_value", "")).strip()
+                event["continuity"] = str(description.get("continuity", "")).strip()
+                event["visual_uncertainty"] = str(description.get("uncertainty", "")).strip()
 
         payload["events"] = events
         payload["vision_model"] = model

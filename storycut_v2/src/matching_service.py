@@ -21,6 +21,8 @@ def generate_shot_matches(
 
     event_by_id = {int(event.get("id", 0)): event for event in events}
     matches: list[dict[str, Any]] = []
+    used_counts: dict[int, int] = {}
+    last_selected_start = -1.0
     for narration in story.get("narration", []):
         if not isinstance(narration, dict):
             continue
@@ -36,13 +38,23 @@ def generate_shot_matches(
             )
         ).strip()
         candidates = [
-            _score_candidate(event, query, int(event.get("id", 0)) in bound_ids)
+            _score_candidate(
+                event,
+                query,
+                int(event.get("id", 0)) in bound_ids,
+                used_counts.get(int(event.get("id", 0)), 0),
+                last_selected_start,
+            )
             for event in events
         ]
         candidates.sort(key=lambda item: (-float(item["score"]), float(item["start"])))
         candidates = candidates[: min(5, len(candidates))]
         selected = candidates[0]
         selected_clips = _fit_clips(candidates, int(selected["event_id"]), float(narration.get("estimated_duration_sec", 0) or 0))
+        last_selected_start = float(selected["start"])
+        for clip in selected_clips:
+            event_id = int(clip.get("event_id", 0))
+            used_counts[event_id] = used_counts.get(event_id, 0) + 1
         matches.append(
             {
                 "narration_id": int(narration.get("id", len(matches) + 1)),
@@ -60,7 +72,7 @@ def generate_shot_matches(
 
     payload = {
         "schema_version": 1,
-        "strategy": "story-event binding + local text similarity",
+        "strategy": "automatic story binding + visual similarity + chronology + reuse control",
         "items": matches,
     }
     matches_json.parent.mkdir(parents=True, exist_ok=True)
@@ -276,7 +288,13 @@ def _normalized_words(text: str) -> str:
     return " ".join(re.findall(r"[a-z0-9']+", text.casefold()))
 
 
-def _score_candidate(event: dict[str, Any], query: str, directly_bound: bool) -> dict[str, Any]:
+def _score_candidate(
+    event: dict[str, Any],
+    query: str,
+    directly_bound: bool,
+    used_count: int = 0,
+    last_selected_start: float = -1.0,
+) -> dict[str, Any]:
     event_text = " ".join(
         (
             str(event.get("visual_description", "")),
@@ -284,11 +302,18 @@ def _score_candidate(event: dict[str, Any], query: str, directly_bound: bool) ->
         )
     ).strip()
     similarity = _text_similarity(query, event_text)
-    score = min(0.99, (0.78 if directly_bound else 0.12) + similarity * (0.21 if directly_bound else 0.68))
+    score = (0.78 if directly_bound else 0.12) + similarity * (0.21 if directly_bound else 0.68)
+    start = float(event.get("start", 0) or 0)
+    if last_selected_start >= 0:
+        score += 0.06 if start >= last_selected_start else -0.08
+    score -= min(0.32, used_count * 0.14)
+    score = min(0.99, max(0.01, score))
     reason = "故事稿已绑定此事件" if directly_bound else ("画面描述较相关" if similarity >= 0.18 else "备用原片场景")
+    if used_count:
+        reason += " · 已降低重复使用"
     return {
         "event_id": int(event.get("id", 0)),
-        "start": round(float(event.get("start", 0) or 0), 3),
+        "start": round(start, 3),
         "end": round(float(event.get("end", 0) or 0), 3),
         "duration_sec": round(
             max(0.0, float(event.get("end", 0) or 0) - float(event.get("start", 0) or 0)),

@@ -3,6 +3,7 @@ app:
   theme: dark
 
 projects_dir: ./projects
+export_dir: ../export
 
 shared:
   env_file: ../.env
@@ -15,10 +16,12 @@ story:
   target_duration_sec: 90
   narrative_style: natural_science_youtube
   model: gpt-4o-mini
+  editor_model: ''
   base_url: ''
   temperature: 0.55
 
 analysis:
+  content_mode: speech
   asr_model: large-v3
   model_dir: ../models/faster-whisper
   auto_download_model: true
@@ -48,6 +51,8 @@ export:
   crf: 18
   preset: veryfast
   audio_bitrate: 192k
+  preserve_original_audio: false
+  original_audio_mix_volume: 0.22
   fit_mode: original
   cleanup_original_subtitles: false
   source_crop_height_ratio: 0.82

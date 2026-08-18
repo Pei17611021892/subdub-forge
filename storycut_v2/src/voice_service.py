@@ -10,7 +10,42 @@ from typing import Any
 from .media_service import _resolve_tool
 
 
-MIN_TTS_UNIT_DURATION_SEC = 0.6
+TTS_WORDS_PER_SECOND = 2.45
+TTS_SYLLABLES_PER_SECOND = 4.2
+MIN_TTS_UNIT_DURATION_SEC = 0.75
+SHORTS_MAX_DURATION_SEC = 179.0
+
+
+def estimate_tts_unit_duration(text: str) -> float:
+    """Estimate English TTS duration from both word and syllable workload."""
+    cleaned = text.strip()
+    words = re.findall(r"\b[A-Za-z][A-Za-z'-]*\b", cleaned)
+    word_count = max(1, len(words))
+    syllable_count = max(1, sum(_estimate_english_syllables(word) for word in words))
+    if cleaned.endswith((".", "!", "?", '"', "”", "’")):
+        pause = 0.34
+    elif cleaned.endswith((",", ";", ":")):
+        pause = 0.20
+    else:
+        pause = 0.14
+    articulation = max(
+        word_count / TTS_WORDS_PER_SECOND,
+        syllable_count / TTS_SYLLABLES_PER_SECOND,
+    )
+    return round(max(MIN_TTS_UNIT_DURATION_SEC, articulation + pause), 3)
+
+
+def _estimate_english_syllables(word: str) -> int:
+    """Small dependency-free English syllable heuristic for planning estimates."""
+    value = re.sub(r"[^a-z]", "", word.casefold())
+    if not value:
+        return 1
+    groups = len(re.findall(r"[aeiouy]+", value))
+    if value.endswith("e") and not value.endswith(("le", "ye")) and groups > 1:
+        groups -= 1
+    if value.endswith("ed") and len(value) > 3 and value[-3] not in "dt" and groups > 1:
+        groups -= 1
+    return max(1, groups)
 
 
 def prepare_tts_srt(story_json: Path, output_dir: Path) -> dict[str, Any]:
@@ -26,13 +61,15 @@ def prepare_tts_srt(story_json: Path, output_dir: Path) -> dict[str, Any]:
     subtitle_index = 1
     for item in narration:
         text = str(item.get("text_en", "")).strip()
-        duration = max(MIN_TTS_UNIT_DURATION_SEC, float(item.get("estimated_duration_sec", 0) or 0))
         sentences = split_gpt_sovits_units(text)
-        weights = [max(1, len(re.findall(r"\b[\w'-]+\b", sentence))) for sentence in sentences]
-        weight_total = sum(weights)
+        natural_durations = [estimate_tts_unit_duration(sentence) for sentence in sentences]
+        saved_duration = float(item.get("estimated_duration_sec", 0) or 0)
+        natural_total = sum(natural_durations)
+        scale = max(1.0, saved_duration / natural_total) if natural_total else 1.0
+        sentence_durations = [value * scale for value in natural_durations]
+        duration = sum(sentence_durations)
         sentence_cursor = cursor
-        for sentence, weight in zip(sentences, weights):
-            sentence_duration = duration * weight / weight_total
+        for sentence, sentence_duration in zip(sentences, sentence_durations):
             srt_blocks.append(
                 f"{subtitle_index}\n"
                 f"{_srt_time(sentence_cursor)} --> {_srt_time(sentence_cursor + sentence_duration)}\n"
@@ -215,4 +252,26 @@ def split_gpt_sovits_units(text: str) -> list[str]:
     tail = cleaned[start:].strip()
     if tail:
         units.append(tail)
-    return units or [cleaned]
+    units = units or [cleaned]
+    # GPT-SoVITS splits at punctuation, but isolated connectors such as
+    # "Next," or "All right," sound unnatural and inflate the displayed line
+    # count. Merge very short fragments into the following unit (or the
+    # preceding one when they occur at the end).
+    merged: list[str] = []
+    pending: list[str] = []
+    for unit in units:
+        word_count = len(re.findall(r"\b[\w'-]+\b", unit))
+        if word_count < 3:
+            pending.append(unit)
+            continue
+        if pending:
+            unit = " ".join([*pending, unit])
+            pending = []
+        merged.append(unit)
+    if pending:
+        tail = " ".join(pending)
+        if merged:
+            merged[-1] = f"{merged[-1]} {tail}"
+        else:
+            merged.append(tail)
+    return merged

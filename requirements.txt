@@ -1,5 +1,5 @@
 # Install the dependencies required by both desktop applications.
--r commentary_studio/requirements.txt
+-r storycut_v2/requirements.txt
 
 # Optional but useful for charset/path handling.
 charset-normalizer>=3.3.2

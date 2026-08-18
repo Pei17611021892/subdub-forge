@@ -31,3 +31,16 @@ def load_config(root: Path) -> dict[str, Any]:
         _read_yaml(root / "config.default.yaml"),
         _read_yaml(root / "config.user.yaml"),
     )
+
+
+def update_user_config(root: Path, values: dict[str, Any]) -> None:
+    """Merge user-facing settings without overwriting unrelated local options."""
+    path = root / "config.user.yaml"
+    updated = _merge(_read_yaml(path), values)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".update_tmp")
+    temporary.write_text(
+        yaml.safe_dump(updated, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    temporary.replace(path)

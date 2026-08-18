@@ -378,6 +378,72 @@ def build_timeline_events(
     return payload
 
 
+def extract_visual_sample_frames(
+    video: Path,
+    samples_dir: Path,
+    config: dict[str, Any],
+    app_root: Path,
+) -> list[dict[str, Any]]:
+    """Extract regular low-resolution frames for visual-only temporal understanding."""
+    shared = config.get("shared", {})
+    ffmpeg = _resolve_tool(str(shared.get("ffmpeg_bin", "ffmpeg")), app_root, "ffmpeg")
+    if not ffmpeg:
+        raise FileNotFoundError("找不到 FFmpeg，无法抽取连续画面样本")
+    analysis = config.get("analysis", {})
+    interval = max(1.0, float(analysis.get("frame_sample_interval_sec", 3) or 3))
+    width = max(240, int(analysis.get("keyframe_width", 640) or 640))
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    for old_file in samples_dir.glob("sample_*.jpg"):
+        old_file.unlink(missing_ok=True)
+    output_pattern = samples_dir / "sample_%05d.jpg"
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(video),
+        "-vf",
+        f"fps=1/{interval},scale={width}:-2",
+        "-q:v",
+        "5",
+        str(output_pattern),
+    ]
+    result = subprocess.run(command, capture_output=True)
+    if result.returncode != 0:
+        error = result.stderr.decode("utf-8", errors="replace")[-2000:]
+        raise RuntimeError(f"连续画面样本抽取失败：{error}")
+    return [
+        {
+            "timestamp": round(index * interval, 3),
+            "path": path,
+        }
+        for index, path in enumerate(sorted(samples_dir.glob("sample_*.jpg")))
+    ]
+
+
+def attach_visual_samples(
+    events_json: Path,
+    samples: list[dict[str, Any]],
+    max_samples_per_event: int = 2,
+) -> dict[str, Any]:
+    payload = json.loads(events_json.read_text(encoding="utf-8"))
+    events = [event for event in payload.get("events", []) if isinstance(event, dict)]
+    for event in events:
+        start = float(event.get("start", 0) or 0)
+        end = float(event.get("end", start) or start)
+        available = [
+            item for item in samples
+            if start <= float(item.get("timestamp", -1)) < max(end, start + 0.05)
+        ]
+        if len(available) > max_samples_per_event:
+            available = [available[0], available[-1]]
+        event["visual_samples"] = [
+            f"visual_samples/{Path(str(item['path'])).name}" for item in available
+        ]
+    payload["events"] = events
+    events_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
+
+
 def _find_model_source(model_dir: Path, model_name: str) -> str | None:
     manual_candidates = (
         model_dir,
