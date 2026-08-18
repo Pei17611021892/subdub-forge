@@ -16,7 +16,7 @@ requirements.txt         共用基础依赖
 
 ### StoryCut V1
 
-旧的一比一/压缩翻译工具，当前版本 `v1.0.3`。
+旧的一比一/压缩翻译工具，当前版本 `v1.0.4`。
 
 - 启动：双击 `点我启动StoryCut V1（一比一翻译）.vbs`
 - 代码与配置：[storycut_v1/README.md](storycut_v1/README.md)
@@ -25,7 +25,7 @@ requirements.txt         共用基础依赖
 
 ### StoryCut V2
 
-AI 解说剪辑工具，当前版本 `v0.1.7`，已经完成初版封版。
+AI 解说剪辑工具，当前版本 `v0.1.8`，已经完成初版封版。
 
 - 启动：双击 `点我启动StoryCut V2（AI解说剪辑）.vbs`
 - 代码与配置：[storycut_v2/README.md](storycut_v2/README.md)
@@ -67,7 +67,7 @@ Faster-Whisper 模型统一放在 `models/faster-whisper/`，具体参见
 
 两个应用拥有各自的默认配置和用户配置，只有 API 密钥、模型、虚拟环境和 FFmpeg 等大型依赖共享。
 
-两个应用启动约 1 秒后会在后台检查更新；有新版本时，原“检查更新”按钮会显示可更新标识，不会自动弹窗。确认更新后，程序直接下载 GitHub `main` 分支最新文件，根据根 `update_manifest.json` 同步两个应用、启动器和文档，并删除清单中已废弃的旧程序文件。
+两个应用启动约 1 秒后会在后台检查更新；有新版本时，原“检查更新”按钮会显示可更新标识，不会自动弹窗。确认更新后，若检测到正常 Git 克隆和 `main` 分支，会在后台执行 `git pull --ff-only origin main`；无 Git、非克隆目录、存在受跟踪的本地修改或 Git 更新失败时，自动回退到 GitHub `main` ZIP 清单同步。两种方式都不执行 `git clean` 或强制重置。
 
 更新会先备份受影响的程序文件到 `.update_backups/`；`.env`、`models/`、`venv/`、两套用户配置、项目、`output/` 和 `export/` 均受保护。旧目录版本会通过 `commentary_studio/` 与 `translator_studio/` 中的一次性更新桥接自动迁移，桥接目录不是实际应用。
 

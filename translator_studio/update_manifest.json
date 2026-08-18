@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "version": "1.0.3",
+  "version": "1.0.4",
   "files": [
     "src/gui_launcher.py",
     "src/update_manager.py",

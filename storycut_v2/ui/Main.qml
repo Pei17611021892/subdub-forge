@@ -1111,7 +1111,7 @@ ApplicationWindow {
             Text {
                 Layout.fillWidth: true
                 visible: appController.updateAvailable
-                text: "更新会自动同步 GitHub 上的两个应用、启动器和程序文件，并删除清单中已废弃的旧文件。项目、用户设置、.env、模型和导出不会被修改。"
+                text: "更新会优先在后台执行 Git fast-forward；无 Git 或 Git 不可用时，自动改用内置 ZIP 同步。两种方式都会更新两个应用和启动器，但不会清理项目、未跟踪文件、用户设置、.env、模型或导出。"
                 color: textMuted
                 font.pixelSize: 10
                 wrapMode: Text.WordWrap

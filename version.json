@@ -1,7 +1,7 @@
 {
   "name": "声画译匠 · SubDub Forge",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "仓库级更新已可同步两个应用、根目录启动器和已删除的旧程序文件。"
+  "notes": "更新按钮优先在后台执行 Git fast-forward pull，无 Git 或不可用时自动回退到仓库 ZIP 同步。"
 }

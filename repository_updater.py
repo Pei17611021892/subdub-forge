@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 import urllib.request
 import zipfile
@@ -236,6 +237,15 @@ def download_and_apply(
     if version_key(requested_version) <= version_key(str(local["version"])):
         raise UpdateError("远程版本不高于本地版本，无需更新")
 
+    git_result = _try_git_fast_forward(
+        app_dir,
+        repository,
+        requested_version,
+        report,
+    )
+    if git_result is not None:
+        return git_result
+
     archive_url = f"https://github.com/{repository}/archive/refs/heads/main.zip"
     report("正在下载 GitHub 最新仓库文件……")
     try:
@@ -243,6 +253,84 @@ def download_and_apply(
     except Exception as exc:
         raise UpdateError(f"下载 GitHub 主分支失败：{exc}") from exc
     return apply_repository_archive(app_dir, remote, archive_data, report)
+
+
+def _run_git(git_executable: str, *arguments: str, timeout: int = 45) -> subprocess.CompletedProcess[str]:
+    creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    environment = os.environ.copy()
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    return subprocess.run(
+        [git_executable, "-C", str(REPOSITORY_ROOT), *arguments],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+        creationflags=creation_flags,
+        env=environment,
+    )
+
+
+def _try_git_fast_forward(
+    app_relative_dir: str,
+    repository: str,
+    requested_version: str,
+    report: Callable[[str], None],
+) -> Path | None:
+    git_directory = REPOSITORY_ROOT / ".git"
+    git_executable = shutil.which("git")
+    if not git_directory.exists() or not git_executable:
+        report("未检测到 Git 克隆环境，改用内置 ZIP 更新……")
+        return None
+
+    try:
+        remote_result = _run_git(git_executable, "remote", "get-url", "origin")
+        remote_url = remote_result.stdout.strip()
+        normalized_remote = remote_url.lower().replace("\\", "/").replace(":", "/")
+        if remote_result.returncode != 0 or repository.lower() not in normalized_remote:
+            report("Git origin 不是当前 StoryCut 仓库，改用内置 ZIP 更新……")
+            return None
+
+        branch_result = _run_git(git_executable, "branch", "--show-current")
+        if branch_result.returncode != 0 or branch_result.stdout.strip() != "main":
+            report("当前不在 Git main 分支，改用内置 ZIP 更新……")
+            return None
+
+        status_result = _run_git(
+            git_executable,
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        )
+        if status_result.returncode != 0 or status_result.stdout.strip():
+            report("Git 跟踪的程序文件存在本地修改，改用可备份回滚的 ZIP 更新……")
+            return None
+
+        report("已检测到 Git 克隆，正在后台执行 git pull --ff-only origin main……")
+        pull_result = _run_git(
+            git_executable,
+            "pull",
+            "--ff-only",
+            "origin",
+            "main",
+            timeout=180,
+        )
+        if pull_result.returncode != 0:
+            detail = (pull_result.stderr or pull_result.stdout).strip().splitlines()
+            reason = detail[-1] if detail else "未知 Git 错误"
+            report(f"Git 快进更新失败（{reason}），改用内置 ZIP 更新……")
+            return None
+
+        installed = read_version(REPOSITORY_ROOT / app_relative_dir / "version.json")
+        if version_key(str(installed.get("version", ""))) < version_key(requested_version):
+            report("Git 更新后的版本仍低于 GitHub 检测结果，改用内置 ZIP 更新……")
+            return None
+        report("Git 快进更新完成，未跟踪文件和忽略的用户数据均已保留")
+        return git_directory
+    except (OSError, subprocess.SubprocessError, UpdateError) as exc:
+        report(f"Git 更新不可用（{exc}），改用内置 ZIP 更新……")
+        return None
 
 
 def apply_repository_archive(

@@ -1,7 +1,7 @@
 {
   "name": "StoryCut Studio",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "新项目按 v2-MMDD 自动命名并支持顶部改名；更新按钮升级为仓库级同步，可更新两个应用、启动器并删除旧程序文件。"
+  "notes": "更新按钮优先在后台执行 git pull --ff-only origin main；无 Git、非克隆目录或 Git 不可用时，自动回退到内置 ZIP 更新器。"
 }

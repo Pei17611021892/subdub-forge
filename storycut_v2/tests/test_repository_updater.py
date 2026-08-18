@@ -3,10 +3,14 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 
 UPDATER_PATH = Path(__file__).resolve().parents[2] / "repository_updater.py"
@@ -29,6 +33,133 @@ def make_archive(files: dict[str, bytes]) -> bytes:
 
 
 class RepositoryUpdaterTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("git"), "Git is required for this integration test")
+    def test_real_fast_forward_preserves_ignored_and_untracked_files(self) -> None:
+        updater = load_updater()
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            remote = root / "storycut-test-remote.git"
+            source = root / "source"
+            consumer = root / "consumer"
+
+            def git(cwd: Path, *arguments: str) -> None:
+                result = subprocess.run(
+                    [shutil.which("git") or "git", *arguments],
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+            remote.mkdir()
+            git(remote, "init", "--bare")
+            source.mkdir()
+            git(source, "init", "-b", "main")
+            git(source, "config", "user.email", "storycut-test@example.invalid")
+            git(source, "config", "user.name", "StoryCut Test")
+            (source / ".gitignore").write_text(".env\n", encoding="utf-8")
+            (source / "storycut_v2").mkdir()
+            (source / "storycut_v2" / "version.json").write_text(
+                json.dumps({"version": "0.1.7", "repository": "owner/repo"}),
+                encoding="utf-8",
+            )
+            (source / "old_program.py").write_text("old\n", encoding="utf-8")
+            git(source, "add", ".")
+            git(source, "commit", "-m", "old release")
+            git(source, "remote", "add", "origin", str(remote))
+            git(source, "push", "-u", "origin", "main")
+            git(root, "clone", "--branch", "main", str(remote), str(consumer))
+
+            (consumer / ".env").write_text("SECRET=keep\n", encoding="utf-8")
+            (consumer / "customer_notes.txt").write_text("keep me\n", encoding="utf-8")
+            (source / "storycut_v2" / "version.json").write_text(
+                json.dumps({"version": "0.1.8", "repository": "owner/repo"}),
+                encoding="utf-8",
+            )
+            (source / "old_program.py").unlink()
+            (source / "new_program.py").write_text("new\n", encoding="utf-8")
+            git(source, "add", "-A")
+            git(source, "commit", "-m", "new release")
+            git(source, "push", "origin", "main")
+
+            updater.REPOSITORY_ROOT = consumer
+            result = updater._try_git_fast_forward(
+                "storycut_v2",
+                remote.name,
+                "0.1.8",
+                lambda _message: None,
+            )
+
+            self.assertEqual(result, consumer / ".git")
+            self.assertFalse((consumer / "old_program.py").exists())
+            self.assertTrue((consumer / "new_program.py").exists())
+            self.assertEqual((consumer / ".env").read_text(encoding="utf-8"), "SECRET=keep\n")
+            self.assertEqual(
+                (consumer / "customer_notes.txt").read_text(encoding="utf-8"),
+                "keep me\n",
+            )
+
+    def test_git_clone_prefers_fast_forward_pull(self) -> None:
+        updater = load_updater()
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            updater.REPOSITORY_ROOT = root
+            (root / ".git").mkdir()
+            (root / "storycut_v2").mkdir()
+            (root / "storycut_v2" / "version.json").write_text(
+                json.dumps({"version": "0.1.8", "repository": "owner/repo"}),
+                encoding="utf-8",
+            )
+            calls: list[tuple[str, ...]] = []
+
+            def fake_git(_executable: str, *arguments: str, **_kwargs):
+                calls.append(arguments)
+                outputs = {
+                    ("remote", "get-url", "origin"): "https://github.com/owner/repo.git\n",
+                    ("branch", "--show-current"): "main\n",
+                    ("status", "--porcelain", "--untracked-files=no"): "",
+                    ("pull", "--ff-only", "origin", "main"): "Already up to date.\n",
+                }
+                return CompletedProcess(arguments, 0, outputs[arguments], "")
+
+            with patch.object(updater.shutil, "which", return_value="git.exe"), patch.object(
+                updater, "_run_git", side_effect=fake_git
+            ):
+                result = updater._try_git_fast_forward(
+                    "storycut_v2", "owner/repo", "0.1.8", lambda _message: None
+                )
+
+            self.assertEqual(result, root / ".git")
+            self.assertIn(("pull", "--ff-only", "origin", "main"), calls)
+
+    def test_git_with_tracked_local_changes_falls_back_without_pull(self) -> None:
+        updater = load_updater()
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            updater.REPOSITORY_ROOT = root
+            (root / ".git").mkdir()
+            calls: list[tuple[str, ...]] = []
+
+            def fake_git(_executable: str, *arguments: str, **_kwargs):
+                calls.append(arguments)
+                outputs = {
+                    ("remote", "get-url", "origin"): "git@github.com:owner/repo.git\n",
+                    ("branch", "--show-current"): "main\n",
+                    ("status", "--porcelain", "--untracked-files=no"): " M storycut_v2/main.py\n",
+                }
+                return CompletedProcess(arguments, 0, outputs[arguments], "")
+
+            with patch.object(updater.shutil, "which", return_value="git.exe"), patch.object(
+                updater, "_run_git", side_effect=fake_git
+            ):
+                result = updater._try_git_fast_forward(
+                    "storycut_v2", "owner/repo", "0.1.8", lambda _message: None
+                )
+
+            self.assertIsNone(result)
+            self.assertNotIn(("pull", "--ff-only", "origin", "main"), calls)
+
     def test_repository_sync_adds_replaces_deletes_and_protects_user_data(self) -> None:
         updater = load_updater()
         with tempfile.TemporaryDirectory() as temporary_dir:

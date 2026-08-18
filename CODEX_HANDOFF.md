@@ -72,7 +72,9 @@ v0.1.6 之后的待发布增强：API 设置支持分别选择故事与视觉模
 
 StoryCut V2 新项目不再使用视频文件名，而是按创建日期自动命名为 `v2-MMDD`；当天已有同名项目时依次追加 `-1`、`-2`。首页顶部提供项目名编辑框，手动修改会同步重命名项目目录、项目 JSON 和最近项目显示；之后的根 `export/` 产物使用新项目名前缀。任务运行期间禁止改名，防止后台线程继续写入旧路径。
 
-v0.1.7 / V1 v1.0.3 将两个应用的更新按钮升级为仓库级自动同步。`repository_updater.py` 直接下载 GitHub `main` 分支 ZIP，依据根 `update_manifest.json` 新增或替换两个应用、根启动器和文档，并删除旧清单或 `remove` 中已废弃的程序文件。严格保护 `.env`、`models/`、`venv/`、`projects/`、`output/`、`export/`、`cache/` 和 `config.user.yaml`，受影响程序文件先备份到 `.update_backups/`。旧 `commentary_studio/` 和 `translator_studio/` 保留最小化一次性更新桥接：旧版用户点击原更新按钮后，重启旧入口即会自动同步根仓库并打开新应用。发布时必须同时创建 `storycut-v0.1.7` 和 `v1.0.3` 标签，供旧更新器完成首次桥接。
+v0.1.7 / V1 v1.0.3 将两个应用的更新按钮升级为仓库级自动同步。`repository_updater.py` 直接下载 GitHub `main` 分支 ZIP，依据根 `update_manifest.json` 新增或替换两个应用、根启动器和文档，并删除旧清单或 `remove` 中已废弃的程序文件。严格保护 `.env`、`models/`、`venv/`、`projects/`、`output/`、`export/`、`cache/` 和 `config.user.yaml`，受影响程序文件先备份到 `.update_backups/`。旧 `commentary_studio/` 和 `translator_studio/` 保留最小化一次性更新桥接：旧版用户点击原更新按钮后，重启旧入口即会自动同步根仓库并打开新应用。
+
+v0.1.8 / V1 v1.0.4 改为混合更新：先确认根 `.git`、Git 可执行文件、正确 `origin`、`main` 分支以及无受跟踪的本地修改，满足时在无 CMD 窗口的后台进程执行 `git pull --ff-only origin main`；任一检查不满足或 pull 失败时自动回退到 ZIP 清单更新。未使用 `git clean`、`reset --hard` 或强制删除。旧版首次桥接发布标签为 `storycut-v0.1.8` 和 `v1.0.4`；桥接会从当时的 `main` 归档读取真实目标版本，后续主分支继续升级时不会因桥接版本不同而失败。
 
 2026-07-28 首页项目入口完成整理：
 

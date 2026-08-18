@@ -16,8 +16,8 @@ MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 
 
 def migrate_repository() -> None:
-    version = json.loads(VERSION_FILE.read_text(encoding="utf-8"))
-    repository = str(version["repository"]).strip(" /")
+    bridge_version = json.loads(VERSION_FILE.read_text(encoding="utf-8"))
+    repository = str(bridge_version["repository"]).strip(" /")
     request = urllib.request.Request(
         f"https://github.com/{repository}/archive/refs/heads/main.zip",
         headers={"User-Agent": "StoryCut-Legacy-Migration", "Cache-Control": "no-cache"},
@@ -33,6 +33,9 @@ def migrate_repository() -> None:
             raise RuntimeError("GitHub 更新包目录结构无效")
         prefix = files[0].filename.split("/", 1)[0] + "/"
         updater_info = archive.getinfo(prefix + "repository_updater.py")
+        target_version = json.loads(
+            archive.read(archive.getinfo(prefix + "storycut_v2/version.json")).decode("utf-8")
+        )
         updater_path = REPOSITORY_ROOT / "repository_updater.py"
         temporary = updater_path.with_name(updater_path.name + ".migration_tmp")
         temporary.write_bytes(archive.read(updater_info))
@@ -43,4 +46,4 @@ def migrate_repository() -> None:
         raise RuntimeError("无法加载新版仓库更新器")
     updater = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(updater)
-    updater.apply_repository_archive("storycut_v2", version, archive_data)
+    updater.apply_repository_archive("storycut_v2", target_version, archive_data)

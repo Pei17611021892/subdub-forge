@@ -1,6 +1,6 @@
 {
   "name": "StoryCut Studio Legacy Update Bridge",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "migration",
   "notes": "一次性迁移到 storycut_v2，并启用仓库级自动更新。"

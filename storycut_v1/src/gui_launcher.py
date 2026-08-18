@@ -447,9 +447,14 @@ class Launcher(tk.Tk):
             self.log_queue.put("__DONE__")
 
     def _update_complete(self, version: str, backup: Path) -> None:
+        recovery_text = (
+            "更新方式：Git fast-forward，历史版本由 Git 保留。"
+            if backup.name == ".git"
+            else f"旧程序备份：\n{backup}"
+        )
         restart = messagebox.askyesno(
             "更新完成",
-            f"声画译匠已更新到 v{version}。\n\n旧程序备份：\n{backup}\n\n必须重启后才能使用新版。现在重启吗？",
+            f"声画译匠已更新到 v{version}。\n\n{recovery_text}\n\n必须重启后才能使用新版。现在重启吗？",
         )
         if not restart:
             return
