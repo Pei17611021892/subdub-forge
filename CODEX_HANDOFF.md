@@ -10,8 +10,6 @@
 
 2026-08-25 v0.2.1：仓库更新器显式读取环境变量与 Windows 系统代理，并把代理同时传给 Python HTTP 请求和后台 Git。Raw 版本地址失败时使用 GitHub Contents API，仓库 ZIP 地址失败时使用 `codeload.github.com`，用于改善 Clash 只开启系统代理、未开启 TUN 时的连接与偶发 404。
 
-同日补回 `commentary_studio/` 五文件兼容信标并发布 `storycut-v0.1.9` 迁移标签。原因是 v0.1.0～v0.1.6 的旧更新器固定读取主分支 `commentary_studio/version.json`；v0.2.0 删除该路径后旧客户端会直接 404，无法抵达既有 v0.1.8 桥。信标仅负责让旧客户端安装桥接版，重启后桥接版使用系统代理和双 GitHub ZIP 地址同步当前根仓库；根 `update_manifest.json` 仍把这些桥文件列在 `remove`，迁移后的客户端不会保留第二套程序。
-
 ## 2026-08-24 产品方向与 V1 能力迁移
 
 StoryCut V2 的长期定位是将不限题材的优质长视频（宇宙、星空、生物、机械、科学、人文等）压缩为 3 分钟以内的英文 YouTube Shorts。后续增强按以下原则推进：

@@ -34,18 +34,6 @@ def make_archive(files: dict[str, bytes]) -> bytes:
 
 
 class RepositoryUpdaterTests(unittest.TestCase):
-    def test_legacy_commentary_beacon_targets_complete_bridge(self) -> None:
-        repository_root = UPDATER_PATH.parent
-        bridge_root = repository_root / "commentary_studio"
-        version = json.loads((bridge_root / "version.json").read_text(encoding="utf-8"))
-        manifest = json.loads(
-            (bridge_root / "update_manifest.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual(version["version"], "0.1.9")
-        self.assertEqual(manifest["version"], "0.1.9")
-        for relative in manifest["files"]:
-            self.assertTrue((bridge_root / relative).is_file(), relative)
-
     def test_update_check_falls_back_to_github_api(self) -> None:
         updater = load_updater()
         with tempfile.TemporaryDirectory() as temporary_dir:

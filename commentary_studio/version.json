@@ -1,7 +1,0 @@
-{
-  "name": "StoryCut Studio Legacy Update Bridge",
-  "version": "0.1.9",
-  "repository": "Pei17611021892/subdub-forge",
-  "update_channel": "migration",
-  "notes": "旧版兼容升级入口：自动迁移到 StoryCut v0.2.x，并启用系统代理与仓库级更新。"
-}
