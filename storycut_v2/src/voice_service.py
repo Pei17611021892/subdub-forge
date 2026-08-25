@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ TTS_WORDS_PER_SECOND = 2.45
 TTS_SYLLABLES_PER_SECOND = 4.2
 MIN_TTS_UNIT_DURATION_SEC = 0.75
 SHORTS_MAX_DURATION_SEC = 179.0
+MAX_SAFE_NARRATION_SPEED = 1.25
 
 
 def estimate_tts_unit_duration(text: str) -> float:
@@ -148,6 +150,117 @@ def import_synced_srt(source_srt: Path, destination: Path) -> dict[str, Any]:
         "duration_sec": round(max(item["end"] for item in segments), 3),
         "segments": segments,
     }
+
+
+def recommended_shorts_speed(
+    duration_sec: float,
+    target_sec: float = 178.5,
+    max_speed: float = MAX_SAFE_NARRATION_SPEED,
+) -> float | None:
+    """Return the smallest 0.01x speed that fits, or None when speed alone is unsafe."""
+    if duration_sec <= target_sec:
+        return 1.0
+    required = math.ceil((duration_sec / target_sec) * 100) / 100
+    return required if required <= max_speed else None
+
+
+def process_narration_speed(
+    source_audio: Path,
+    destination_audio: Path,
+    speed: float,
+    config: dict[str, Any],
+    app_root: Path,
+    source_srt: Path | None = None,
+    destination_srt: Path | None = None,
+) -> dict[str, Any]:
+    """Create working narration files from untouched imports at one shared speed."""
+    speed = round(float(speed), 2)
+    if speed < 1.0 or speed > MAX_SAFE_NARRATION_SPEED:
+        raise ValueError(f"配音速度仅允许 1.00x～{MAX_SAFE_NARRATION_SPEED:.2f}x")
+    if not source_audio.exists():
+        raise FileNotFoundError(f"找不到原始英文配音：{source_audio}")
+
+    destination_audio.parent.mkdir(parents=True, exist_ok=True)
+    temporary_audio = destination_audio.with_name(f"{destination_audio.stem}.speeding.wav")
+    temporary_srt = (
+        destination_srt.with_name(f"{destination_srt.stem}.speeding.srt")
+        if destination_srt
+        else None
+    )
+    segments: list[dict[str, Any]] = []
+    try:
+        if speed == 1.0:
+            shutil.copy2(source_audio, temporary_audio)
+        else:
+            shared = config.get("shared", {})
+            ffmpeg = _resolve_tool(str(shared.get("ffmpeg_bin", "ffmpeg")), app_root, "ffmpeg")
+            if not ffmpeg:
+                raise RuntimeError("调整英文配音速度需要 FFmpeg")
+            result = subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(source_audio),
+                    "-vn",
+                    "-filter:a",
+                    f"atempo={speed:.2f}",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "48000",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(temporary_audio),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode != 0 or not temporary_audio.exists():
+                detail = (result.stderr or result.stdout or "FFmpeg 未生成处理后的配音").strip()
+                raise RuntimeError(detail[-1200:])
+        if source_srt and source_srt.exists() and destination_srt and temporary_srt:
+            segments = scale_srt_timeline(source_srt, temporary_srt, speed)
+
+        duration = probe_audio_duration(temporary_audio, config, app_root)
+        if duration <= 0:
+            raise ValueError("无法读取处理后的英文配音时长")
+        temporary_audio.replace(destination_audio)
+        if temporary_srt and temporary_srt.exists() and destination_srt:
+            temporary_srt.replace(destination_srt)
+        return {
+            "path": str(destination_audio),
+            "duration_sec": round(duration, 3),
+            "speed": speed,
+            "segments": segments,
+        }
+    finally:
+        temporary_audio.unlink(missing_ok=True)
+        if temporary_srt:
+            temporary_srt.unlink(missing_ok=True)
+
+
+def scale_srt_timeline(source_srt: Path, destination_srt: Path, speed: float) -> list[dict[str, Any]]:
+    """Scale a synchronized SRT with the same factor used for its narration audio."""
+    speed = float(speed)
+    if speed <= 0:
+        raise ValueError("字幕时间轴速度必须大于 0")
+    segments = parse_srt_timings(source_srt.read_text(encoding="utf-8-sig"))
+    if not segments:
+        raise ValueError("同步 SRT 中没有有效字幕")
+    destination_srt.parent.mkdir(parents=True, exist_ok=True)
+    adjusted: list[dict[str, Any]] = []
+    blocks: list[str] = []
+    for index, segment in enumerate(segments, 1):
+        start = float(segment["start"]) / speed
+        end = float(segment["end"]) / speed
+        text = str(segment.get("text", "")).strip()
+        adjusted.append({"id": index, "start": start, "end": end, "text": text})
+        blocks.append(f"{index}\n{_srt_time(start)} --> {_srt_time(end)}\n{text}")
+    destination_srt.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+    return adjusted
 
 
 def probe_audio_duration(audio: Path, config: dict[str, Any], app_root: Path) -> float:

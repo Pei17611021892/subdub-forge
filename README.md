@@ -1,74 +1,70 @@
-# SubDub Forge
+# StoryCut
 
-这是一个包含两套独立视频二创工具的 Windows 仓库：
+StoryCut 是一款 Windows AI 解说剪辑工具，用于把较长的视频整理为 3 分钟以内、适合 YouTube Shorts 发布的英文解说成片。
+
+仓库从 `2.0.0` 起只维护一个应用。原来的一比一翻译 V1 已退役，其中仍适合当前工作流的能力已经迁入 StoryCut，包括配音安全变速、英文配音 Whisper 字幕兜底、字幕高级样式和导出诊断文件。
 
 ```text
-storycut_v1/      中文逐句翻译与配音合成工具
-storycut_v2/      AI 解说剪辑工具 StoryCut Studio
-models/                  两套工具共用的本地模型
-venv/                    两套工具共用的 Python 虚拟环境
-.env                     两套工具共用的 API 配置
-export/                  两套工具统一的对外导出目录
-requirements.txt         共用基础依赖
+storycut_v2/    StoryCut 应用代码（内部目录名为兼容旧项目路径而保留）
+models/         共用 Faster-Whisper 模型，不提交
+venv/           Python 虚拟环境，不提交
+.env            API 地址与密钥，不提交
+export/         用户可见的统一导出目录，不提交
+requirements.txt
 ```
 
-## 两套工具
+## 安装
 
-### StoryCut V1
-
-旧的一比一/压缩翻译工具，当前版本 `v1.0.4`。
-
-- 启动：双击 `点我启动StoryCut V1（一比一翻译）.vbs`
-- 代码与配置：[storycut_v1/README.md](storycut_v1/README.md)
-- 工作缓存：`storycut_v1/output/`
-- 对外导出：根目录 `export/`（后续接入）
-
-### StoryCut V2
-
-AI 解说剪辑工具，当前版本 `v0.1.8`，已经完成初版封版。
-
-- 启动：双击 `点我启动StoryCut V2（AI解说剪辑）.vbs`
-- 代码与配置：[storycut_v2/README.md](storycut_v2/README.md)
-- 本地项目：`storycut_v2/projects/`
-- 对外导出：根目录 `export/`
-
-## 共享依赖
-
-在仓库根目录创建并安装共享虚拟环境：
+在仓库根目录创建虚拟环境并一次安装全部依赖：
 
 ```powershell
 python -m venv venv
 venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-根目录 `requirements.txt` 会一次安装两套工具所需依赖，包括 StoryCut 使用的
-PySide6。无需再分别安装第二份依赖文件。
+还需要安装 FFmpeg 和 ffprobe，可加入系统 PATH，也可在应用配置中指定绝对路径。Faster-Whisper 模型位置和自动下载方式参见 [MODEL_DOWNLOAD.md](MODEL_DOWNLOAD.md)。
 
-FFmpeg 和 ffprobe 由两套工具共用。可将其加入系统 PATH，或分别在应用的
-`config.user.yaml` 中配置绝对路径。
+## 启动
 
-Faster-Whisper 模型统一放在 `models/faster-whisper/`，具体参见
-[MODEL_DOWNLOAD.md](MODEL_DOWNLOAD.md)。
+双击根目录中的：
 
-## 本地配置
+```text
+点我启动StoryCut（AI解说剪辑）.vbs
+```
 
-以下文件或目录不会提交 Git：
+启动器使用 `pythonw.exe`，正常运行时不会显示 CMD 窗口。也可在根目录运行：
+
+```powershell
+venv\Scripts\python.exe storycut_v2/main.py
+```
+
+详细功能与使用说明见 [storycut_v2/README.md](storycut_v2/README.md)。
+
+## 本地数据
+
+以下内容受到 Git 忽略和内置更新器保护，不会提交或被版本更新覆盖：
 
 - `.env`
 - `models/`
 - `venv/`
-- `storycut_v1/config.user.yaml`
-- `storycut_v1/output/`
 - `storycut_v2/config.user.yaml`
 - `storycut_v2/projects/`
-- `storycut_v1/cache/`
 - `storycut_v2/cache/`
 - `export/`
+- 旧 `storycut_v1/config.user.yaml`、`storycut_v1/output/` 和 `storycut_v1/cache/`
 
-两个应用拥有各自的默认配置和用户配置，只有 API 密钥、模型、虚拟环境和 FFmpeg 等大型依赖共享。
+旧 V1 程序文件会随 `2.0.0` 更新移除，但本机遗留的用户配置和历史输出会保留。它们不再被当前 StoryCut 使用，可由用户确认无用后自行归档或删除。
 
-两个应用启动约 1 秒后会在后台检查更新；有新版本时，原“检查更新”按钮会显示可更新标识，不会自动弹窗。确认更新后，若检测到正常 Git 克隆和 `main` 分支，会在后台执行 `git pull --ff-only origin main`；无 Git、非克隆目录、存在受跟踪的本地修改或 Git 更新失败时，自动回退到 GitHub `main` ZIP 清单同步。两种方式都不执行 `git clean` 或强制重置。
+## 更新方式
 
-更新会先备份受影响的程序文件到 `.update_backups/`；`.env`、`models/`、`venv/`、两套用户配置、项目、`output/` 和 `export/` 均受保护。旧目录版本会通过 `commentary_studio/` 与 `translator_studio/` 中的一次性更新桥接自动迁移，桥接目录不是实际应用。
+StoryCut 启动后会静默检查 GitHub 版本。有新版时，更新按钮显示可更新标识；用户确认后：
 
-两个 `.vbs` 均使用 `pythonw.exe`，启动和运行期间不会显示 CMD；依赖缺失时会直接弹窗说明。
+1. 正常 Git 克隆且位于 `main` 分支、受跟踪程序文件无本地修改时，后台执行快进更新。
+2. 没有 Git、不是克隆目录或 Git 更新不可用时，自动使用内置 ZIP 清单同步。
+
+两种方式都不会执行 `git clean`、强制重置或删除未知文件。ZIP 更新会先备份将要变更的程序文件到 `.update_backups/`，并严格保护上述本地数据。
+
+## 当前版本
+
+- 仓库版本：`2.0.0`
+- StoryCut 版本：`0.2.0`

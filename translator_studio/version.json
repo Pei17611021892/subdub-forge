@@ -1,7 +1,0 @@
-{
-  "name": "SubDub Forge Legacy Update Bridge",
-  "version": "1.0.4",
-  "repository": "Pei17611021892/subdub-forge",
-  "update_channel": "migration",
-  "notes": "一次性迁移到 storycut_v1，并启用仓库级自动更新。"
-}

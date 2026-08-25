@@ -1,4 +1,4 @@
-# Install the dependencies required by both desktop applications.
+# Install the dependencies required by StoryCut.
 -r storycut_v2/requirements.txt
 
 # Optional but useful for charset/path handling.

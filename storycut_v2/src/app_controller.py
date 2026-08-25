@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -33,11 +34,21 @@ from .matching_service import (
     select_shot_match,
 )
 from .export_service import render_rough_preview
+from .quality_service import (
+    combine_quality_reports,
+    inspect_project_for_export,
+    inspect_rendered_video,
+)
 from .voice_service import (
     SHORTS_MAX_DURATION_SEC,
     import_narration_audio,
     import_synced_srt,
+    parse_srt_timings,
+    process_narration_speed,
     prepare_tts_srt,
+    probe_audio_duration,
+    recommended_shorts_speed,
+    scale_srt_timeline,
 )
 from .update_manager import check_for_update, download_and_apply, read_version
 
@@ -58,8 +69,10 @@ class AppController(QObject):
     subtitleEffectPreviewChanged = Signal()
     updateChanged = Signal()
     apiModelsChanged = Signal()
+    qualityChanged = Signal()
     updateDialogRequested = Signal()
     sourceVideoRelinkRequested = Signal()
+    qualityDialogRequested = Signal()
     _mediaReady = Signal(object, str, str, int)
     _previewReady = Signal(str, str, int, float)
     _subtitleEffectPreviewReady = Signal(str, int)
@@ -73,6 +86,9 @@ class AppController(QObject):
     _updateCheckFinished = Signal(bool, str, object)
     _updateApplyFinished = Signal(bool, str)
     _apiModelsFinished = Signal(bool, str, object)
+    _voiceProcessingFinished = Signal(bool, str, object, int)
+    _voiceSrtProgressReady = Signal(str, int)
+    _voiceSrtFinished = Signal(bool, str, object, int)
 
     def __init__(self, root: Path) -> None:
         super().__init__()
@@ -128,17 +144,21 @@ class AppController(QObject):
             self._config.get("export", {}).get("preserve_original_audio", False)
         )
         self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
+        self._voice_busy = False
+        self._voice_job_id = 0
+        self._narration_speed = 1.0
         self._narration_audio_path = ""
         self._narration_duration_sec = 0.0
         self._synced_srt_path = ""
+        self._quality_report: dict[str, object] = {}
         self._subtitle_style = self._default_subtitle_style()
         self._subtitle_effect_preview_url = ""
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.1.8"))
+            self._app_version = str(read_version().get("version", "0.2.0"))
         except Exception:
-            self._app_version = "0.1.8"
+            self._app_version = "0.2.0"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -161,6 +181,9 @@ class AppController(QObject):
         self._updateCheckFinished.connect(self._apply_update_check)
         self._updateApplyFinished.connect(self._apply_update_install)
         self._apiModelsFinished.connect(self._apply_api_models)
+        self._voiceProcessingFinished.connect(self._apply_voice_processing_finished)
+        self._voiceSrtProgressReady.connect(self._apply_voice_srt_progress)
+        self._voiceSrtFinished.connect(self._apply_voice_srt_finished)
         self._analysis_clock = QTimer(self)
         self._analysis_clock.setInterval(1000)
         self._analysis_clock.timeout.connect(self._tick_analysis_clock)
@@ -407,6 +430,64 @@ class AppController(QObject):
     @Property(str, notify=voiceChanged)
     def narrationDurationText(self) -> str:
         return self._format_time(self._narration_duration_sec) if self._narration_duration_sec else ""
+
+    @Property(bool, notify=voiceChanged)
+    def voiceBusy(self) -> bool:
+        return self._voice_busy
+
+    @Property(float, notify=voiceChanged)
+    def narrationSpeed(self) -> float:
+        return self._narration_speed
+
+    @Property(bool, notify=voiceChanged)
+    def narrationOverShortsLimit(self) -> bool:
+        return self._narration_duration_sec >= SHORTS_MAX_DURATION_SEC
+
+    @Property(bool, notify=voiceChanged)
+    def canAutoFitNarration(self) -> bool:
+        if not self.narrationAudioReady or not self.narrationOverShortsLimit:
+            return False
+        original_duration = self._narration_duration_sec * max(1.0, self._narration_speed)
+        return recommended_shorts_speed(original_duration) is not None
+
+    @Property(str, notify=voiceChanged)
+    def narrationSpeedHint(self) -> str:
+        if not self.narrationAudioReady:
+            return "导入真实配音后，程序会检查是否超过 Shorts 三分钟上限。"
+        speed_text = f"当前 {self._narration_speed:.2f}x"
+        if not self.narrationOverShortsLimit:
+            return f"{speed_text} · 实际配音在 179 秒安全线内。"
+        original_duration = self._narration_duration_sec * max(1.0, self._narration_speed)
+        suggested = recommended_shorts_speed(original_duration)
+        if suggested is None:
+            return f"{speed_text} · 超时较多，最高 1.25x 仍不够，需要删减或重写文案。"
+        return f"{speed_text} · 可自动调整为 {suggested:.2f}x，并同步缩放 SRT 时间轴。"
+
+    @Property(str, notify=qualityChanged)
+    def qualityCheckText(self) -> str:
+        if not self._quality_report:
+            return "尚未执行成片检查。"
+        lines = [
+            (
+                f"检查完成：{self._quality_report.get('pass_count', 0)} 项正常，"
+                f"{self._quality_report.get('warning_count', 0)} 项提醒，"
+                f"{self._quality_report.get('error_count', 0)} 项必须处理。"
+            ),
+            "",
+        ]
+        icons = {"pass": "✓", "warning": "!", "error": "×"}
+        for item in self._quality_report.get("checks", []):
+            if not isinstance(item, dict):
+                continue
+            level = str(item.get("level", "warning"))
+            lines.append(f"{icons.get(level, '•')} {item.get('title', '')}")
+            lines.append(f"   {item.get('detail', '')}")
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+    @Property(bool, notify=qualityChanged)
+    def qualityCheckPassed(self) -> bool:
+        return bool(self._quality_report.get("passed", False))
 
     @Property("QVariantMap", notify=subtitleStyleChanged)
     def subtitleStyle(self) -> dict[str, object]:
@@ -785,6 +866,7 @@ class AppController(QObject):
                 self._story_busy,
                 self._matching_busy,
                 self._export_busy,
+                self._voice_busy,
                 self._subtitle_effect_preview_busy,
             )
         ):
@@ -808,7 +890,7 @@ class AppController(QObject):
             current_file = self._current_project_file.resolve()
             current_dir = current_file.parent
             if current_dir.parent != self._projects_dir.resolve():
-                raise ValueError("当前项目目录不在 StoryCut V2 项目目录中")
+                raise ValueError("当前项目目录不在 StoryCut 项目目录中")
             target_dir = self._projects_dir / new_name
             if target_dir.exists() and target_dir.resolve() != current_dir:
                 raise ValueError(f"项目“{new_name}”已存在，请换一个名称")
@@ -1436,6 +1518,9 @@ class AppController(QObject):
             return
         if not self._ensure_source_video():
             return
+        if not self._run_quality_check():
+            self.qualityDialogRequested.emit()
+            return
         project_file = self._current_project_file
         rough_cut_file = project_file.parent / "timeline" / "rough_cut.json"
         if not rough_cut_file.exists():
@@ -1459,6 +1544,70 @@ class AppController(QObject):
             "成片预览已生成，可使用系统播放器查看",
             "storycut_final_preview.mp4",
         )
+
+    @Slot()
+    def runQualityCheck(self) -> None:
+        self._run_quality_check()
+        self.qualityDialogRequested.emit()
+
+    def _run_quality_check(self) -> bool:
+        if not self._current_project_file:
+            self._quality_report = {
+                "passed": False,
+                "error_count": 1,
+                "warning_count": 0,
+                "pass_count": 0,
+                "checks": [
+                    {"level": "error", "title": "尚未创建项目", "detail": "请先选择视频创建项目。"}
+                ],
+            }
+        else:
+            project_report = inspect_project_for_export(
+                self._current_project_file,
+                Path(self._video_path) if self._video_path else None,
+                Path(self._narration_audio_path) if self._narration_audio_path else None,
+                self._narration_duration_sec,
+                Path(self._synced_srt_path) if self._synced_srt_path else None,
+                self._media,
+            )
+            render_report: dict[str, object] = {}
+            rendered = Path(self._export_path) if self._export_path else None
+            if rendered and rendered.exists():
+                expected_duration = 0.0
+                rough_cut = self._current_project_file.parent / "timeline" / "rough_cut.json"
+                try:
+                    expected_duration = float(
+                        json.loads(rough_cut.read_text(encoding="utf-8")).get("duration_sec", 0)
+                        or 0
+                    )
+                except (OSError, ValueError, TypeError):
+                    pass
+                export_config = self._config.get("export", {})
+                if str(export_config.get("fit_mode", "original")).lower() == "original":
+                    expected_width = int(self._media.get("width", 0) or 0)
+                    expected_height = int(self._media.get("height", 0) or 0)
+                else:
+                    expected_width = int(export_config.get("width", 0) or 0)
+                    expected_height = int(export_config.get("height", 0) or 0)
+                render_report = inspect_rendered_video(
+                    rendered,
+                    expected_duration,
+                    expected_width,
+                    expected_height,
+                    None,
+                    self._config,
+                    self._root,
+                )
+            self._quality_report = combine_quality_reports(project_report, render_report)
+        self.qualityChanged.emit()
+        passed = bool(self._quality_report.get("passed", False))
+        self._notice = (
+            "成片检查通过，可以生成预览。"
+            if passed
+            else f"成片检查发现 {self._quality_report.get('error_count', 0)} 项必须处理的问题。"
+        )
+        self.noticeChanged.emit()
+        return passed
 
     @Slot()
     def generateSubtitleOnlyPreview(self) -> None:
@@ -1554,6 +1703,8 @@ class AppController(QObject):
         output_filename = f"{self._safe_name(self._project_name)}_{output_filename}"
         output = self._export_dir / output_filename
         source = Path(self._video_path)
+        render_config = self._config_with_project_style()
+        preflight_report = deepcopy(self._quality_report) if narration_audio else {}
 
         def report(value: float, status: str) -> None:
             self._exportProgressReady.emit(value, status, job_id)
@@ -1568,9 +1719,21 @@ class AppController(QObject):
                     subtitle_srt,
                     int(self._media.get("width", 0) or 0),
                     int(self._media.get("height", 0) or 0),
-                    self._config_with_project_style(),
+                    render_config,
                     self._root,
                     report,
+                )
+                rendered_report = inspect_rendered_video(
+                    output,
+                    float(result.get("duration_sec", 0) or 0),
+                    int(result.get("width", 0) or 0),
+                    int(result.get("height", 0) or 0),
+                    bool(result.get("has_audio", False)),
+                    render_config,
+                    self._root,
+                )
+                result["quality_report"] = combine_quality_reports(
+                    preflight_report, rendered_report
                 )
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
                 payload["stage"] = "previewed"
@@ -1630,6 +1793,12 @@ class AppController(QObject):
             "bottomMargin",
             "horizontalMargin",
             "bold",
+            "italic",
+            "textColor",
+            "outlineColor",
+            "shadow",
+            "letterSpacing",
+            "animation",
             "backgroundEnabled",
             "backgroundOpacity",
             "outlineWidth",
@@ -1648,18 +1817,27 @@ class AppController(QObject):
         if key not in allowed:
             return
         if key in {
-            "fontSize", "bottomMargin", "horizontalMargin", "outlineWidth",
+            "fontSize", "bottomMargin", "horizontalMargin", "outlineWidth", "shadow",
             "boxPadding", "blurRadius", "blurPower", "regionPadding", "feather",
         }:
             value = int(float(value))
+        elif key == "letterSpacing":
+            value = min(20.0, max(-5.0, float(value)))
         elif key in {"cleanupWidth", "cleanupOpacity"}:
             value = min(1.0, max(0.02, float(value)))
         elif key in {
             "backgroundOpacity", "cleanupX", "cleanupY", "cleanupHeight",
         }:
             value = min(0.95, max(0.0, float(value)))
-        elif key in {"bold", "backgroundEnabled"}:
+        elif key in {"bold", "italic", "backgroundEnabled"}:
             value = bool(value)
+        elif key in {"textColor", "outlineColor"}:
+            cleaned = str(value).strip().upper()
+            if re.fullmatch(r"#[0-9A-F]{6}", cleaned):
+                cleaned += "FF"
+            value = cleaned if re.fullmatch(r"#[0-9A-F]{8}", cleaned) else "#FFFFFFFF"
+        elif key == "animation":
+            value = str(value) if str(value) in {"none", "fade", "pop"} else "fade"
         else:
             value = str(value)
         self._subtitle_style[key] = value
@@ -1716,6 +1894,12 @@ class AppController(QObject):
                 "bottomMargin": 150,
                 "horizontalMargin": 72,
                 "bold": True,
+                "italic": False,
+                "textColor": "#FFFFFFFF",
+                "outlineColor": "#000000FF",
+                "shadow": 1,
+                "letterSpacing": 0.0,
+                "animation": "fade",
                 "backgroundEnabled": False,
                 "outlineWidth": 3,
                 "boxPadding": 12,
@@ -1726,6 +1910,12 @@ class AppController(QObject):
                 "bottomMargin": 80,
                 "horizontalMargin": 72,
                 "bold": True,
+                "italic": False,
+                "textColor": "#FFFFFFFF",
+                "outlineColor": "#000000FF",
+                "shadow": 1,
+                "letterSpacing": 0.0,
+                "animation": "fade",
                 "backgroundEnabled": False,
                 "backgroundOpacity": 0.0,
                 "outlineWidth": 4,
@@ -1737,9 +1927,63 @@ class AppController(QObject):
                 "bottomMargin": 105,
                 "horizontalMargin": 90,
                 "bold": True,
+                "italic": False,
+                "textColor": "#FFFFFFFF",
+                "outlineColor": "#000000FF",
+                "shadow": 2,
+                "letterSpacing": 0.5,
+                "animation": "pop",
                 "backgroundEnabled": False,
                 "outlineWidth": 3,
                 "boxPadding": 15,
+            },
+            "documentary": {
+                "fontFamily": "Trebuchet MS",
+                "fontSize": 47,
+                "bottomMargin": 132,
+                "horizontalMargin": 84,
+                "bold": False,
+                "italic": False,
+                "textColor": "#FFF1D6FF",
+                "outlineColor": "#17130FFF",
+                "shadow": 2,
+                "letterSpacing": 0.3,
+                "animation": "fade",
+                "backgroundEnabled": False,
+                "outlineWidth": 3,
+                "boxPadding": 12,
+            },
+            "science": {
+                "fontFamily": "Arial",
+                "fontSize": 56,
+                "bottomMargin": 112,
+                "horizontalMargin": 84,
+                "bold": True,
+                "italic": False,
+                "textColor": "#FFD84DFF",
+                "outlineColor": "#080A0FFF",
+                "shadow": 2,
+                "letterSpacing": 0.0,
+                "animation": "pop",
+                "backgroundEnabled": False,
+                "outlineWidth": 4,
+                "boxPadding": 14,
+            },
+            "minimal": {
+                "fontFamily": "Verdana",
+                "fontSize": 43,
+                "bottomMargin": 120,
+                "horizontalMargin": 96,
+                "bold": False,
+                "italic": False,
+                "textColor": "#FFFFFFFF",
+                "outlineColor": "#000000FF",
+                "shadow": 0,
+                "letterSpacing": 0.6,
+                "animation": "none",
+                "backgroundEnabled": False,
+                "outlineWidth": 2,
+                "boxPadding": 10,
             },
         }
         selected = presets.get(preset)
@@ -1755,8 +1999,18 @@ class AppController(QObject):
             return
         try:
             source = Path(QUrlHelper.to_local_path(url))
-            destination = self._current_project_file.parent / "audio" / "narration.wav"
-            result = import_narration_audio(source, destination, self._config, self._root)
+            audio_dir = self._current_project_file.parent / "audio"
+            original = audio_dir / "narration_original.wav"
+            destination = audio_dir / "narration.wav"
+            result = import_narration_audio(source, original, self._config, self._root)
+            shutil.copy2(original, destination)
+            self._narration_speed = 1.0
+            working_srt = audio_dir / "narration.srt"
+            original_srt = audio_dir / "narration_original.srt"
+            if working_srt.exists():
+                if not original_srt.exists():
+                    shutil.copy2(working_srt, original_srt)
+                scale_srt_timeline(original_srt, working_srt, 1.0)
             self._narration_audio_path = str(destination)
             self._narration_duration_sec = float(result["duration_sec"])
             self._apply_voice_timing_to_matches()
@@ -1773,6 +2027,8 @@ class AppController(QObject):
             )
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
             payload.setdefault("artifacts", {})["narration_audio"] = "audio/narration.wav"
+            payload.setdefault("artifacts", {})["narration_audio_original"] = "audio/narration_original.wav"
+            payload.setdefault("settings", {}).setdefault("voice", {})["speed"] = 1.0
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             self.voiceChanged.emit()
@@ -1786,8 +2042,16 @@ class AppController(QObject):
             return
         try:
             source = Path(QUrlHelper.to_local_path(url))
-            destination = self._current_project_file.parent / "audio" / "narration.srt"
-            result = import_synced_srt(source, destination)
+            audio_dir = self._current_project_file.parent / "audio"
+            original = audio_dir / "narration_original.srt"
+            destination = audio_dir / "narration.srt"
+            import_synced_srt(source, original)
+            segments = scale_srt_timeline(original, destination, self._narration_speed)
+            result = {
+                "segment_count": len(segments),
+                "segments": segments,
+                "duration_sec": max(item["end"] for item in segments),
+            }
             self._synced_srt_path = str(destination)
             if self.narrationAudioReady:
                 self._apply_voice_timing_to_matches(list(result["segments"]))
@@ -1797,12 +2061,233 @@ class AppController(QObject):
             )
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
             payload.setdefault("artifacts", {})["narration_srt"] = "audio/narration.srt"
+            payload.setdefault("artifacts", {})["narration_srt_original"] = "audio/narration_original.srt"
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             self.voiceChanged.emit()
         except Exception as exc:
             self._notice = f"同步字幕导入失败：{exc}"
             self.noticeChanged.emit()
+
+    @Slot()
+    def autoFitNarrationToShorts(self) -> None:
+        if self._voice_busy or not self.narrationAudioReady:
+            return
+        original_duration = self._original_narration_duration()
+        suggested = recommended_shorts_speed(original_duration)
+        if suggested == 1.0:
+            self._notice = "当前英文配音已在 179 秒安全线内，不需要加速。"
+            self.noticeChanged.emit()
+            return
+        if suggested is None:
+            fastest_duration = original_duration / 1.25
+            self._notice = (
+                f"原始配音约 {self._format_time(original_duration)}，即使安全上限 1.25x 后仍约 "
+                f"{self._format_time(fastest_duration)}。请先删减或重写部分文案，再重新生成配音。"
+            )
+            self.noticeChanged.emit()
+            return
+        self._start_narration_speed_processing(suggested)
+
+    @Slot()
+    def restoreNarrationSpeed(self) -> None:
+        if self._voice_busy or not self.narrationAudioReady or self._narration_speed == 1.0:
+            return
+        self._start_narration_speed_processing(1.0)
+
+    @Slot()
+    def generateNarrationSrtWithWhisper(self) -> None:
+        if self._voice_busy or not self._current_project_file or not self.narrationAudioReady:
+            return
+        project_file = self._current_project_file
+        audio = Path(self._narration_audio_path)
+        audio_dir = project_file.parent / "audio"
+        working_srt = audio_dir / "narration.srt"
+        transcript_json = audio_dir / "narration_whisper.json"
+        config = deepcopy(self._config)
+        config.setdefault("analysis", {})["language"] = "en"
+        self._voice_job_id += 1
+        job_id = self._voice_job_id
+        self._voice_busy = True
+        self._voice_status = "正在加载 Faster-Whisper，准备识别英文配音…"
+        self.voiceChanged.emit()
+
+        def progress(_value: float, status: str) -> None:
+            self._voiceSrtProgressReady.emit(status, job_id)
+
+        def model_progress(_value: float, status: str, _visible: bool) -> None:
+            self._voiceSrtProgressReady.emit(status, job_id)
+
+        def worker() -> None:
+            try:
+                result = transcribe_analysis_audio(
+                    audio,
+                    transcript_json,
+                    working_srt,
+                    self._narration_duration_sec,
+                    config,
+                    self._root,
+                    progress,
+                    model_progress,
+                )
+                original_srt = audio_dir / "narration_original.srt"
+                if self._narration_speed > 1.0:
+                    scale_srt_timeline(working_srt, original_srt, 1.0 / self._narration_speed)
+                else:
+                    shutil.copy2(working_srt, original_srt)
+                segments = parse_srt_timings(working_srt.read_text(encoding="utf-8-sig"))
+                result = dict(result)
+                result["segments"] = segments
+                self._voiceSrtFinished.emit(True, "", result, job_id)
+            except Exception as exc:
+                self._voiceSrtFinished.emit(False, str(exc), {}, job_id)
+
+        threading.Thread(target=worker, name="storycut-voice-whisper", daemon=True).start()
+
+    @Slot(str, int)
+    def _apply_voice_srt_progress(self, status: str, job_id: int) -> None:
+        if job_id != self._voice_job_id:
+            return
+        self._voice_status = status.replace("原片语音", "英文配音")
+        self.voiceChanged.emit()
+
+    @Slot(bool, str, object, int)
+    def _apply_voice_srt_finished(
+        self, success: bool, message: str, result: object, job_id: int
+    ) -> None:
+        if job_id != self._voice_job_id:
+            return
+        self._voice_busy = False
+        if not success or not isinstance(result, dict):
+            self._voice_status = "英文配音识别失败"
+            self._notice = f"无法从英文配音生成同步 SRT：{message}"
+            self.voiceChanged.emit()
+            self.noticeChanged.emit()
+            return
+        segments = result.get("segments", [])
+        self._synced_srt_path = str(self._current_project_file.parent / "audio" / "narration.srt")
+        self._apply_voice_timing_to_matches(segments if isinstance(segments, list) else None)
+        try:
+            payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+            artifacts = payload.setdefault("artifacts", {})
+            artifacts["narration_srt"] = "audio/narration.srt"
+            artifacts["narration_srt_original"] = "audio/narration_original.srt"
+            artifacts["narration_whisper"] = "audio/narration_whisper.json"
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            self._current_project_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+        count = len(segments) if isinstance(segments, list) else 0
+        self._voice_status = f"已从英文配音识别出 {count} 条同步字幕；镜头时间线已校准"
+        self._notice = "同步 SRT 已生成。Whisper 断句可能与原文不同，建议预览后确认。"
+        self.voiceChanged.emit()
+        self.noticeChanged.emit()
+
+    def _original_narration_duration(self) -> float:
+        if not self._current_project_file:
+            return self._narration_duration_sec * max(1.0, self._narration_speed)
+        original = self._current_project_file.parent / "audio" / "narration_original.wav"
+        if original.exists():
+            try:
+                return probe_audio_duration(original, self._config, self._root)
+            except Exception:
+                pass
+        return self._narration_duration_sec * max(1.0, self._narration_speed)
+
+    def _start_narration_speed_processing(self, speed: float) -> None:
+        if not self._current_project_file:
+            return
+        project_file = self._current_project_file
+        audio_dir = project_file.parent / "audio"
+        working_audio = audio_dir / "narration.wav"
+        original_audio = audio_dir / "narration_original.wav"
+        working_srt = audio_dir / "narration.srt"
+        original_srt = audio_dir / "narration_original.srt"
+        try:
+            if not original_audio.exists():
+                if not working_audio.exists():
+                    raise FileNotFoundError("找不到已导入的英文配音")
+                shutil.copy2(working_audio, original_audio)
+            if working_srt.exists() and not original_srt.exists():
+                shutil.copy2(working_srt, original_srt)
+        except OSError as exc:
+            self._notice = f"无法准备配音原始备份：{exc}"
+            self.noticeChanged.emit()
+            return
+
+        self._voice_job_id += 1
+        job_id = self._voice_job_id
+        self._voice_busy = True
+        self._voice_status = f"正在按 {speed:.2f}x 处理配音与同步字幕…"
+        self.voiceChanged.emit()
+
+        def worker() -> None:
+            try:
+                result = process_narration_speed(
+                    original_audio,
+                    working_audio,
+                    speed,
+                    self._config,
+                    self._root,
+                    original_srt if original_srt.exists() else None,
+                    working_srt if original_srt.exists() else None,
+                )
+                self._voiceProcessingFinished.emit(True, "", result, job_id)
+            except Exception as exc:
+                self._voiceProcessingFinished.emit(False, str(exc), {}, job_id)
+
+        threading.Thread(target=worker, name="storycut-voice-speed", daemon=True).start()
+
+    @Slot(bool, str, object, int)
+    def _apply_voice_processing_finished(
+        self,
+        success: bool,
+        message: str,
+        result: object,
+        job_id: int,
+    ) -> None:
+        if job_id != self._voice_job_id:
+            return
+        self._voice_busy = False
+        if not success or not isinstance(result, dict):
+            self._voice_status = "配音速度处理失败"
+            self._notice = f"配音速度处理失败：{message}"
+            self.voiceChanged.emit()
+            self.noticeChanged.emit()
+            return
+        self._narration_speed = float(result.get("speed", 1.0) or 1.0)
+        self._narration_duration_sec = float(result.get("duration_sec", 0) or 0)
+        segments = result.get("segments")
+        self._apply_voice_timing_to_matches(segments if isinstance(segments, list) and segments else None)
+        if self._current_project_file:
+            try:
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                payload.setdefault("settings", {}).setdefault("voice", {})[
+                    "speed"
+                ] = self._narration_speed
+                artifacts = payload.setdefault("artifacts", {})
+                artifacts["narration_audio"] = "audio/narration.wav"
+                artifacts["narration_audio_original"] = "audio/narration_original.wav"
+                original_srt = self._current_project_file.parent / "audio" / "narration_original.srt"
+                if original_srt.exists():
+                    artifacts["narration_srt"] = "audio/narration.srt"
+                    artifacts["narration_srt_original"] = "audio/narration_original.srt"
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        action = "已恢复原速" if self._narration_speed == 1.0 else f"已调整为 {self._narration_speed:.2f}x"
+        self._voice_status = (
+            f"英文配音{action}，实际时长 {self._format_time(self._narration_duration_sec)}；"
+            + ("仍超过 Shorts 上限，请删减文案" if self.narrationOverShortsLimit else "镜头与字幕时间线已同步校准")
+        )
+        self._export_path = ""
+        self.voiceChanged.emit()
+        self.exportChanged.emit()
 
     @staticmethod
     def _safe_name(value: str) -> str:
@@ -1894,9 +2379,12 @@ class AppController(QObject):
         self._export_status = "等待生成成片预览"
         self._export_path = ""
         self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
+        self._voice_busy = False
+        self._narration_speed = 1.0
         self._narration_audio_path = ""
         self._narration_duration_sec = 0.0
         self._synced_srt_path = ""
+        self._quality_report = {}
         self._subtitle_style = self._default_subtitle_style()
         self._subtitle_effect_preview_url = ""
         self.projectChanged.emit()
@@ -1908,6 +2396,7 @@ class AppController(QObject):
         self.matchingChanged.emit()
         self.exportChanged.emit()
         self.voiceChanged.emit()
+        self.qualityChanged.emit()
         self.subtitleStyleChanged.emit()
         self.subtitleEffectPreviewChanged.emit()
 
@@ -2062,6 +2551,22 @@ class AppController(QObject):
         self._notice = self._export_status
         if success and isinstance(result, dict):
             self._export_path = str(result.get("path", ""))
+            report = result.get("quality_report", {})
+            if isinstance(report, dict) and report:
+                self._quality_report = dict(report)
+                self.qualityChanged.emit()
+                errors = int(self._quality_report.get("error_count", 0) or 0)
+                warnings = int(self._quality_report.get("warning_count", 0) or 0)
+                if errors:
+                    self._export_status += f"；输出实测发现 {errors} 项必须处理的问题"
+                    self._notice = self._export_status
+                    self.qualityDialogRequested.emit()
+                elif warnings:
+                    self._export_status += f"；输出实测通过，另有 {warnings} 项提醒"
+                    self._notice = self._export_status
+                else:
+                    self._export_status += "；输出文件实测通过"
+                    self._notice = self._export_status
             self._refresh_recent_projects()
         self.exportChanged.emit()
         self.noticeChanged.emit()
@@ -2212,8 +2717,19 @@ class AppController(QObject):
         self.exportChanged.emit()
 
     def _load_voice(self, project_file: Path) -> None:
+        self._voice_job_id += 1
         audio = project_file.parent / "audio" / "narration.wav"
         srt = project_file.parent / "audio" / "narration.srt"
+        self._voice_busy = False
+        self._narration_speed = 1.0
+        try:
+            payload = json.loads(project_file.read_text(encoding="utf-8"))
+            self._narration_speed = max(
+                1.0,
+                min(1.25, float(payload.get("settings", {}).get("voice", {}).get("speed", 1.0))),
+            )
+        except (OSError, ValueError, TypeError):
+            self._narration_speed = 1.0
         self._narration_audio_path = str(audio) if audio.exists() else ""
         self._synced_srt_path = str(srt) if srt.exists() else ""
         self._narration_duration_sec = 0.0
@@ -2225,9 +2741,15 @@ class AppController(QObject):
             except Exception:
                 self._narration_duration_sec = 0.0
         if audio.exists() and srt.exists():
-            self._voice_status = f"英文配音与同步字幕已就绪，时长 {self._format_time(self._narration_duration_sec)}"
+            self._voice_status = (
+                f"英文配音与同步字幕已就绪，时长 {self._format_time(self._narration_duration_sec)}"
+                f" · {self._narration_speed:.2f}x"
+            )
         elif audio.exists():
-            self._voice_status = f"英文配音已就绪，时长 {self._format_time(self._narration_duration_sec)}；建议导入同步 SRT"
+            self._voice_status = (
+                f"英文配音已就绪，时长 {self._format_time(self._narration_duration_sec)}"
+                f" · {self._narration_speed:.2f}x；建议导入同步 SRT"
+            )
         elif (project_file.parent / "script" / "tts" / "gpt_sovits_reference.srt").exists():
             self._voice_status = "GPT-SoVITS SRT 已准备，请生成并导入英文配音"
         else:
@@ -2242,6 +2764,12 @@ class AppController(QObject):
             "bottomMargin": int(export.get("subtitle_margin_v", 72) or 72),
             "horizontalMargin": int(export.get("subtitle_margin_h", 72) or 72),
             "bold": bool(export.get("subtitle_bold", True)),
+            "italic": bool(export.get("subtitle_italic", False)),
+            "textColor": str(export.get("subtitle_color", "#FFFFFFFF")),
+            "outlineColor": str(export.get("subtitle_outline_color", "#000000FF")),
+            "shadow": int(export.get("subtitle_shadow", 1) or 0),
+            "letterSpacing": float(export.get("subtitle_spacing", 0) or 0),
+            "animation": str(export.get("subtitle_animation", "fade")),
             "backgroundEnabled": False,
             "backgroundOpacity": float(export.get("subtitle_background_opacity", 0.62) or 0.62),
             "outlineWidth": int(export.get("subtitle_outline_width", 3) or 3),
@@ -2303,6 +2831,12 @@ class AppController(QObject):
         export["subtitle_margin_v"] = style["bottomMargin"]
         export["subtitle_margin_h"] = style["horizontalMargin"]
         export["subtitle_bold"] = style["bold"]
+        export["subtitle_italic"] = style["italic"]
+        export["subtitle_color"] = style["textColor"]
+        export["subtitle_outline_color"] = style["outlineColor"]
+        export["subtitle_shadow"] = style["shadow"]
+        export["subtitle_spacing"] = style["letterSpacing"]
+        export["subtitle_animation"] = style["animation"]
         export["subtitle_background_enabled"] = style["backgroundEnabled"]
         export["subtitle_background_opacity"] = style["backgroundOpacity"]
         export["subtitle_outline_width"] = style["outlineWidth"]

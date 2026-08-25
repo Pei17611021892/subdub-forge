@@ -10,7 +10,7 @@ ApplicationWindow {
     height: 800
     minimumWidth: 1040
     minimumHeight: 680
-    title: "StoryCut V2 v" + appController.appVersion + " · AI 解说剪辑"
+    title: "StoryCut v" + appController.appVersion + " · AI 解说剪辑"
     color: "#0b0c10"
 
     property color accent: "#8b5cf6"
@@ -146,6 +146,14 @@ ApplicationWindow {
         if (!item)
             return
         mainScroll.contentItem.contentY = Math.max(0, item.y - 18)
+    }
+
+    function opaqueRgbaHex(value) {
+        function pair(channel) {
+            var text = Math.round(Math.max(0, Math.min(1, channel)) * 255).toString(16).toUpperCase()
+            return text.length < 2 ? "0" + text : text
+        }
+        return "#" + pair(value.r) + pair(value.g) + pair(value.b) + "FF"
     }
 
     font.family: "Microsoft YaHei UI"
@@ -562,6 +570,18 @@ ApplicationWindow {
         onAccepted: appController.importNarrationSrt(selectedFile.toString())
     }
 
+    ColorDialog {
+        id: subtitleTextColorDialog
+        title: "选择字幕文字颜色"
+        onAccepted: appController.updateSubtitleStyle("textColor", window.opaqueRgbaHex(selectedColor))
+    }
+
+    ColorDialog {
+        id: subtitleOutlineColorDialog
+        title: "选择字幕描边颜色"
+        onAccepted: appController.updateSubtitleStyle("outlineColor", window.opaqueRgbaHex(selectedColor))
+    }
+
     FileDialog {
         id: saveTtsSrtDialog
         title: "导出 SRT 到 GPT-SoVITS · 选择保存位置"
@@ -569,6 +589,74 @@ ApplicationWindow {
         defaultSuffix: "srt"
         nameFilters: ["SRT 字幕 (*.srt)"]
         onAccepted: appController.saveTtsSrt(selectedFile.toString())
+    }
+
+    Dialog {
+        id: qualityCheckDialog
+        width: Math.min(window.width - 80, 680)
+        height: Math.min(window.height - 70, 590)
+        anchors.centerIn: parent
+        modal: true
+        padding: 0
+        closePolicy: Popup.CloseOnEscape
+
+        background: Rectangle {
+            radius: 18
+            color: "#12141b"
+            border.color: appController.qualityCheckPassed ? "#326b4d" : "#6b3b3b"
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 24
+            spacing: 16
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                Rectangle {
+                    Layout.preferredWidth: 44
+                    Layout.preferredHeight: 44
+                    radius: 13
+                    color: appController.qualityCheckPassed ? "#173526" : "#3b2528"
+                    Text {
+                        anchors.centerIn: parent
+                        text: appController.qualityCheckPassed ? "✓" : "!"
+                        color: appController.qualityCheckPassed ? "#8ee3b4" : "#fca5a5"
+                        font.pixelSize: 20
+                        font.bold: true
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 3
+                    Text { text: "成片质量检查"; color: textMain; font.pixelSize: 20; font.bold: true }
+                    Text {
+                        text: appController.qualityCheckPassed
+                              ? "检查通过；提醒项不会阻止导出。"
+                              : "请先处理标记为“×”的问题，再生成成片。"
+                        color: textMuted
+                        font.pixelSize: 11
+                    }
+                }
+                GhostButton { text: "关闭"; onClicked: qualityCheckDialog.close() }
+            }
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2b2f39" }
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                TextArea {
+                    text: appController.qualityCheckText
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextEdit.Wrap
+                    color: "#d8dbe4"
+                    font.pixelSize: 12
+                    background: Rectangle { radius: 12; color: "#0d0f14"; border.color: "#292d37" }
+                    padding: 16
+                }
+            }
+        }
     }
 
     Dialog {
@@ -1111,7 +1199,7 @@ ApplicationWindow {
             Text {
                 Layout.fillWidth: true
                 visible: appController.updateAvailable
-                text: "更新会优先在后台执行 Git fast-forward；无 Git 或 Git 不可用时，自动改用内置 ZIP 同步。两种方式都会更新两个应用和启动器，但不会清理项目、未跟踪文件、用户设置、.env、模型或导出。"
+                text: "更新会优先在后台执行 Git fast-forward；无 Git 或 Git 不可用时，自动改用内置 ZIP 同步。两种方式都会更新 StoryCut 和启动器，但不会清理项目、未跟踪文件、用户设置、.env、模型或导出。"
                 color: textMuted
                 font.pixelSize: 10
                 wrapMode: Text.WordWrap
@@ -1143,6 +1231,10 @@ ApplicationWindow {
         function onSourceVideoRelinkRequested() {
             if (!relinkVideoDialog.visible)
                 relinkVideoDialog.open()
+        }
+        function onQualityDialogRequested() {
+            if (!qualityCheckDialog.opened)
+                qualityCheckDialog.open()
         }
     }
 
@@ -1332,7 +1424,7 @@ ApplicationWindow {
                                     width: parent.width - 24
                                     anchors.centerIn: parent
                                     text: appController.subtitlePreviewText
-                                    color: "white"
+                                    color: appController.subtitleStyle.textColor.substring(0, 7)
                                     font.family: appController.subtitleStyle.fontFamily
                                     font.pixelSize: Math.max(
                                                         6,
@@ -1340,10 +1432,12 @@ ApplicationWindow {
                                                         / Math.max(1, appController.sourceVideoHeight)
                                                         * subtitleVideoViewport.height)
                                     font.bold: appController.subtitleStyle.bold
+                                    font.italic: appController.subtitleStyle.italic
+                                    font.letterSpacing: appController.subtitleStyle.letterSpacing
                                     horizontalAlignment: Text.AlignHCenter
                                     wrapMode: Text.WordWrap
                                     style: Text.Outline
-                                    styleColor: "#dd000000"
+                                    styleColor: appController.subtitleStyle.outlineColor.substring(0, 7)
                                 }
                             }
                         }
@@ -1423,6 +1517,12 @@ ApplicationWindow {
                                 GhostButton { text: "清爽描边"; onClicked: appController.applySubtitlePreset("outline") }
                                 GhostButton { text: "Shorts 大字"; onClicked: appController.applySubtitlePreset("shorts") }
                             }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                GhostButton { text: "纪录片暖白"; onClicked: appController.applySubtitlePreset("documentary") }
+                                GhostButton { text: "科普黄字"; onClicked: appController.applySubtitlePreset("science") }
+                                GhostButton { text: "极简白字"; onClicked: appController.applySubtitlePreset("minimal") }
+                            }
 
                             Text { text: "字体"; color: textMuted; font.pixelSize: 10 }
                             ComboBox {
@@ -1493,10 +1593,89 @@ ApplicationWindow {
                             }
                             RowLayout {
                                 Layout.fillWidth: true
-                                Text { text: "粗体"; color: textMain; font.pixelSize: 11; Layout.fillWidth: true }
+                                Text { text: "粗体"; color: textMain; font.pixelSize: 11 }
                                 Switch {
                                     checked: appController.subtitleStyle.bold
                                     onToggled: appController.updateSubtitleStyle("bold", checked)
+                                }
+                                Item { Layout.preferredWidth: 18 }
+                                Text { text: "斜体"; color: textMain; font.pixelSize: 11 }
+                                Switch {
+                                    checked: appController.subtitleStyle.italic
+                                    onToggled: appController.updateSubtitleStyle("italic", checked)
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Text { text: "文字颜色"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
+                                Rectangle {
+                                    Layout.preferredWidth: 30; Layout.preferredHeight: 24; radius: 6
+                                    color: appController.subtitleStyle.textColor.substring(0, 7)
+                                    border.color: "#5b6070"
+                                }
+                                GhostButton {
+                                    text: "选择"
+                                    onClicked: {
+                                        subtitleTextColorDialog.selectedColor = appController.subtitleStyle.textColor.substring(0, 7)
+                                        subtitleTextColorDialog.open()
+                                    }
+                                }
+                                Text { text: appController.subtitleStyle.textColor; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Text { text: "描边颜色"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
+                                Rectangle {
+                                    Layout.preferredWidth: 30; Layout.preferredHeight: 24; radius: 6
+                                    color: appController.subtitleStyle.outlineColor.substring(0, 7)
+                                    border.color: "#5b6070"
+                                }
+                                GhostButton {
+                                    text: "选择"
+                                    onClicked: {
+                                        subtitleOutlineColorDialog.selectedColor = appController.subtitleStyle.outlineColor.substring(0, 7)
+                                        subtitleOutlineColorDialog.open()
+                                    }
+                                }
+                                Text { text: appController.subtitleStyle.outlineColor; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Text { text: "阴影大小"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
+                                Slider {
+                                    Layout.fillWidth: true; from: 0; to: 10; stepSize: 1
+                                    value: appController.subtitleStyle.shadow
+                                    onMoved: appController.updateSubtitleStyle("shadow", Math.round(value))
+                                }
+                                PreciseSpinBox {
+                                    from: 0; to: 10; value: appController.subtitleStyle.shadow; suffix: " px"
+                                    onValueModified: appController.updateSubtitleStyle("shadow", value)
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Text { text: "字间距"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
+                                Slider {
+                                    Layout.fillWidth: true; from: -5; to: 20; stepSize: 1
+                                    value: appController.subtitleStyle.letterSpacing
+                                    onMoved: appController.updateSubtitleStyle("letterSpacing", value)
+                                }
+                                PreciseSpinBox {
+                                    from: -5; to: 20; value: appController.subtitleStyle.letterSpacing; suffix: " px"
+                                    onValueModified: appController.updateSubtitleStyle("letterSpacing", value)
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Text { text: "字幕动画"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
+                                ComboBox {
+                                    Layout.fillWidth: true
+                                    model: ["无动画（最稳定）", "柔和淡入淡出", "轻微弹出"]
+                                    currentIndex: appController.subtitleStyle.animation === "none" ? 0
+                                                  : appController.subtitleStyle.animation === "pop" ? 2 : 1
+                                    onActivated: appController.updateSubtitleStyle(
+                                                     "animation", currentIndex === 0 ? "none" : currentIndex === 2 ? "pop" : "fade")
                                 }
                             }
 
@@ -1797,7 +1976,7 @@ ApplicationWindow {
                 Item { Layout.fillHeight: true }
 
                 Rectangle { Layout.fillWidth: true; height: 1; color: "#292c35" }
-                Text { text: "StoryCut V2  v" + appController.appVersion; color: "#626773"; font.pixelSize: 11; Layout.topMargin: 12 }
+                Text { text: "StoryCut  v" + appController.appVersion; color: "#626773"; font.pixelSize: 11; Layout.topMargin: 12 }
             }
         }
 
@@ -2559,7 +2738,11 @@ ApplicationWindow {
                         id: exportSection
                         property bool expanded: true
                         Layout.fillWidth: true
-                        Layout.preferredHeight: expanded ? (appController.matches.length > 0 ? 348 : 116) : 90
+                        Layout.preferredHeight: expanded
+                                                ? (appController.matches.length > 0
+                                                   ? (appController.narrationAudioReady && !appController.syncedSrtReady ? 456 : 402)
+                                                   : 116)
+                                                : 90
                         radius: 14
                         color: panel
                         border.color: exportDone ? "#326b4d" : "#292c36"
@@ -2606,6 +2789,11 @@ ApplicationWindow {
                                     enabled: appController.storyNarration.length > 0
                                     onClicked: subtitleStyleDialog.open()
                                 }
+                                GhostButton {
+                                    text: "成片检查"
+                                    enabled: !appController.exportBusy
+                                    onClicked: appController.runQualityCheck()
+                                }
                                 Item { Layout.fillWidth: true }
                                 GhostButton {
                                     visible: appController.previewVideoReady
@@ -2626,10 +2814,12 @@ ApplicationWindow {
                                 }
                                 GhostButton {
                                     text: appController.narrationAudioReady ? "重新导入英文配音" : "2  导入英文配音"
+                                    enabled: !appController.voiceBusy
                                     onClicked: narrationAudioDialog.open()
                                 }
                                 GhostButton {
                                     text: appController.syncedSrtReady ? "重新导入同步 SRT" : "3  导入同步 SRT（可选）"
+                                    enabled: !appController.voiceBusy
                                     onClicked: narrationSrtDialog.open()
                                 }
                                 Text {
@@ -2645,6 +2835,57 @@ ApplicationWindow {
                                     color: accentLight
                                     font.pixelSize: 10
                                     font.bold: true
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: exportSection.expanded
+                                         && appController.matches.length > 0
+                                         && appController.narrationAudioReady
+                                         && !appController.syncedSrtReady
+                                spacing: 10
+                                Text { text: "同步字幕兜底"; color: textMain; font.pixelSize: 11; font.bold: true }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: "没有 GPT-SoVITS 同步 SRT 时，可用 Faster-Whisper 识别英文配音；CPU 可能较慢。"
+                                    color: textMuted
+                                    font.pixelSize: 10
+                                    elide: Text.ElideRight
+                                }
+                                GhostButton {
+                                    text: appController.voiceBusy ? "正在识别…" : "从配音生成 SRT"
+                                    enabled: !appController.voiceBusy
+                                    onClicked: appController.generateNarrationSrtWithWhisper()
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: exportSection.expanded && appController.matches.length > 0
+                                spacing: 10
+                                Text {
+                                    text: "配音超时处理"
+                                    color: textMain
+                                    font.pixelSize: 11
+                                    font.bold: true
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: appController.narrationSpeedHint
+                                    color: appController.narrationOverShortsLimit ? "#f1b86b" : textMuted
+                                    font.pixelSize: 10
+                                    elide: Text.ElideRight
+                                }
+                                FlatButton {
+                                    visible: appController.narrationOverShortsLimit
+                                    text: appController.voiceBusy ? "正在处理…" : (appController.canAutoFitNarration ? "自动适配至 3 分钟" : "需要删减文案")
+                                    enabled: appController.canAutoFitNarration && !appController.voiceBusy
+                                    onClicked: appController.autoFitNarrationToShorts()
+                                }
+                                GhostButton {
+                                    visible: appController.narrationSpeed > 1.001
+                                    text: "恢复原速"
+                                    enabled: !appController.voiceBusy
+                                    onClicked: appController.restoreNarrationSpeed()
                                 }
                             }
                             RowLayout {

@@ -180,6 +180,17 @@ class RepositoryUpdaterTests(unittest.TestCase):
             (root / "commentary_studio" / "projects" / "demo" / "project.json").write_text(
                 "{}", encoding="utf-8"
             )
+            (root / "storycut_v1" / "src").mkdir(parents=True)
+            (root / "storycut_v1" / "src" / "old_v1.py").write_text(
+                "old v1 program", encoding="utf-8"
+            )
+            (root / "storycut_v1" / "output").mkdir()
+            (root / "storycut_v1" / "output" / "historical.mp4").write_bytes(
+                b"historical output"
+            )
+            (root / "storycut_v1" / "config.user.yaml").write_text(
+                "user: keep", encoding="utf-8"
+            )
             (root / ".env").write_text("SECRET=keep", encoding="utf-8")
             (root / "update_manifest.json").write_text(
                 json.dumps(
@@ -187,6 +198,7 @@ class RepositoryUpdaterTests(unittest.TestCase):
                         "format": 1,
                         "files": [
                             "commentary_studio/src/old.py",
+                            "storycut_v1/src/old_v1.py",
                             "storycut_v2/version.json",
                         ],
                     }
@@ -201,7 +213,10 @@ class RepositoryUpdaterTests(unittest.TestCase):
                     "storycut_v2/version.json",
                     "update_manifest.json",
                 ],
-                "remove": ["commentary_studio/src/old.py"],
+                "remove": [
+                    "commentary_studio/src/old.py",
+                    "storycut_v1/src/old_v1.py",
+                ],
             }
             archive_data = make_archive(
                 {
@@ -220,8 +235,17 @@ class RepositoryUpdaterTests(unittest.TestCase):
             )
 
             self.assertFalse((root / "commentary_studio" / "src" / "old.py").exists())
+            self.assertFalse((root / "storycut_v1" / "src" / "old_v1.py").exists())
             self.assertTrue((root / "storycut_v2" / "projects" / "demo" / "project.json").exists())
             self.assertTrue((root / "commentary_studio" / "projects" / "demo" / "project.json").exists())
+            self.assertEqual(
+                (root / "storycut_v1" / "output" / "historical.mp4").read_bytes(),
+                b"historical output",
+            )
+            self.assertEqual(
+                (root / "storycut_v1" / "config.user.yaml").read_text(encoding="utf-8"),
+                "user: keep",
+            )
             self.assertEqual((root / ".env").read_text(encoding="utf-8"), "SECRET=keep")
             installed = json.loads(
                 (root / "storycut_v2" / "version.json").read_text(encoding="utf-8")

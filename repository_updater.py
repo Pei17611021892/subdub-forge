@@ -50,12 +50,16 @@ ALLOWED_ROOT_FILES = {
     "requirements.txt",
     "update_manifest.json",
     "version.json",
+    "点我启动StoryCut（AI解说剪辑）.vbs",
+}
+ALLOWED_APP_DIRS = {"storycut_v2"}
+LEGACY_MANAGED_DIRS = {"storycut_v1", "translator_studio", "commentary_studio"}
+LEGACY_ROOT_FILES = {
+    "点我启动StoryCut.vbs",
+    "点我启动翻译工具.vbs",
     "点我启动StoryCut V1（一比一翻译）.vbs",
     "点我启动StoryCut V2（AI解说剪辑）.vbs",
 }
-ALLOWED_APP_DIRS = {"storycut_v1", "storycut_v2"}
-LEGACY_MANAGED_DIRS = {"translator_studio", "commentary_studio"}
-LEGACY_ROOT_FILES = {"点我启动StoryCut.vbs", "点我启动翻译工具.vbs"}
 
 
 class UpdateError(RuntimeError):
@@ -193,8 +197,6 @@ def _migrate_legacy_user_data() -> None:
     pairs = (
         ("commentary_studio", "storycut_v2", "projects"),
         ("commentary_studio", "storycut_v2", "config.user.yaml"),
-        ("translator_studio", "storycut_v1", "output"),
-        ("translator_studio", "storycut_v1", "config.user.yaml"),
     )
     for old_app, new_app, child in pairs:
         _copy_if_target_missing(
@@ -394,7 +396,7 @@ def apply_repository_archive(
 
         try:
             _migrate_legacy_user_data()
-            report("正在同步两个应用和根目录启动器……")
+            report("正在同步 StoryCut 和根目录启动器……")
             for relative in sorted(new_paths, key=lambda path: path.as_posix()):
                 info = entries[relative.as_posix()]
                 if ((info.external_attr >> 16) & 0o170000) == 0o120000:

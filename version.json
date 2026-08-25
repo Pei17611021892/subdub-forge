@@ -1,7 +1,7 @@
 {
-  "name": "声画译匠 · SubDub Forge",
-  "version": "1.0.4",
+  "name": "StoryCut",
+  "version": "2.0.0",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "更新按钮优先在后台执行 Git fast-forward pull，无 Git 或不可用时自动回退到仓库 ZIP 同步。"
+  "notes": "仓库已整合为单一 StoryCut 应用。V1 的实用能力已迁入当前版本，旧 V1 程序停止维护；更新会保留用户配置、项目、模型和历史输出。"
 }

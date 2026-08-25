@@ -61,6 +61,12 @@ export:
   subtitle_margin_h: 72
   subtitle_margin_v: 150
   subtitle_bold: true
+  subtitle_italic: false
+  subtitle_color: '#FFFFFFFF'
+  subtitle_outline_color: '#000000FF'
+  subtitle_shadow: 1
+  subtitle_spacing: 0
+  subtitle_animation: fade
   subtitle_background_enabled: false
   subtitle_background_opacity: 0.62
   subtitle_outline_width: 3

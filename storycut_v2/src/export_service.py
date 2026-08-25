@@ -150,7 +150,9 @@ def render_rough_preview(
                 ]
             )
     if has_subtitles:
-        ass_path = output_video.parent / "_internal" / "shorts_subtitles.ass"
+        internal_dir = output_video.parent / "_internal"
+        internal_dir.mkdir(parents=True, exist_ok=True)
+        ass_path = internal_dir / f"{output_video.stem}_subtitles.ass"
         _build_shorts_ass(subtitle_srt, ass_path, width, height, export_config)
         filters.append(f"[vbase]subtitles='{_escape_subtitle_path(ass_path)}'[vout]")
     if has_narration:
@@ -172,6 +174,11 @@ def render_rough_preview(
         filters.append("[aoriginal]anull[aout]")
 
     output_video.parent.mkdir(parents=True, exist_ok=True)
+    internal_dir = output_video.parent / "_internal"
+    internal_dir.mkdir(parents=True, exist_ok=True)
+    filter_log = internal_dir / f"{output_video.stem}_filters.txt"
+    ffmpeg_log = internal_dir / f"{output_video.stem}_ffmpeg.log"
+    filter_log.write_text(";\n".join(filters) + "\n", encoding="utf-8")
     command = [
         ffmpeg,
         "-y",
@@ -233,6 +240,14 @@ def render_rough_preview(
                     pass
     stderr = process.stderr.read() if process.stderr is not None else ""
     return_code = process.wait()
+    ffmpeg_log.write_text(
+        "COMMAND\n"
+        + subprocess.list2cmdline(command)
+        + "\n\nSTDERR\n"
+        + (stderr or "(empty)")
+        + f"\n\nEXIT_CODE\n{return_code}\n",
+        encoding="utf-8",
+    )
     if return_code != 0:
         raise RuntimeError(stderr.strip() or f"FFmpeg 退出码 {return_code}")
     if not output_video.exists() or output_video.stat().st_size == 0:
@@ -259,6 +274,8 @@ def render_rough_preview(
         "subtitles_burned": has_subtitles,
         "original_subtitles_cleaned": cleanup_original_subtitles or needs_cleanup,
         "original_subtitle_cleanup_mode": cleanup_mode,
+        "ffmpeg_log": str(ffmpeg_log),
+        "filter_log": str(filter_log),
     }
 
 
@@ -285,15 +302,25 @@ def _build_shorts_ass(
             continue
         left, right = [part.strip() for part in lines[timing_index].split("-->", 1)]
         caption = r"\N".join(lines[timing_index + 1 :]).replace("{", r"\{").replace("}", r"\}")
+        duration_ms = max(1, round((_srt_seconds(right) - _srt_seconds(left)) * 1000))
+        animation_tag = _subtitle_animation_tag(
+            str(config.get("subtitle_animation", "fade")), duration_ms
+        )
         events.append(
             f"Dialogue: 0,{_ass_time(left)},{_ass_time(right)},Default,,0,0,0,,"
-            rf"{{\fad(70,70)}}{caption}"
+            f"{animation_tag}{caption}"
         )
     font_name = str(config.get("subtitle_font", "Arial"))
     font_size = int(config.get("subtitle_font_size", 48) or 48)
     margin_v = int(config.get("subtitle_margin_v", 72) or 72)
     margin_h = int(config.get("subtitle_margin_h", 72) or 72)
     bold = -1 if bool(config.get("subtitle_bold", True)) else 0
+    italic = -1 if bool(config.get("subtitle_italic", False)) else 0
+    spacing = min(20.0, max(-5.0, float(config.get("subtitle_spacing", 0) or 0)))
+    text_color = _rgba_to_ass(str(config.get("subtitle_color", "#FFFFFFFF")))
+    configured_outline_color = _rgba_to_ass(
+        str(config.get("subtitle_outline_color", "#000000FF"))
+    )
     background_enabled = bool(config.get("subtitle_background_enabled", True))
     background_opacity = min(0.95, max(0.0, float(config.get("subtitle_background_opacity", 0.62) or 0.62)))
     outline_width = int(config.get("subtitle_outline_width", 3) or 3)
@@ -301,8 +328,8 @@ def _build_shorts_ass(
     border_style = 3 if background_enabled else 1
     border_size = box_padding if background_enabled else outline_width
     alpha = round((1.0 - background_opacity) * 255) if background_enabled else 0
-    border_color = f"&H{alpha:02X}000000" if background_enabled else "&H00000000"
-    shadow = 0 if background_enabled else 1
+    border_color = f"&H{alpha:02X}000000" if background_enabled else configured_outline_color
+    shadow = 0 if background_enabled else max(0, min(10, int(config.get("subtitle_shadow", 1) or 0)))
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -312,7 +339,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{font_size},&H00FFFFFF,&H00FFFFFF,{border_color},{border_color},{bold},0,0,0,100,100,0,0,{border_style},{border_size},{shadow},2,{margin_h},{margin_h},{margin_v},1
+Style: Default,{font_name},{font_size},{text_color},{text_color},{border_color},{border_color},{bold},{italic},0,0,100,100,{spacing:g},0,{border_style},{border_size},{shadow},2,{margin_h},{margin_h},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -325,3 +352,32 @@ def _ass_time(value: str) -> str:
     hours, minutes, rest = value.replace(",", ".").split(":")
     seconds = float(rest)
     return f"{int(hours)}:{int(minutes):02d}:{seconds:05.2f}"
+
+
+def _srt_seconds(value: str) -> float:
+    hours, minutes, rest = value.replace(",", ".").split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + float(rest)
+
+
+def _subtitle_animation_tag(animation: str, duration_ms: int) -> str:
+    if animation == "none":
+        return ""
+    if animation == "pop":
+        enter = max(70, min(170, duration_ms // 3))
+        fade = max(40, min(90, duration_ms // 6))
+        return rf"{{\fscx88\fscy88\t(0,{enter},\fscx100\fscy100)\fad({fade},{fade})}}"
+    fade = max(40, min(140, duration_ms // 4))
+    return rf"{{\fad({fade},{fade})}}"
+
+
+def _rgba_to_ass(value: str) -> str:
+    cleaned = value.strip().lstrip("#")
+    if len(cleaned) == 6:
+        cleaned += "FF"
+    if not re.fullmatch(r"[0-9A-Fa-f]{8}", cleaned):
+        cleaned = "FFFFFFFF"
+    red, green, blue, rgba_alpha = (
+        cleaned[0:2], cleaned[2:4], cleaned[4:6], cleaned[6:8]
+    )
+    ass_alpha = 255 - int(rgba_alpha, 16)
+    return f"&H{ass_alpha:02X}{blue}{green}{red}".upper()

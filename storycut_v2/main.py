@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent
 def main() -> int:
     QQuickStyle.setStyle("Basic")
     app = QGuiApplication(sys.argv)
-    app.setApplicationName(f"StoryCut V2 {__version__}")
+    app.setApplicationName(f"StoryCut {__version__}")
     app.setOrganizationName("SubDub Forge")
 
     engine = QQmlApplicationEngine()

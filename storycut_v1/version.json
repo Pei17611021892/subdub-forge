@@ -1,7 +1,0 @@
-{
-  "name": "声画译匠 · SubDub Forge",
-  "version": "1.0.4",
-  "repository": "Pei17611021892/subdub-forge",
-  "update_channel": "stable",
-  "notes": "更新按钮优先在后台执行 git pull --ff-only origin main；无 Git、非克隆目录或 Git 不可用时，自动回退到内置 ZIP 更新器。"
-}

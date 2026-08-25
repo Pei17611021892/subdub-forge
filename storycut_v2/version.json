@@ -1,7 +1,7 @@
 {
-  "name": "StoryCut Studio",
-  "version": "0.1.8",
+  "name": "StoryCut",
+  "version": "0.2.0",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "更新按钮优先在后台执行 git pull --ff-only origin main；无 Git、非克隆目录或 Git 不可用时，自动回退到内置 ZIP 更新器。"
+  "notes": "迁入 V1 的配音安全变速、同步字幕兜底和字幕高级样式，新增本地成片检查与 FFmpeg 诊断文件；V1 程序正式退役。"
 }

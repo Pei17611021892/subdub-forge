@@ -1,6 +1,6 @@
 # Faster-Whisper 模型与离线加载说明
 
-两套工具默认使用 Faster-Whisper `large-v3` 识别语音。StoryCut 从 v0.1.5 起在缺少模型时默认自动下载，并在界面显示下载进度；下载完成后会自动继续原片分析。
+StoryCut 默认使用 Faster-Whisper `large-v3` 识别语音。程序从 v0.1.5 起在缺少模型时默认自动下载，并在界面显示下载进度；下载完成后会自动继续原片分析。
 
 ## 当前默认配置
 

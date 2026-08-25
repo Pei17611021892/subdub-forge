@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from src.quality_service import _inspect_render_probe, inspect_project_for_export
+
+
+class QualityServiceTests(unittest.TestCase):
+    def _project(self, root: Path, duration: float = 12.0) -> tuple[Path, Path, Path, Path]:
+        project = root / "project.json"
+        source = root / "source.mp4"
+        audio = root / "audio" / "narration.wav"
+        srt = root / "audio" / "narration.srt"
+        (root / "script").mkdir()
+        (root / "timeline").mkdir()
+        audio.parent.mkdir()
+        source.write_bytes(b"video")
+        audio.write_bytes(b"audio")
+        project.write_text("{}", encoding="utf-8")
+        (root / "script" / "story.json").write_text("{}", encoding="utf-8")
+        (root / "timeline" / "matches.json").write_text("{}", encoding="utf-8")
+        timeline = {
+            "duration_sec": duration,
+            "all_narration_covered": True,
+            "narration": [{"covered": True}],
+            "clips": [
+                {
+                    "event_id": 1,
+                    "source_start": 0,
+                    "source_end": duration,
+                    "output_start": 0,
+                    "output_end": duration,
+                }
+            ],
+        }
+        (root / "timeline" / "rough_cut.json").write_text(json.dumps(timeline), encoding="utf-8")
+        srt.write_text(f"1\n00:00:00,000 --> 00:00:{duration:06.3f}\nHello.\n", encoding="utf-8")
+        return project, source, audio, srt
+
+    def test_complete_project_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project, source, audio, srt = self._project(root)
+            report = inspect_project_for_export(
+                project, source, audio, 12.0, srt, {"duration_sec": 20, "file_size": 5}
+            )
+            self.assertTrue(report["passed"])
+            self.assertEqual(report["error_count"], 0)
+
+    def test_overlong_and_missing_audio_are_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project, source, _audio, srt = self._project(root, 180.0)
+            report = inspect_project_for_export(
+                project, source, None, 0.0, srt, {"duration_sec": 200, "file_size": 5}
+            )
+            self.assertFalse(report["passed"])
+            titles = {item["title"] for item in report["checks"] if item["level"] == "error"}
+            self.assertIn("时间线超过 Shorts 上限", titles)
+            self.assertIn("英文配音缺失", titles)
+
+    def test_render_probe_accepts_shorts_compatible_output(self) -> None:
+        checks: list[dict[str, str]] = []
+
+        def add(level: str, title: str, detail: str) -> None:
+            checks.append({"level": level, "title": title, "detail": detail})
+
+        _inspect_render_probe(
+            {
+                "format": {"duration": "12.030"},
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "codec_name": "h264",
+                        "width": 1280,
+                        "height": 720,
+                        "pix_fmt": "yuv420p",
+                    },
+                    {"codec_type": "audio", "codec_name": "aac"},
+                ],
+            },
+            12.0,
+            1280,
+            720,
+            True,
+            add,
+        )
+        self.assertFalse([item for item in checks if item["level"] == "error"])
+        self.assertIn("成片时长", {item["title"] for item in checks})
+        self.assertIn("音频轨道", {item["title"] for item in checks})
+
+    def test_render_probe_blocks_missing_audio_and_wrong_dimensions(self) -> None:
+        checks: list[dict[str, str]] = []
+
+        def add(level: str, title: str, detail: str) -> None:
+            checks.append({"level": level, "title": title, "detail": detail})
+
+        _inspect_render_probe(
+            {
+                "format": {"duration": "180.0"},
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "codec_name": "h264",
+                        "width": 640,
+                        "height": 360,
+                        "pix_fmt": "yuv420p",
+                    }
+                ],
+            },
+            120.0,
+            1280,
+            720,
+            True,
+            add,
+        )
+        titles = {item["title"] for item in checks if item["level"] == "error"}
+        self.assertIn("输出分辨率异常", titles)
+        self.assertIn("成片超过 Shorts 上限", titles)
+        self.assertIn("输出缺少声音", titles)
+
+
+if __name__ == "__main__":
+    unittest.main()
