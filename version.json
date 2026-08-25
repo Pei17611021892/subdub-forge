@@ -1,7 +1,7 @@
 {
   "name": "StoryCut",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "仓库已整合为单一 StoryCut 应用。V1 的实用能力已迁入当前版本，旧 V1 程序停止维护；更新会保留用户配置、项目、模型和历史输出。"
+  "notes": "StoryCut 更新器新增 Windows 系统代理支持和 GitHub 官方备用下载通道，改善 Clash 无 TUN 环境下的连接与偶发 404。"
 }

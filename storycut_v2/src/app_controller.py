@@ -156,9 +156,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.2.0"))
+            self._app_version = str(read_version().get("version", "0.2.1"))
         except Exception:
-            self._app_version = "0.2.0"
+            self._app_version = "0.2.1"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False

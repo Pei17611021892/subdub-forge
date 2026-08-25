@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "version": "0.1.9",
+  "files": [
+    "main.py",
+    "src/__init__.py",
+    "src/update_manager.py",
+    "update_manifest.json",
+    "version.json"
+  ]
+}

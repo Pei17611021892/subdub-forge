@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import io
 import json
@@ -33,6 +34,65 @@ def make_archive(files: dict[str, bytes]) -> bytes:
 
 
 class RepositoryUpdaterTests(unittest.TestCase):
+    def test_legacy_commentary_beacon_targets_complete_bridge(self) -> None:
+        repository_root = UPDATER_PATH.parent
+        bridge_root = repository_root / "commentary_studio"
+        version = json.loads((bridge_root / "version.json").read_text(encoding="utf-8"))
+        manifest = json.loads(
+            (bridge_root / "update_manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(version["version"], "0.1.9")
+        self.assertEqual(manifest["version"], "0.1.9")
+        for relative in manifest["files"]:
+            self.assertTrue((bridge_root / relative).is_file(), relative)
+
+    def test_update_check_falls_back_to_github_api(self) -> None:
+        updater = load_updater()
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            updater.REPOSITORY_ROOT = root
+            (root / "storycut_v2").mkdir()
+            (root / "storycut_v2" / "version.json").write_text(
+                json.dumps({"version": "0.2.0", "repository": "owner/repo"}),
+                encoding="utf-8",
+            )
+            remote_version = json.dumps(
+                {"version": "0.2.1", "repository": "owner/repo"}
+            ).encode()
+            api_response = json.dumps(
+                {"content": base64.b64encode(remote_version).decode()}
+            ).encode()
+            calls: list[str] = []
+
+            def fake_request(url: str, **_kwargs) -> bytes:
+                calls.append(url)
+                if "raw.githubusercontent.com" in url:
+                    raise OSError("simulated 404")
+                return api_response
+
+            with patch.object(updater, "_request_bytes", side_effect=fake_request):
+                local, remote, newer = updater.check_for_update("storycut_v2")
+
+            self.assertEqual(local["version"], "0.2.0")
+            self.assertEqual(remote["version"], "0.2.1")
+            self.assertTrue(newer)
+            self.assertEqual(len(calls), 2)
+            self.assertIn("api.github.com", calls[1])
+
+    def test_git_commands_inherit_windows_system_proxy(self) -> None:
+        updater = load_updater()
+        completed = CompletedProcess(["git"], 0, "", "")
+        with patch.object(
+            updater.urllib.request,
+            "getproxies",
+            return_value={"http": "http://127.0.0.1:7890"},
+        ), patch.object(updater.subprocess, "run", return_value=completed) as run:
+            updater._run_git("git.exe", "status")
+
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["HTTP_PROXY"], "http://127.0.0.1:7890")
+        self.assertEqual(environment["HTTPS_PROXY"], "http://127.0.0.1:7890")
+
     @unittest.skipUnless(shutil.which("git"), "Git is required for this integration test")
     def test_real_fast_forward_preserves_ignored_and_untracked_files(self) -> None:
         updater = load_updater()

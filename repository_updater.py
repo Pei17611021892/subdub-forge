@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -84,16 +85,47 @@ def version_key(value: str) -> tuple[int, ...]:
     return parts + (0,) * (4 - len(parts))
 
 
-def _request_bytes(url: str, timeout: int = 30) -> bytes:
+def _system_proxies() -> dict[str, str]:
+    """Return HTTP proxies from environment variables or Windows system settings."""
+    try:
+        detected = urllib.request.getproxies()
+    except (OSError, ValueError):
+        return {}
+    proxies: dict[str, str] = {}
+    for scheme in ("http", "https"):
+        value = str(detected.get(scheme, "") or "").strip()
+        if value:
+            if "://" not in value:
+                value = "http://" + value
+            proxies[scheme] = value
+    if "http" in proxies and "https" not in proxies:
+        proxies["https"] = proxies["http"]
+    return proxies
+
+
+def _proxy_environment() -> dict[str, str]:
+    proxies = _system_proxies()
+    values: dict[str, str] = {}
+    if proxies.get("http"):
+        values["HTTP_PROXY"] = proxies["http"]
+        values["http_proxy"] = proxies["http"]
+    if proxies.get("https"):
+        values["HTTPS_PROXY"] = proxies["https"]
+        values["https_proxy"] = proxies["https"]
+    return values
+
+
+def _request_bytes(url: str, timeout: int = 30, accept: str = "application/octet-stream") -> bytes:
     request = urllib.request.Request(
         url,
         headers={
             "User-Agent": "StoryCut-Repository-Updater",
-            "Accept": "application/octet-stream",
+            "Accept": accept,
             "Cache-Control": "no-cache",
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler(_system_proxies()))
+    with opener.open(request, timeout=timeout) as response:
         length = response.headers.get("Content-Length")
         if length and int(length) > MAX_ARCHIVE_BYTES:
             raise UpdateError("更新包异常过大，已停止下载")
@@ -107,14 +139,36 @@ def check_for_update(app_relative_dir: str) -> tuple[dict[str, Any], dict[str, A
     app_dir = _validate_app_dir(app_relative_dir)
     local = read_version(REPOSITORY_ROOT / app_dir / "version.json")
     repository = str(local["repository"]).strip(" /")
-    url = (
+    raw_url = (
         f"https://raw.githubusercontent.com/{repository}/main/"
         f"{app_dir}/version.json?time={int(time.time())}"
     )
+    api_url = (
+        f"https://api.github.com/repos/{repository}/contents/"
+        f"{app_dir}/version.json?ref=main&time={int(time.time())}"
+    )
+    errors: list[str] = []
+    remote: dict[str, Any] | None = None
     try:
-        remote = json.loads(_request_bytes(url).decode("utf-8"))
+        value = json.loads(_request_bytes(raw_url).decode("utf-8"))
+        remote = value if isinstance(value, dict) else None
     except Exception as exc:
-        raise UpdateError(f"无法连接 GitHub 检查更新：{exc}") from exc
+        errors.append(f"Raw：{exc}")
+    if remote is None:
+        try:
+            wrapper = json.loads(
+                _request_bytes(api_url, accept="application/vnd.github+json").decode("utf-8")
+            )
+            encoded = str(wrapper.get("content", "")).replace("\n", "")
+            value = json.loads(base64.b64decode(encoded, validate=True).decode("utf-8"))
+            remote = value if isinstance(value, dict) else None
+        except Exception as exc:
+            errors.append(f"API：{exc}")
+    if remote is None:
+        proxy_note = "（已尝试 Windows 系统代理）" if _system_proxies() else ""
+        raise UpdateError(
+            "无法连接 GitHub 检查更新" + proxy_note + "：" + "；".join(errors)
+        )
     if not isinstance(remote, dict) or str(remote.get("repository", "")).strip(" /") != repository:
         raise UpdateError("GitHub 版本信息无效或仓库标识不匹配")
     newer = version_key(str(remote.get("version", ""))) > version_key(str(local["version"]))
@@ -248,12 +302,26 @@ def download_and_apply(
     if git_result is not None:
         return git_result
 
-    archive_url = f"https://github.com/{repository}/archive/refs/heads/main.zip"
+    if _system_proxies():
+        report("已检测到系统代理，GitHub 请求将自动通过代理连接……")
+    archive_urls = (
+        f"https://github.com/{repository}/archive/refs/heads/main.zip",
+        f"https://codeload.github.com/{repository}/zip/refs/heads/main",
+    )
     report("正在下载 GitHub 最新仓库文件……")
-    try:
-        archive_data = _request_bytes(archive_url, timeout=90)
-    except Exception as exc:
-        raise UpdateError(f"下载 GitHub 主分支失败：{exc}") from exc
+    archive_data = b""
+    errors: list[str] = []
+    for archive_url in archive_urls:
+        try:
+            archive_data = _request_bytes(archive_url, timeout=90)
+            break
+        except Exception as exc:
+            errors.append(str(exc))
+    if not archive_data:
+        proxy_note = "（已尝试 Windows 系统代理）" if _system_proxies() else ""
+        raise UpdateError(
+            f"下载 GitHub 主分支失败{proxy_note}：" + "；".join(errors)
+        )
     return apply_repository_archive(app_dir, remote, archive_data, report)
 
 
@@ -261,6 +329,7 @@ def _run_git(git_executable: str, *arguments: str, timeout: int = 45) -> subproc
     creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     environment = os.environ.copy()
     environment["GIT_TERMINAL_PROMPT"] = "0"
+    environment.update(_proxy_environment())
     return subprocess.run(
         [git_executable, "-C", str(REPOSITORY_ROOT), *arguments],
         capture_output=True,

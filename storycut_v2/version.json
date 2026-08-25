@@ -1,7 +1,7 @@
 {
   "name": "StoryCut",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "迁入 V1 的配音安全变速、同步字幕兜底和字幕高级样式，新增本地成片检查与 FFmpeg 诊断文件；V1 程序正式退役。"
+  "notes": "更新器自动读取 Windows 系统代理，Clash 无 TUN 时也能代理 GitHub；版本检查与 ZIP 下载增加官方备用通道，降低偶发 404。"
 }
