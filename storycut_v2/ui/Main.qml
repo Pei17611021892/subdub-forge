@@ -58,6 +58,44 @@ ApplicationWindow {
         }
     }
 
+    component LoadingRing: Item {
+        id: loadingRing
+        property color ringColor: accentLight
+        property bool running: true
+        implicitWidth: 34
+        implicitHeight: 34
+
+        Canvas {
+            anchors.fill: parent
+            antialiasing: true
+            onPaint: {
+                var ctx = getContext("2d")
+                var centerX = width / 2
+                var centerY = height / 2
+                var radius = Math.max(2, Math.min(width, height) / 2 - 3)
+                ctx.clearRect(0, 0, width, height)
+                ctx.lineWidth = 3
+                ctx.lineCap = "round"
+                ctx.strokeStyle = "#34303f"
+                ctx.beginPath()
+                ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
+                ctx.stroke()
+                ctx.strokeStyle = loadingRing.ringColor
+                ctx.beginPath()
+                ctx.arc(centerX, centerY, radius, -Math.PI / 2, Math.PI * 0.72)
+                ctx.stroke()
+            }
+        }
+
+        RotationAnimator on rotation {
+            from: 0
+            to: 360
+            duration: 850
+            loops: Animation.Infinite
+            running: loadingRing.running && loadingRing.visible
+        }
+    }
+
     component PreciseSpinBox: Control {
         id: preciseControl
         property int from: 0
@@ -281,14 +319,22 @@ ApplicationWindow {
         title: "打开其他 StoryCut 项目文件"
         nameFilters: ["StoryCut 项目 (project.json)"]
         onAccepted: {
-            appController.openProject(selectedFile.toString())
-            recentProjectsDialog.close()
+            recentProjectsDialog.openProjectWithLoading(selectedFile.toString())
         }
     }
 
     Dialog {
         id: recentProjectsDialog
         objectName: "recentProjectsDialog"
+        property bool openingProject: false
+        property string openingProjectUrl: ""
+        function openProjectWithLoading(projectUrl) {
+            if (openingProject || !projectUrl)
+                return
+            openingProject = true
+            openingProjectUrl = projectUrl
+            openProjectTimer.restart()
+        }
         width: Math.min(window.width - 80, 780)
         height: Math.min(
                     window.height - 70,
@@ -297,7 +343,19 @@ ApplicationWindow {
         anchors.centerIn: parent
         modal: true
         padding: 0
-        closePolicy: Popup.CloseOnEscape
+        closePolicy: openingProject ? Popup.NoAutoClose : Popup.CloseOnEscape
+
+        Timer {
+            id: openProjectTimer
+            interval: 60
+            repeat: false
+            onTriggered: {
+                appController.openProject(recentProjectsDialog.openingProjectUrl)
+                recentProjectsDialog.openingProject = false
+                recentProjectsDialog.openingProjectUrl = ""
+                recentProjectsDialog.close()
+            }
+        }
 
         background: Rectangle {
             radius: 18
@@ -326,7 +384,7 @@ ApplicationWindow {
                         font.pixelSize: 12
                     }
                 }
-                GhostButton { text: "关闭"; onClicked: recentProjectsDialog.close() }
+                GhostButton { text: "关闭"; enabled: !recentProjectsDialog.openingProject; onClicked: recentProjectsDialog.close() }
             }
 
             Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#292c35" }
@@ -360,10 +418,10 @@ ApplicationWindow {
                         id: projectRowMouse
                         anchors.fill: parent
                         hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
+                        enabled: !recentProjectsDialog.openingProject
+                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                         onClicked: {
-                            appController.openProject(modelData.projectFile)
-                            recentProjectsDialog.close()
+                            recentProjectsDialog.openProjectWithLoading(modelData.projectFile)
                         }
                     }
 
@@ -405,11 +463,35 @@ ApplicationWindow {
                             }
                         }
 
-                        GhostButton {
-                            text: "继续"
+                        Button {
+                            id: continueProjectButton
+                            implicitWidth: 112
+                            implicitHeight: 40
+                            enabled: !recentProjectsDialog.openingProject
+                            contentItem: Item {
+                                LoadingRing {
+                                    width: 17
+                                    height: 17
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: 7
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    running: recentProjectsDialog.openingProjectUrl === modelData.projectFile
+                                    visible: running
+                                }
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: recentProjectsDialog.openingProjectUrl === modelData.projectFile ? "加载中…" : "继续"
+                                    color: recentProjectsDialog.openingProjectUrl === modelData.projectFile ? "#ede9fe" : continueProjectButton.enabled ? "#d4d4d8" : "#8b91a0"
+                                    font.pixelSize: 12
+                                }
+                            }
+                            background: Rectangle {
+                                radius: 9
+                                color: continueProjectButton.hovered ? "#292d38" : "transparent"
+                                border.color: "#343843"
+                            }
                             onClicked: {
-                                appController.openProject(modelData.projectFile)
-                                recentProjectsDialog.close()
+                                recentProjectsDialog.openProjectWithLoading(modelData.projectFile)
                             }
                         }
 
@@ -418,6 +500,7 @@ ApplicationWindow {
                             text: "删除"
                             implicitWidth: 58
                             implicitHeight: 36
+                            enabled: !recentProjectsDialog.openingProject
                             contentItem: Text {
                                 text: deleteRecentButton.text
                                 color: deleteRecentButton.hovered ? "#fecaca" : "#fca5a5"
@@ -603,7 +686,7 @@ ApplicationWindow {
         background: Rectangle {
             radius: 18
             color: "#12141b"
-            border.color: appController.qualityCheckPassed ? "#326b4d" : "#6b3b3b"
+            border.color: appController.qualityCheckBusy ? "#4b4260" : appController.qualityCheckPassed ? "#326b4d" : "#6b3b3b"
         }
 
         contentItem: ColumnLayout {
@@ -617,11 +700,11 @@ ApplicationWindow {
                     Layout.preferredWidth: 44
                     Layout.preferredHeight: 44
                     radius: 13
-                    color: appController.qualityCheckPassed ? "#173526" : "#3b2528"
+                    color: appController.qualityCheckBusy ? "#292238" : appController.qualityCheckPassed ? "#173526" : "#3b2528"
                     Text {
                         anchors.centerIn: parent
-                        text: appController.qualityCheckPassed ? "✓" : "!"
-                        color: appController.qualityCheckPassed ? "#8ee3b4" : "#fca5a5"
+                        text: appController.qualityCheckBusy ? "…" : appController.qualityCheckPassed ? "✓" : "×"
+                        color: appController.qualityCheckBusy ? accentLight : appController.qualityCheckPassed ? "#8ee3b4" : "#fca5a5"
                         font.pixelSize: 20
                         font.bold: true
                     }
@@ -631,7 +714,9 @@ ApplicationWindow {
                     spacing: 3
                     Text { text: "成片质量检查"; color: textMain; font.pixelSize: 20; font.bold: true }
                     Text {
-                        text: appController.qualityCheckPassed
+                        text: appController.qualityCheckBusy
+                              ? "正在读取项目文件、时间线、字幕与成片参数…"
+                              : appController.qualityCheckPassed
                               ? "检查通过；提醒项不会阻止导出。"
                               : "请先处理标记为“×”的问题，再生成成片。"
                         color: textMuted
@@ -641,19 +726,111 @@ ApplicationWindow {
                 GhostButton { text: "关闭"; onClicked: qualityCheckDialog.close() }
             }
             Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2b2f39" }
-            ScrollView {
+
+            RowLayout {
+                Layout.fillWidth: true
+                visible: !appController.qualityCheckBusy
+                spacing: 8
+                Repeater {
+                    model: [
+                        { label: "通过", count: appController.qualityPassCount, color: "#8ee3b4", background: "#173526" },
+                        { label: "说明", count: appController.qualityInfoCount, color: "#93c5fd", background: "#172b45" },
+                        { label: "提醒", count: appController.qualityWarningCount, color: "#fcd34d", background: "#3a3117" },
+                        { label: "必须处理", count: appController.qualityErrorCount, color: "#fca5a5", background: "#3b2528" }
+                    ]
+                    delegate: Rectangle {
+                        required property var modelData
+                        Layout.preferredWidth: 105
+                        Layout.preferredHeight: 30
+                        radius: 8
+                        color: modelData.background
+                        Text { anchors.centerIn: parent; text: modelData.label + "  " + modelData.count; color: modelData.color; font.pixelSize: 10; font.bold: true }
+                    }
+                }
+                Item { Layout.fillWidth: true }
+            }
+
+            Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                visible: appController.qualityCheckBusy
+                LoadingRing {
+                    id: qualityLoadingRing
+                    width: 52
+                    height: 52
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: -38
+                    running: appController.qualityCheckBusy
+                }
+                Text {
+                    anchors.top: qualityLoadingRing.bottom
+                    anchors.topMargin: 16
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "正在执行成片检查…"
+                    color: textMain
+                    font.pixelSize: 14
+                    font.bold: true
+                }
+                Text {
+                    anchors.top: qualityLoadingRing.bottom
+                    anchors.topMargin: 44
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "已有成片时会在后台调用 FFprobe，通常只需几秒。"
+                    color: textMuted
+                    font.pixelSize: 10
+                }
+            }
+
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                visible: !appController.qualityCheckBusy
                 clip: true
-                TextArea {
-                    text: appController.qualityCheckText
-                    readOnly: true
-                    selectByMouse: true
-                    wrapMode: TextEdit.Wrap
-                    color: "#d8dbe4"
-                    font.pixelSize: 12
-                    background: Rectangle { radius: 12; color: "#0d0f14"; border.color: "#292d37" }
-                    padding: 16
+                spacing: 8
+                model: appController.qualityCheckItems
+                delegate: Rectangle {
+                    required property var modelData
+                    width: ListView.view.width
+                    height: 76
+                    radius: 10
+                    property color levelColor: modelData.level === "pass" ? "#63d39a"
+                                               : modelData.level === "error" ? "#f87171"
+                                               : modelData.level === "warning" ? "#fbbf24"
+                                               : "#60a5fa"
+                    color: modelData.level === "pass" ? "#13271e"
+                           : modelData.level === "error" ? "#2b181d"
+                           : modelData.level === "warning" ? "#2b2515"
+                           : "#142338"
+                    border.color: levelColor
+                    border.width: 1
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 11
+                        spacing: 11
+                        Rectangle {
+                            Layout.preferredWidth: 30
+                            Layout.preferredHeight: 30
+                            radius: 15
+                            color: modelData.level === "pass" ? "#1d4a34"
+                                   : modelData.level === "error" ? "#5a252d"
+                                   : modelData.level === "warning" ? "#5a4717"
+                                   : "#1d3d63"
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData.level === "pass" ? "✓" : modelData.level === "error" ? "×" : modelData.level === "warning" ? "!" : "i"
+                                color: levelColor
+                                font.pixelSize: 15
+                                font.bold: true
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            Text { text: modelData.title; color: levelColor; font.pixelSize: 12; font.bold: true }
+                            Text { text: modelData.detail; color: "#c5c9d2"; font.pixelSize: 10; Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+                        }
+                    }
                 }
             }
         }
@@ -2427,7 +2604,7 @@ ApplicationWindow {
                                 }
                                 FlatButton {
                                     text: appController.storyBusy ? "正在组织故事…" : storyDone ? "重新生成故事" : understandingDone ? "生成故事与英文解说  →" : "等待理解原片"
-                                    enabled: understandingDone && !appController.storyBusy
+                                    enabled: understandingDone && !appController.storyBusy && !appController.factReviewBusy
                                     onClicked: {
                                         if (appController.refreshApiConfiguration()) {
                                             appController.generateStory(storyTargetDuration)
@@ -2502,6 +2679,114 @@ ApplicationWindow {
                                         }
                                     }
                                     Text { text: Math.round(appController.storyProgress * 100) + "%"; color: accentLight; font.pixelSize: 12; font.bold: true }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                visible: storySection.expanded && storyDone
+                                Layout.preferredHeight: visible ? factReviewContent.implicitHeight + 26 : 0
+                                radius: 12
+                                color: "#15171e"
+                                border.color: appController.factReviewStatus.indexOf("高风险") >= 0 ? "#7f3d46" : "#303440"
+
+                                ColumnLayout {
+                                    id: factReviewContent
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: 13
+                                    spacing: 9
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 10
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 3
+                                            Text { text: "可选 · 科普事实审查"; color: textMain; font.pixelSize: 14; font.bold: true }
+                                            Text {
+                                                text: appController.factReviewStatus
+                                                color: appController.factReviewStatus.indexOf("高风险") >= 0 ? "#ff9ba6" : textMuted
+                                                font.pixelSize: 11
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WordWrap
+                                            }
+                                        }
+                                        Text { text: "生成后自动审查"; color: textMuted; font.pixelSize: 10 }
+                                        Switch {
+                                            checked: appController.factReviewAuto
+                                            enabled: !appController.storyBusy && !appController.factReviewBusy
+                                            onToggled: appController.setFactReviewAuto(checked)
+                                        }
+                                        GhostButton {
+                                            text: appController.factReviewBusy ? "正在审查…" : "检查当前文案"
+                                            enabled: !appController.factReviewBusy && !appController.storyBusy
+                                            onClicked: appController.runFactReview()
+                                        }
+                                    }
+
+                                    Text {
+                                        visible: appController.factReviewSummary !== ""
+                                        text: appController.factReviewSummary
+                                        color: textMain
+                                        font.pixelSize: 11
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    Repeater {
+                                        model: appController.factReviewIssues
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 116
+                                            radius: 9
+                                            color: modelData.severity === "high" ? "#28191d" : "#1c1e26"
+                                            border.color: modelData.severity === "high" ? "#7f3d46" : "#343843"
+                                            ColumnLayout {
+                                                anchors.fill: parent
+                                                anchors.margins: 10
+                                                spacing: 4
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    Text { text: modelData.severityText + " · " + modelData.categoryText; color: modelData.severity === "high" ? "#ff9ba6" : accentLight; font.pixelSize: 10; font.bold: true }
+                                                    Text { text: modelData.narrationText ? "解说句 " + modelData.narrationText : "全局提示"; color: textMuted; font.pixelSize: 9 }
+                                                    Item { Layout.fillWidth: true }
+                                                    Button {
+                                                        visible: modelData.suggestion_en !== "" && modelData.narration_ids && modelData.narration_ids.length === 1
+                                                        text: "应用建议"
+                                                        implicitWidth: 72
+                                                        implicitHeight: 25
+                                                        contentItem: Text {
+                                                            text: parent.text
+                                                            color: "#b8f3cf"
+                                                            font.pixelSize: 9
+                                                            horizontalAlignment: Text.AlignHCenter
+                                                            verticalAlignment: Text.AlignVCenter
+                                                        }
+                                                        background: Rectangle {
+                                                            radius: 6
+                                                            color: parent.hovered ? "#224633" : "#183729"
+                                                            border.color: "#347456"
+                                                        }
+                                                        onClicked: appController.applyFactReviewSuggestion(modelData.id)
+                                                    }
+                                                }
+                                                Text { text: modelData.claim_en; color: textMain; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                Text { text: modelData.reason_zh; color: "#b8bdc9"; font.pixelSize: 10; Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+                                                Text { visible: modelData.suggestion_en !== ""; text: "建议：" + modelData.suggestion_en; color: "#8ee3b4"; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: appController.factReviewDisclaimer
+                                        color: "#737986"
+                                        font.pixelSize: 9
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                    }
                                 }
                             }
 
@@ -2776,12 +3061,12 @@ ApplicationWindow {
                                 spacing: 9
                                 FlatButton {
                                     text: appController.exportBusy ? "正在生成…" : appController.previewVideoReady ? "重新生成成片预览" : "生成成片预览  →"
-                                    enabled: appController.narrationAudioReady && !appController.exportBusy
+                                    enabled: appController.narrationAudioReady && !appController.exportBusy && !appController.qualityCheckBusy
                                     onClicked: appController.generateRoughPreview()
                                 }
                                 GhostButton {
                                     text: "仅字幕测试预览"
-                                    enabled: appController.matches.length > 0 && !appController.exportBusy
+                                    enabled: appController.matches.length > 0 && !appController.exportBusy && !appController.qualityCheckBusy
                                     onClicked: appController.generateSubtitleOnlyPreview()
                                 }
                                 GhostButton {
@@ -2790,8 +3075,8 @@ ApplicationWindow {
                                     onClicked: subtitleStyleDialog.open()
                                 }
                                 GhostButton {
-                                    text: "成片检查"
-                                    enabled: !appController.exportBusy
+                                    text: appController.qualityCheckBusy ? "检查中…" : "成片检查"
+                                    enabled: !appController.exportBusy && !appController.qualityCheckBusy
                                     onClicked: appController.runQualityCheck()
                                 }
                                 Item { Layout.fillWidth: true }
@@ -2953,7 +3238,7 @@ ApplicationWindow {
                             delegate: Rectangle {
                                 required property var modelData
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 136
+                                Layout.preferredHeight: modelData.technicalVisualSummary ? 154 : 136
                                 radius: 13
                                 color: panel
                                 border.color: "#292c36"
@@ -2976,7 +3261,17 @@ ApplicationWindow {
                                         spacing: 6
                                         Text { text: "场景 " + modelData.id; color: accentLight; font.pixelSize: 11; font.bold: true }
                                         Text { Layout.fillWidth: true; text: modelData.visualDescription; color: textMain; font.pixelSize: 12; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
-                                        Text { Layout.fillWidth: true; Layout.fillHeight: true; text: modelData.transcript || "（该场景没有对白）"; color: textMuted; font.pixelSize: 11; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            visible: !!modelData.technicalVisualSummary
+                                            text: "画面信息 · " + modelData.technicalVisualSummary + (modelData.highDetailReviewed ? "  ✓ 高清复查" : "")
+                                            color: "#e8c76a"
+                                            font.pixelSize: 10
+                                            wrapMode: Text.WordWrap
+                                            maximumLineCount: 2
+                                            elide: Text.ElideRight
+                                        }
+                                        Text { Layout.fillWidth: true; Layout.fillHeight: true; text: modelData.transcript || "（该场景没有对白）"; color: textMuted; font.pixelSize: 11; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
                                     }
                                 }
                             }

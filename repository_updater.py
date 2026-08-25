@@ -54,13 +54,6 @@ ALLOWED_ROOT_FILES = {
     "点我启动StoryCut（AI解说剪辑）.vbs",
 }
 ALLOWED_APP_DIRS = {"storycut_v2"}
-LEGACY_MANAGED_DIRS = {"storycut_v1", "translator_studio", "commentary_studio"}
-LEGACY_ROOT_FILES = {
-    "点我启动StoryCut.vbs",
-    "点我启动翻译工具.vbs",
-    "点我启动StoryCut V1（一比一翻译）.vbs",
-    "点我启动StoryCut V2（AI解说剪辑）.vbs",
-}
 
 
 class UpdateError(RuntimeError):
@@ -182,7 +175,7 @@ def _validate_app_dir(value: str) -> str:
     return cleaned
 
 
-def _safe_managed_path(value: str, *, allow_legacy: bool = False) -> Path:
+def _safe_managed_path(value: str) -> Path:
     posix = PurePosixPath(value)
     if posix.is_absolute() or not posix.parts or any(part in {"", ".", ".."} for part in posix.parts):
         raise UpdateError(f"更新清单包含不安全路径：{value}")
@@ -194,11 +187,9 @@ def _safe_managed_path(value: str, *, allow_legacy: bool = False) -> Path:
         raise UpdateError(f"更新清单试图修改用户目录：{value}")
     first = relative.parts[0]
     if len(relative.parts) == 1:
-        if relative.name not in ALLOWED_ROOT_FILES and not (
-            allow_legacy and relative.name in LEGACY_ROOT_FILES
-        ):
+        if relative.name not in ALLOWED_ROOT_FILES:
             raise UpdateError(f"更新清单包含未授权的根目录文件：{value}")
-    elif first not in ALLOWED_APP_DIRS and not (allow_legacy and first in LEGACY_MANAGED_DIRS):
+    elif first not in ALLOWED_APP_DIRS:
         raise UpdateError(f"更新清单包含未授权的目录：{value}")
     return relative
 
@@ -231,53 +222,10 @@ def _read_old_paths() -> set[Path]:
     paths: set[Path] = set()
     for value in old.get("files", []):
         try:
-            paths.add(_safe_managed_path(str(value), allow_legacy=True))
+            paths.add(_safe_managed_path(str(value)))
         except UpdateError:
             continue
     return paths
-
-
-def _copy_if_target_missing(source: Path, target: Path) -> None:
-    if not source.exists() or target.exists():
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if source.is_dir():
-        shutil.copytree(source, target)
-    else:
-        shutil.copy2(source, target)
-
-
-def _migrate_legacy_user_data() -> None:
-    pairs = (
-        ("commentary_studio", "storycut_v2", "projects"),
-        ("commentary_studio", "storycut_v2", "config.user.yaml"),
-    )
-    for old_app, new_app, child in pairs:
-        _copy_if_target_missing(
-            REPOSITORY_ROOT / old_app / child,
-            REPOSITORY_ROOT / new_app / child,
-        )
-
-
-def _remove_empty_legacy_dirs() -> None:
-    for name in LEGACY_MANAGED_DIRS:
-        root = REPOSITORY_ROOT / name
-        if not root.exists():
-            continue
-        directories = sorted(
-            (path for path in root.rglob("*") if path.is_dir()),
-            key=lambda path: len(path.parts),
-            reverse=True,
-        )
-        for directory in directories:
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
-        try:
-            root.rmdir()
-        except OSError:
-            pass
 
 
 def download_and_apply(
@@ -447,7 +395,7 @@ def apply_repository_archive(
         old_paths = _read_old_paths()
         explicitly_removed: set[Path] = set()
         for value in manifest.get("remove", []):
-            explicitly_removed.add(_safe_managed_path(str(value), allow_legacy=True))
+            explicitly_removed.add(_safe_managed_path(str(value)))
         affected = old_paths | new_paths | explicitly_removed
         stamp = time.strftime("%Y%m%d_%H%M%S")
         backup = REPOSITORY_ROOT / ".update_backups" / f"{app_dir}_{stamp}"
@@ -464,7 +412,6 @@ def apply_repository_archive(
                 shutil.copy2(target, destination)
 
         try:
-            _migrate_legacy_user_data()
             report("正在同步 StoryCut 和根目录启动器……")
             for relative in sorted(new_paths, key=lambda path: path.as_posix()):
                 info = entries[relative.as_posix()]
@@ -480,7 +427,6 @@ def apply_repository_archive(
                 target = REPOSITORY_ROOT / relative
                 if target.is_file():
                     target.unlink()
-            _remove_empty_legacy_dirs()
         except Exception as exc:
             report("安装失败，正在恢复旧程序文件……")
             for relative in affected:

@@ -1,7 +1,7 @@
 {
   "name": "StoryCut",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "StoryCut 更新器新增 Windows 系统代理支持和 GitHub 官方备用下载通道，改善 Clash 无 TUN 环境下的连接与偶发 404。"
+  "notes": "StoryCut 新增技术画面理解和可选事实审查，优化最近项目恢复，并为后台成片检查加入彩色状态结果和更准确的镜头复用提示。"
 }

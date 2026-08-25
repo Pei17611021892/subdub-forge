@@ -50,6 +50,8 @@ def generate_story_script(
             "story_value": str(event.get("story_value", "")),
             "continuity": str(event.get("continuity", "")),
             "uncertainty": str(event.get("visual_uncertainty", "")),
+            "screen_text": event.get("screen_text", []),
+            "technical_visual": event.get("technical_visual", {}),
         }
         for event in events
     ]
@@ -260,6 +262,7 @@ GROUNDING
 - You may infer an immediate short-term goal only when several consecutive events support it. Mark it as interpretation, not fact.
 - Do not invent identity, occupation, backstory, time of day, weather, sound, smell, dialogue, exact attempt count, hidden damage, motivation, or outcome.
 - Uncertainty in the source must remain uncertainty.
+- Treat clearly transcribed on-screen text, chart labels, diagram structure, and formulas as evidence. Preserve units and symbols exactly; never fill in blurred text or derive claims that the visual does not state.
 - Do not create generic heroism, environmental messaging, determination, adventure, or life lessons.
 
 Return exactly one JSON object and no Markdown:
@@ -332,6 +335,7 @@ VOICE AND RHYTHM
 INTERPRETATION BOUNDARY
 - Reasonable immediate intention may be phrased softly: "she seems to be", "as if", "the task now is", or an equivalent natural construction.
 - Never turn uncertainty into fact.
+- Treat clearly transcribed on-screen text, chart labels, diagram relationships, tables, and formulas as evidence. Preserve units and symbols; never guess blurred values or derive claims the visual does not support.
 - Never invent time of day, fog, weather, sound, smell, dialogue, exact attempt count, identity, occupation, backstory, private thoughts, machine condition, or unseen result unless explicitly supported by the source.
 - Emotional meaning must be earned by visible effort, reaction, repetition, contrast, or outcome.
 
@@ -390,6 +394,7 @@ NON-NEGOTIABLE ACCEPTANCE RULES
 - Compress aggressively by retaining only the strongest turning points. Do not enumerate routine maintenance steps.
 - Count the narration words before returning. More than {shorts_max_words} words is a hard failure.
 - Keep a warm immersive third-person voice, but never invent time, weather, sound, smell, dialogue, attempt count, identity, backstory, private thoughts, machine condition, or unseen outcome.
+- Use clearly transcribed on-screen text, chart labels, diagram relationships, tables, and formulas as supporting evidence. Preserve uncertainty, units, and symbols; never guess unreadable values or invent a mathematical conclusion.
 - Avoid generic claims about determination, confidence, skill, adventure, inspiration, or environmental virtue.
 - Do not use standalone connector fragments.
 - Every comma becomes a TTS boundary, so avoid short comma-delimited fragments.
@@ -423,6 +428,7 @@ TARGET
 
 SOURCE AND FACTS
 - Treat the transcript as the main factual source and use visual descriptions to clarify actions, objects, setting, and shot selection.
+- Use clearly visible labels, chart trends, diagram relationships, tables, and formulas as supporting evidence. Preserve uncertainty and never invent unreadable values or mathematical conclusions.
 - Condense and rewrite the spoken material without losing its supported meaning.
 - Never invent facts, causes, results, quotations, or unseen actions.
 - Every sentence must add information, explain a mechanism, or create a necessary transition.

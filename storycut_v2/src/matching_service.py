@@ -299,6 +299,8 @@ def _score_candidate(
         (
             str(event.get("visual_description", "")),
             str(event.get("transcript", "")),
+            json.dumps(event.get("screen_text", []), ensure_ascii=False),
+            json.dumps(event.get("technical_visual", {}), ensure_ascii=False),
         )
     ).strip()
     similarity = _text_similarity(query, event_text)

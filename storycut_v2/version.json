@@ -1,7 +1,7 @@
 {
   "name": "StoryCut",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "更新器自动读取 Windows 系统代理，Clash 无 TUN 时也能代理 GitHub；版本检查与 ZIP 下载增加官方备用通道，降低偶发 404。"
+  "notes": "新增技术画面理解和可选事实审查；最近项目与成片检查增加后台 loading，检查结果改为彩色状态卡片，并区分正常镜头复用与相邻重复回放。"
 }

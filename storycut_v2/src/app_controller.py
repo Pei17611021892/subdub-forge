@@ -26,6 +26,7 @@ from .analysis_service import (
 from .media_service import analyze_media, extract_preview_frame, render_subtitle_effect_preview
 from .vision_service import api_configuration, describe_event_keyframes
 from .story_service import generate_story_script, refresh_story_timing
+from .fact_review_service import review_story_facts
 from .matching_service import (
     apply_voice_timing,
     adjust_shot_boundary,
@@ -62,6 +63,7 @@ class AppController(QObject):
     analysisChanged = Signal()
     eventsChanged = Signal()
     storyChanged = Signal()
+    factReviewChanged = Signal()
     matchingChanged = Signal()
     exportChanged = Signal()
     voiceChanged = Signal()
@@ -81,14 +83,17 @@ class AppController(QObject):
     _analysisFinished = Signal(bool, str, int)
     _storyProgressReady = Signal(float, str, int)
     _storyFinished = Signal(bool, str, object, int)
+    _factReviewFinished = Signal(bool, str, object, int)
     _exportProgressReady = Signal(float, str, int)
     _exportFinished = Signal(bool, str, object, int)
     _updateCheckFinished = Signal(bool, str, object)
     _updateApplyFinished = Signal(bool, str)
     _apiModelsFinished = Signal(bool, str, object)
     _voiceProcessingFinished = Signal(bool, str, object, int)
+    _voiceDurationReady = Signal(float, str, int)
     _voiceSrtProgressReady = Signal(str, int)
     _voiceSrtFinished = Signal(bool, str, object, int)
+    _qualityCheckFinished = Signal(object, int)
 
     def __init__(self, root: Path) -> None:
         super().__init__()
@@ -132,6 +137,14 @@ class AppController(QObject):
         self._story: dict[str, object] = {}
         self._story_outline: list[dict[str, object]] = []
         self._story_narration: list[dict[str, object]] = []
+        self._fact_review_job_id = 0
+        self._fact_review_busy = False
+        self._fact_review_status = "可选功能，尚未进行事实审查"
+        self._fact_review: dict[str, object] = {}
+        self._fact_review_issues: list[dict[str, object]] = []
+        self._fact_review_auto = bool(
+            self._config.get("fact_review", {}).get("auto_after_story", False)
+        )
         self._matching_busy = False
         self._matching_status = "等待匹配镜头"
         self._matches: list[dict[str, object]] = []
@@ -151,14 +164,16 @@ class AppController(QObject):
         self._narration_duration_sec = 0.0
         self._synced_srt_path = ""
         self._quality_report: dict[str, object] = {}
+        self._quality_busy = False
+        self._quality_job_id = 0
         self._subtitle_style = self._default_subtitle_style()
         self._subtitle_effect_preview_url = ""
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.2.1"))
+            self._app_version = str(read_version().get("version", "0.2.2"))
         except Exception:
-            self._app_version = "0.2.1"
+            self._app_version = "0.2.2"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -176,14 +191,17 @@ class AppController(QObject):
         self._analysisFinished.connect(self._apply_analysis_finished)
         self._storyProgressReady.connect(self._apply_story_progress)
         self._storyFinished.connect(self._apply_story_finished)
+        self._factReviewFinished.connect(self._apply_fact_review_finished)
         self._exportProgressReady.connect(self._apply_export_progress)
         self._exportFinished.connect(self._apply_export_finished)
         self._updateCheckFinished.connect(self._apply_update_check)
         self._updateApplyFinished.connect(self._apply_update_install)
         self._apiModelsFinished.connect(self._apply_api_models)
         self._voiceProcessingFinished.connect(self._apply_voice_processing_finished)
+        self._voiceDurationReady.connect(self._apply_voice_duration)
         self._voiceSrtProgressReady.connect(self._apply_voice_srt_progress)
         self._voiceSrtFinished.connect(self._apply_voice_srt_finished)
+        self._qualityCheckFinished.connect(self._apply_quality_check_finished)
         self._analysis_clock = QTimer(self)
         self._analysis_clock.setInterval(1000)
         self._analysis_clock.timeout.connect(self._tick_analysis_clock)
@@ -360,6 +378,34 @@ class AppController(QObject):
     def storyNarration(self) -> list[dict[str, object]]:
         return self._story_narration
 
+    @Property(bool, notify=factReviewChanged)
+    def factReviewBusy(self) -> bool:
+        return self._fact_review_busy
+
+    @Property(bool, notify=factReviewChanged)
+    def factReviewAuto(self) -> bool:
+        return self._fact_review_auto
+
+    @Property(str, notify=factReviewChanged)
+    def factReviewStatus(self) -> str:
+        return self._fact_review_status
+
+    @Property(str, notify=factReviewChanged)
+    def factReviewSummary(self) -> str:
+        return str(self._fact_review.get("summary_zh", ""))
+
+    @Property(str, notify=factReviewChanged)
+    def factReviewDisclaimer(self) -> str:
+        return str(
+            self._fact_review.get(
+                "disclaimer", "AI 辅助审查，未联网检索权威来源；高风险内容仍建议人工核对。"
+            )
+        )
+
+    @Property("QVariantList", notify=factReviewChanged)
+    def factReviewIssues(self) -> list[dict[str, object]]:
+        return self._fact_review_issues
+
     @Property(bool, notify=matchingChanged)
     def matchingBusy(self) -> bool:
         return self._matching_busy
@@ -470,12 +516,13 @@ class AppController(QObject):
         lines = [
             (
                 f"检查完成：{self._quality_report.get('pass_count', 0)} 项正常，"
+                f"{self._quality_report.get('info_count', 0)} 项说明，"
                 f"{self._quality_report.get('warning_count', 0)} 项提醒，"
                 f"{self._quality_report.get('error_count', 0)} 项必须处理。"
             ),
             "",
         ]
-        icons = {"pass": "✓", "warning": "!", "error": "×"}
+        icons = {"pass": "✓", "info": "i", "warning": "!", "error": "×"}
         for item in self._quality_report.get("checks", []):
             if not isinstance(item, dict):
                 continue
@@ -488,6 +535,34 @@ class AppController(QObject):
     @Property(bool, notify=qualityChanged)
     def qualityCheckPassed(self) -> bool:
         return bool(self._quality_report.get("passed", False))
+
+    @Property(bool, notify=qualityChanged)
+    def qualityCheckBusy(self) -> bool:
+        return self._quality_busy
+
+    @Property(int, notify=qualityChanged)
+    def qualityPassCount(self) -> int:
+        return int(self._quality_report.get("pass_count", 0) or 0)
+
+    @Property(int, notify=qualityChanged)
+    def qualityInfoCount(self) -> int:
+        return int(self._quality_report.get("info_count", 0) or 0)
+
+    @Property(int, notify=qualityChanged)
+    def qualityWarningCount(self) -> int:
+        return int(self._quality_report.get("warning_count", 0) or 0)
+
+    @Property(int, notify=qualityChanged)
+    def qualityErrorCount(self) -> int:
+        return int(self._quality_report.get("error_count", 0) or 0)
+
+    @Property("QVariantList", notify=qualityChanged)
+    def qualityCheckItems(self) -> list[dict[str, object]]:
+        return [
+            dict(item)
+            for item in self._quality_report.get("checks", [])
+            if isinstance(item, dict)
+        ]
 
     @Property("QVariantMap", notify=subtitleStyleChanged)
     def subtitleStyle(self) -> dict[str, object]:
@@ -831,6 +906,7 @@ class AppController(QObject):
             saved_mode = str(settings.get("content_mode", self._analysis_content_mode))
             self._analysis_content_mode = saved_mode if saved_mode in {"speech", "visual"} else "speech"
             settings["content_mode"] = self._analysis_content_mode
+            settings.setdefault("fact_review_auto", self._fact_review_auto)
         project_file.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -864,6 +940,8 @@ class AppController(QObject):
                 self._preview_busy,
                 self._analysis_busy,
                 self._story_busy,
+                self._fact_review_busy,
+                self._quality_busy,
                 self._matching_busy,
                 self._export_busy,
                 self._voice_busy,
@@ -983,6 +1061,12 @@ class AppController(QObject):
             self._media = dict(payload.get("media") or {})
             saved_mode = str(payload.get("settings", {}).get("content_mode", "speech"))
             self._analysis_content_mode = saved_mode if saved_mode in {"speech", "visual"} else "speech"
+            self._fact_review_auto = bool(
+                payload.get("settings", {}).get(
+                    "fact_review_auto",
+                    self._config.get("fact_review", {}).get("auto_after_story", False),
+                )
+            )
             cover_path = project_file.parent / "cache" / "cover.jpg"
             self._cover_url = cover_path.as_uri() if cover_path.exists() else ""
             self._preview_url = ""
@@ -1024,6 +1108,8 @@ class AppController(QObject):
             or self._preview_busy
             or self._analysis_busy
             or self._story_busy
+            or self._fact_review_busy
+            or self._quality_busy
             or self._matching_busy
             or self._export_busy
             or self._subtitle_effect_preview_busy
@@ -1290,6 +1376,7 @@ class AppController(QObject):
                             self._config,
                             self._root,
                             vision_report,
+                            video,
                         )
                     except Exception as exc:
                         if content_mode == "visual":
@@ -1359,7 +1446,7 @@ class AppController(QObject):
 
     @Slot(int)
     def generateStory(self, target_duration_sec: int) -> None:
-        if self._story_busy or not self._current_project_file:
+        if self._story_busy or self._fact_review_busy or not self._current_project_file:
             return
         if not self.apiConfigured:
             message = "未配置 OPENAI_API_KEY，无法生成故事。请在仓库根目录 .env 中配置后重试"
@@ -1388,6 +1475,7 @@ class AppController(QObject):
         except (OSError, ValueError, TypeError):
             pass
         self._story_job_id += 1
+        self._fact_review_job_id += 1
         job_id = self._story_job_id
         self._story_busy = True
         self._story_progress = 0.02
@@ -1422,6 +1510,8 @@ class AppController(QObject):
                 artifacts.pop("matches", None)
                 artifacts.pop("rough_cut", None)
                 artifacts.pop("rough_preview", None)
+                artifacts.pop("fact_review", None)
+                (project_file.parent / "script" / "fact_review.json").unlink(missing_ok=True)
                 (project_file.parent / "timeline" / "matches.json").unlink(missing_ok=True)
                 (project_file.parent / "timeline" / "rough_cut.json").unlink(missing_ok=True)
                 project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1442,6 +1532,114 @@ class AppController(QObject):
         self._story["narration"] = self._story_narration
         story_file = self._current_project_file.parent / "script" / "story.json"
         story_file.write_text(json.dumps(self._story, ensure_ascii=False, indent=2), encoding="utf-8")
+        if self._fact_review:
+            self._fact_review["stale"] = True
+            self._fact_review_status = "英文解说已修改，旧审查结果需要重新检查"
+            review_file = self._current_project_file.parent / "script" / "fact_review.json"
+            try:
+                review_file.write_text(
+                    json.dumps(self._fact_review, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except OSError:
+                pass
+            self.factReviewChanged.emit()
+
+    @Slot(bool)
+    def setFactReviewAuto(self, enabled: bool) -> None:
+        self._fact_review_auto = bool(enabled)
+        if self._current_project_file and self._current_project_file.exists():
+            try:
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                payload.setdefault("settings", {})["fact_review_auto"] = self._fact_review_auto
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        self.factReviewChanged.emit()
+
+    @Slot(int)
+    def applyFactReviewSuggestion(self, issue_id: int) -> None:
+        if not self._current_project_file:
+            return
+        issue = next(
+            (item for item in self._fact_review_issues if int(item.get("id", 0) or 0) == issue_id),
+            None,
+        )
+        if not issue:
+            self._notice = "找不到这条事实审查建议，请重新审查后再试"
+            self.noticeChanged.emit()
+            return
+        suggestion = str(issue.get("suggestion_en", "")).strip()
+        narration_ids = issue.get("narration_ids", [])
+        narration_ids = narration_ids if isinstance(narration_ids, list) else []
+        if not suggestion or len(narration_ids) != 1:
+            self._notice = "这条建议不能安全地自动应用，请根据原因手动修改对应解说"
+            self.noticeChanged.emit()
+            return
+        narration_id = int(narration_ids[0])
+        index = next(
+            (
+                item_index
+                for item_index, item in enumerate(self._story_narration)
+                if int(item.get("id", 0) or 0) == narration_id
+            ),
+            -1,
+        )
+        if index < 0:
+            self._notice = "对应解说句已经变化，请重新进行事实审查"
+            self.noticeChanged.emit()
+            return
+        self.updateNarration(index, suggestion)
+        self._notice = f"已将建议应用到解说句 {narration_id}；请重新审查确认"
+        self.storyChanged.emit()
+        self.noticeChanged.emit()
+
+    @Slot()
+    def runFactReview(self) -> None:
+        if self._fact_review_busy or self._story_busy or not self._current_project_file:
+            return
+        if not self.apiConfigured:
+            self._fact_review_status = "事实审查失败：请先配置 API Key"
+            self._notice = self._fact_review_status
+            self.factReviewChanged.emit()
+            self.noticeChanged.emit()
+            return
+        project_file = self._current_project_file
+        events_file = project_file.parent / "analysis" / "events.json"
+        story_file = project_file.parent / "script" / "story.json"
+        if not events_file.exists() or not story_file.exists():
+            self._notice = "请先完成原片理解和故事生成，再进行事实审查"
+            self.noticeChanged.emit()
+            return
+
+        self._fact_review_job_id += 1
+        job_id = self._fact_review_job_id
+        self._fact_review_busy = True
+        self._fact_review_status = "正在核对原片证据、数字、因果与术语…"
+        self.factReviewChanged.emit()
+
+        def worker() -> None:
+            try:
+                report = review_story_facts(
+                    events_file,
+                    story_file,
+                    project_file.parent / "script" / "fact_review.json",
+                    self._config,
+                    self._root,
+                )
+                payload = json.loads(project_file.read_text(encoding="utf-8"))
+                payload.setdefault("artifacts", {})["fact_review"] = "script/fact_review.json"
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                self._factReviewFinished.emit(True, "", report, job_id)
+            except Exception as exc:
+                self._factReviewFinished.emit(False, str(exc), {}, job_id)
+
+        threading.Thread(target=worker, name="storycut-fact-review", daemon=True).start()
 
     @Slot()
     def generateMatches(self) -> None:
@@ -1514,7 +1712,7 @@ class AppController(QObject):
 
     @Slot()
     def generateRoughPreview(self) -> None:
-        if self._export_busy or not self._current_project_file or not self._video_path:
+        if self._export_busy or self._quality_busy or not self._current_project_file or not self._video_path:
             return
         if not self._ensure_source_video():
             return
@@ -1547,15 +1745,54 @@ class AppController(QObject):
 
     @Slot()
     def runQualityCheck(self) -> None:
-        self._run_quality_check()
+        if self._quality_busy:
+            return
+        self._quality_job_id += 1
+        job_id = self._quality_job_id
+        self._quality_busy = True
+        self._quality_report = {}
+        self._notice = "正在检查项目文件、时间线、字幕与成片参数…"
+        self.qualityChanged.emit()
+        self.noticeChanged.emit()
         self.qualityDialogRequested.emit()
 
+        def worker() -> None:
+            try:
+                report = self._collect_quality_report()
+            except Exception as exc:
+                report = {
+                    "passed": False,
+                    "error_count": 1,
+                    "warning_count": 0,
+                    "info_count": 0,
+                    "pass_count": 0,
+                    "checks": [
+                        {"level": "error", "title": "成片检查失败", "detail": str(exc)}
+                    ],
+                }
+            self._qualityCheckFinished.emit(report, job_id)
+
+        threading.Thread(target=worker, name="storycut-quality-check", daemon=True).start()
+
     def _run_quality_check(self) -> bool:
+        self._quality_report = self._collect_quality_report()
+        self.qualityChanged.emit()
+        passed = bool(self._quality_report.get("passed", False))
+        self._notice = (
+            "成片检查通过，可以生成预览。"
+            if passed
+            else f"成片检查发现 {self._quality_report.get('error_count', 0)} 项必须处理的问题。"
+        )
+        self.noticeChanged.emit()
+        return passed
+
+    def _collect_quality_report(self) -> dict[str, object]:
         if not self._current_project_file:
-            self._quality_report = {
+            return {
                 "passed": False,
                 "error_count": 1,
                 "warning_count": 0,
+                "info_count": 0,
                 "pass_count": 0,
                 "checks": [
                     {"level": "error", "title": "尚未创建项目", "detail": "请先选择视频创建项目。"}
@@ -1598,20 +1835,28 @@ class AppController(QObject):
                     self._config,
                     self._root,
                 )
-            self._quality_report = combine_quality_reports(project_report, render_report)
-        self.qualityChanged.emit()
+            return combine_quality_reports(project_report, render_report)
+
+    @Slot(object, int)
+    def _apply_quality_check_finished(self, report: object, job_id: int) -> None:
+        if job_id != self._quality_job_id:
+            return
+        self._quality_busy = False
+        self._quality_report = dict(report) if isinstance(report, dict) else {}
         passed = bool(self._quality_report.get("passed", False))
+        warnings = int(self._quality_report.get("warning_count", 0) or 0)
+        infos = int(self._quality_report.get("info_count", 0) or 0)
         self._notice = (
-            "成片检查通过，可以生成预览。"
+            f"成片检查通过：{warnings} 项提醒，{infos} 项说明。"
             if passed
             else f"成片检查发现 {self._quality_report.get('error_count', 0)} 项必须处理的问题。"
         )
+        self.qualityChanged.emit()
         self.noticeChanged.emit()
-        return passed
 
     @Slot()
     def generateSubtitleOnlyPreview(self) -> None:
-        if self._export_busy or not self._current_project_file or not self._video_path:
+        if self._export_busy or self._quality_busy or not self._current_project_file or not self._video_path:
             return
         if not self._ensure_source_video():
             return
@@ -1695,6 +1940,7 @@ class AppController(QObject):
         project_file = self._current_project_file
         rough_cut_file = project_file.parent / "timeline" / "rough_cut.json"
         self._export_job_id += 1
+        self._quality_job_id += 1
         job_id = self._export_job_id
         self._export_busy = True
         self._export_progress = 0.01
@@ -2029,6 +2275,8 @@ class AppController(QObject):
             payload.setdefault("artifacts", {})["narration_audio"] = "audio/narration.wav"
             payload.setdefault("artifacts", {})["narration_audio_original"] = "audio/narration_original.wav"
             payload.setdefault("settings", {}).setdefault("voice", {})["speed"] = 1.0
+            payload["settings"]["voice"]["duration_sec"] = self._narration_duration_sec
+            payload["settings"]["voice"]["audio_size"] = destination.stat().st_size
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             self.voiceChanged.emit()
@@ -2267,6 +2515,8 @@ class AppController(QObject):
                 payload.setdefault("settings", {}).setdefault("voice", {})[
                     "speed"
                 ] = self._narration_speed
+                payload["settings"]["voice"]["duration_sec"] = self._narration_duration_sec
+                payload["settings"]["voice"]["audio_size"] = working_audio.stat().st_size
                 artifacts = payload.setdefault("artifacts", {})
                 artifacts["narration_audio"] = "audio/narration.wav"
                 artifacts["narration_audio_original"] = "audio/narration_original.wav"
@@ -2347,7 +2597,9 @@ class AppController(QObject):
         self._preview_job_id += 1
         self._analysis_job_id += 1
         self._story_job_id += 1
+        self._fact_review_job_id += 1
         self._export_job_id += 1
+        self._quality_job_id += 1
         self._subtitle_effect_preview_job_id += 1
         self._current_project_file = None
         self._project_name = "尚未创建项目"
@@ -2373,6 +2625,13 @@ class AppController(QObject):
         self._story = {}
         self._story_outline = []
         self._story_narration = []
+        self._fact_review_busy = False
+        self._fact_review_status = "可选功能，尚未进行事实审查"
+        self._fact_review = {}
+        self._fact_review_issues = []
+        self._fact_review_auto = bool(
+            self._config.get("fact_review", {}).get("auto_after_story", False)
+        )
         self._matching_status = "等待匹配镜头"
         self._matches = []
         self._export_progress = 0.0
@@ -2385,6 +2644,7 @@ class AppController(QObject):
         self._narration_duration_sec = 0.0
         self._synced_srt_path = ""
         self._quality_report = {}
+        self._quality_busy = False
         self._subtitle_style = self._default_subtitle_style()
         self._subtitle_effect_preview_url = ""
         self.projectChanged.emit()
@@ -2393,6 +2653,7 @@ class AppController(QObject):
         self.analysisChanged.emit()
         self.eventsChanged.emit()
         self.storyChanged.emit()
+        self.factReviewChanged.emit()
         self.matchingChanged.emit()
         self.exportChanged.emit()
         self.voiceChanged.emit()
@@ -2524,6 +2785,7 @@ class AppController(QObject):
         self._notice = self._story_status
         if success and isinstance(story, dict):
             self._set_story(story)
+            self._set_fact_review({})
             self._matches = []
             self._matching_status = "故事已更新，请重新自动匹配镜头"
             self._export_path = ""
@@ -2531,6 +2793,34 @@ class AppController(QObject):
         self.storyChanged.emit()
         self.matchingChanged.emit()
         self.exportChanged.emit()
+        self.noticeChanged.emit()
+        if success and self._fact_review_auto:
+            QTimer.singleShot(0, self.runFactReview)
+
+    @Slot(bool, str, object, int)
+    def _apply_fact_review_finished(
+        self, success: bool, message: str, report: object, job_id: int
+    ) -> None:
+        if job_id != self._fact_review_job_id:
+            return
+        self._fact_review_busy = False
+        if success and isinstance(report, dict):
+            self._set_fact_review(report)
+            high = int(report.get("high_count", 0) or 0)
+            medium = int(report.get("medium_count", 0) or 0)
+            low = int(report.get("low_count", 0) or 0)
+            if high:
+                self._fact_review_status = f"审查完成：{high} 项高风险，{medium} 项需确认，{low} 项精度建议"
+            elif medium or low:
+                self._fact_review_status = f"审查完成：未发现高风险，另有 {medium + low} 项建议确认"
+            else:
+                self._fact_review_status = "审查完成：未发现明显事实风险"
+            self._notice = self._fact_review_status
+            self._refresh_recent_projects()
+        else:
+            self._fact_review_status = f"事实审查失败：{message}"
+            self._notice = self._fact_review_status
+        self.factReviewChanged.emit()
         self.noticeChanged.emit()
 
     @Slot(float, str, int)
@@ -2623,6 +2913,19 @@ class AppController(QObject):
                     item["keyframeUrl"] = keyframe.as_uri() if keyframe.exists() else ""
                     item["timeRange"] = f"{self._format_time(float(event.get('start', 0)))} – {self._format_time(float(event.get('end', 0)))}"
                     item["visualDescription"] = str(event.get("visual_description", "") or "尚无视觉描述")
+                    technical = event.get("technical_visual", {})
+                    technical = technical if isinstance(technical, dict) else {}
+                    screen_text = event.get("screen_text", [])
+                    visible_text = " · ".join(
+                        str(value.get("text", "")).strip()
+                        for value in screen_text
+                        if isinstance(value, dict) and str(value.get("text", "")).strip()
+                    )
+                    item["technicalVisualSummary"] = str(
+                        technical.get("summary", "") or visible_text
+                    ).strip()
+                    item["technicalVisualType"] = str(technical.get("type", "none"))
+                    item["highDetailReviewed"] = bool(technical.get("high_detail_reviewed", False))
                     loaded.append(item)
             except (OSError, ValueError, TypeError):
                 loaded = []
@@ -2633,6 +2936,7 @@ class AppController(QObject):
         story_file = project_file.parent / "script" / "story.json"
         if not story_file.exists():
             self._set_story({})
+            self._set_fact_review({})
             return
         try:
             story = json.loads(story_file.read_text(encoding="utf-8"))
@@ -2645,6 +2949,7 @@ class AppController(QObject):
             self._set_story(story)
         except (OSError, ValueError, TypeError):
             self._set_story({})
+        self._load_fact_review(project_file)
 
     def _load_matches(self, project_file: Path) -> None:
         matches_file = project_file.parent / "timeline" / "matches.json"
@@ -2718,28 +3023,51 @@ class AppController(QObject):
 
     def _load_voice(self, project_file: Path) -> None:
         self._voice_job_id += 1
+        job_id = self._voice_job_id
         audio = project_file.parent / "audio" / "narration.wav"
         srt = project_file.parent / "audio" / "narration.srt"
         self._voice_busy = False
         self._narration_speed = 1.0
+        cached_duration = 0.0
+        cached_audio_size = 0
         try:
             payload = json.loads(project_file.read_text(encoding="utf-8"))
+            voice_settings = payload.get("settings", {}).get("voice", {})
+            voice_settings = voice_settings if isinstance(voice_settings, dict) else {}
             self._narration_speed = max(
                 1.0,
-                min(1.25, float(payload.get("settings", {}).get("voice", {}).get("speed", 1.0))),
+                min(1.25, float(voice_settings.get("speed", 1.0))),
             )
+            cached_duration = max(0.0, float(voice_settings.get("duration_sec", 0) or 0))
+            cached_audio_size = max(0, int(voice_settings.get("audio_size", 0) or 0))
         except (OSError, ValueError, TypeError):
             self._narration_speed = 1.0
         self._narration_audio_path = str(audio) if audio.exists() else ""
         self._synced_srt_path = str(srt) if srt.exists() else ""
         self._narration_duration_sec = 0.0
         if audio.exists():
-            try:
-                from .voice_service import probe_audio_duration
+            actual_size = audio.stat().st_size
+            if cached_duration > 0 and cached_audio_size == actual_size:
+                self._narration_duration_sec = cached_duration
+            else:
+                self._voice_status = "英文配音已就绪，正在后台读取实际时长…"
+                self.voiceChanged.emit()
 
-                self._narration_duration_sec = probe_audio_duration(audio, self._config, self._root)
-            except Exception:
-                self._narration_duration_sec = 0.0
+                def worker() -> None:
+                    try:
+                        duration = probe_audio_duration(audio, self._config, self._root)
+                    except Exception:
+                        duration = 0.0
+                    self._voiceDurationReady.emit(duration, str(project_file), job_id)
+
+                threading.Thread(
+                    target=worker, name="storycut-voice-duration", daemon=True
+                ).start()
+                return
+        self._update_loaded_voice_status(audio, srt)
+        self.voiceChanged.emit()
+
+    def _update_loaded_voice_status(self, audio: Path, srt: Path) -> None:
         if audio.exists() and srt.exists():
             self._voice_status = (
                 f"英文配音与同步字幕已就绪，时长 {self._format_time(self._narration_duration_sec)}"
@@ -2754,6 +3082,30 @@ class AppController(QObject):
             self._voice_status = "GPT-SoVITS SRT 已准备，请生成并导入英文配音"
         else:
             self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
+
+    @Slot(float, str, int)
+    def _apply_voice_duration(self, duration: float, project_path: str, job_id: int) -> None:
+        if (
+            job_id != self._voice_job_id
+            or not self._current_project_file
+            or str(self._current_project_file) != project_path
+        ):
+            return
+        audio = self._current_project_file.parent / "audio" / "narration.wav"
+        srt = self._current_project_file.parent / "audio" / "narration.srt"
+        self._narration_duration_sec = max(0.0, float(duration))
+        if self._narration_duration_sec > 0 and audio.exists():
+            try:
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                voice_settings = payload.setdefault("settings", {}).setdefault("voice", {})
+                voice_settings["duration_sec"] = self._narration_duration_sec
+                voice_settings["audio_size"] = audio.stat().st_size
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        self._update_loaded_voice_status(audio, srt)
         self.voiceChanged.emit()
 
     def _default_subtitle_style(self) -> dict[str, object]:
@@ -2876,6 +3228,52 @@ class AppController(QObject):
         self._story_outline = [dict(item) for item in story.get("outline", []) if isinstance(item, dict)]
         self._story_narration = [dict(item) for item in story.get("narration", []) if isinstance(item, dict)]
         self.storyChanged.emit()
+
+    def _set_fact_review(self, report: dict[str, object]) -> None:
+        self._fact_review = dict(report)
+        severity_names = {"high": "高风险", "medium": "需确认", "low": "精度建议"}
+        category_names = {
+            "source_support": "原片证据",
+            "general_fact": "常识事实",
+            "number_unit": "数字单位",
+            "causality": "因果关系",
+            "terminology": "术语表达",
+        }
+        issues: list[dict[str, object]] = []
+        for raw in report.get("issues", []):
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            severity = str(item.get("severity", "low"))
+            category = str(item.get("category", "source_support"))
+            item["severityText"] = severity_names.get(severity, "建议")
+            item["categoryText"] = category_names.get(category, "事实")
+            item["narrationText"] = "、".join(str(value) for value in item.get("narration_ids", []))
+            issues.append(item)
+        self._fact_review_issues = issues
+        if not report:
+            self._fact_review_status = "可选功能，尚未进行事实审查"
+        elif bool(report.get("stale", False)):
+            self._fact_review_status = "英文解说已修改，旧审查结果需要重新检查"
+        else:
+            count = int(report.get("issue_count", len(issues)) or 0)
+            self._fact_review_status = (
+                "审查完成：未发现明显事实风险"
+                if count == 0
+                else f"审查完成：发现 {count} 项需要人工确认的内容"
+            )
+        self.factReviewChanged.emit()
+
+    def _load_fact_review(self, project_file: Path) -> None:
+        review_file = project_file.parent / "script" / "fact_review.json"
+        if not review_file.exists():
+            self._set_fact_review({})
+            return
+        try:
+            report = json.loads(review_file.read_text(encoding="utf-8"))
+            self._set_fact_review(report if isinstance(report, dict) else {})
+        except (OSError, ValueError, TypeError):
+            self._set_fact_review({})
 
     def _ensure_source_video(self) -> bool:
         source = Path(self._video_path) if self._video_path else None

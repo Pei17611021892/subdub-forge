@@ -281,8 +281,24 @@ def _inspect_timeline(timeline: dict[str, Any], source_duration: float, add) -> 
     if very_short:
         add("warning", "存在闪切镜头", f"有 {very_short} 个镜头短于 0.25 秒，建议检查观看感受。")
     repeated = sum(count - 1 for count in Counter(signatures).values() if count > 1)
-    if repeated:
-        add("warning", "存在完全重复镜头", f"有 {repeated} 个镜头与其他镜头使用相同原片区间。")
+    adjacent_replays = sum(
+        signatures[index] == signatures[index - 1] for index in range(1, len(signatures))
+    )
+    if adjacent_replays:
+        add(
+            "warning",
+            "相邻镜头重复播放",
+            f"有 {adjacent_replays} 处连续解说重复使用完全相同的原片区间。"
+            "这可能是自动匹配的正常复用；请先看预览，只有画面跳回感明显时才需要在高级调整中替换镜头。",
+        )
+    elif repeated:
+        add(
+            "info",
+            "镜头复用说明",
+            f"有 {repeated} 个非相邻镜头复用了相同原片区间。多个文案共用合适画面属于正常情况，通常无需手动处理。",
+        )
+    else:
+        add("pass", "镜头复用", "没有发现完全相同的原片区间被重复播放。")
     if not gaps and not overlaps and not invalid_source:
         add("pass", "镜头时间线", "起止范围连续且都在原视频范围内。")
 
@@ -326,10 +342,12 @@ def _report(checks: list[dict[str, str]]) -> dict[str, Any]:
     errors = sum(item["level"] == "error" for item in checks)
     warnings = sum(item["level"] == "warning" for item in checks)
     passes = sum(item["level"] == "pass" for item in checks)
+    infos = sum(item["level"] == "info" for item in checks)
     return {
         "passed": errors == 0,
         "error_count": errors,
         "warning_count": warnings,
         "pass_count": passes,
+        "info_count": infos,
         "checks": checks,
     }

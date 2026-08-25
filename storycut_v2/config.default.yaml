@@ -20,6 +20,10 @@ story:
   base_url: ''
   temperature: 0.55
 
+fact_review:
+  auto_after_story: false
+  model: ''
+
 analysis:
   content_mode: speech
   asr_model: large-v3
@@ -42,6 +46,11 @@ vision:
   model: gpt-4o-mini
   base_url: ''
   batch_size: 4
+  technical_visuals_enabled: true
+  high_detail_review_enabled: true
+  max_high_detail_events: 6
+  high_detail_batch_size: 3
+  high_detail_width: 1440
 
 export:
   width: 1080

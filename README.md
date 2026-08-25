@@ -2,7 +2,7 @@
 
 StoryCut 是一款 Windows AI 解说剪辑工具，用于把较长的视频整理为 3 分钟以内、适合 YouTube Shorts 发布的英文解说成片。
 
-仓库从 `2.0.0` 起只维护一个应用。原来的一比一翻译 V1 已退役，其中仍适合当前工作流的能力已经迁入 StoryCut，包括配音安全变速、英文配音 Whisper 字幕兜底、字幕高级样式和导出诊断文件。
+仓库只维护 StoryCut 一个应用，包含技术画面理解、可选科普事实审查、配音安全变速、英文配音 Whisper 字幕兜底、字幕高级样式、成片检查和导出诊断文件。
 
 ```text
 storycut_v2/    StoryCut 应用代码（内部目录名为兼容旧项目路径而保留）
@@ -51,9 +51,6 @@ venv\Scripts\python.exe storycut_v2/main.py
 - `storycut_v2/projects/`
 - `storycut_v2/cache/`
 - `export/`
-- 旧 `storycut_v1/config.user.yaml`、`storycut_v1/output/` 和 `storycut_v1/cache/`
-
-旧 V1 程序文件会随 `2.0.0` 更新移除，但本机遗留的用户配置和历史输出会保留。它们不再被当前 StoryCut 使用，可由用户确认无用后自行归档或删除。
 
 ## 更新方式
 
@@ -66,5 +63,5 @@ StoryCut 启动后会静默检查 GitHub 版本。有新版时，更新按钮显
 
 ## 当前版本
 
-- 仓库版本：`2.0.1`
-- StoryCut 版本：`0.2.1`
+- 仓库版本：`2.0.2`
+- StoryCut 版本：`0.2.2`

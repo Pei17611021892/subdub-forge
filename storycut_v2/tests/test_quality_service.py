@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.quality_service import _inspect_render_probe, inspect_project_for_export
+from src.quality_service import _inspect_render_probe, _inspect_timeline, inspect_project_for_export
 
 
 class QualityServiceTests(unittest.TestCase):
@@ -121,6 +121,53 @@ class QualityServiceTests(unittest.TestCase):
         self.assertIn("输出分辨率异常", titles)
         self.assertIn("成片超过 Shorts 上限", titles)
         self.assertIn("输出缺少声音", titles)
+
+    def test_non_adjacent_reused_shot_is_informational(self) -> None:
+        checks: list[dict[str, str]] = []
+
+        def add(level: str, title: str, detail: str) -> None:
+            checks.append({"level": level, "title": title, "detail": detail})
+
+        _inspect_timeline(
+            {
+                "duration_sec": 6.0,
+                "all_narration_covered": True,
+                "narration": [{"covered": True}],
+                "clips": [
+                    {"event_id": 1, "source_start": 0, "source_end": 2, "output_start": 0, "output_end": 2},
+                    {"event_id": 2, "source_start": 5, "source_end": 7, "output_start": 2, "output_end": 4},
+                    {"event_id": 1, "source_start": 0, "source_end": 2, "output_start": 4, "output_end": 6},
+                ],
+            },
+            10.0,
+            add,
+        )
+        reused = next(item for item in checks if item["title"] == "镜头复用说明")
+        self.assertEqual(reused["level"], "info")
+        self.assertIn("无需手动处理", reused["detail"])
+
+    def test_adjacent_exact_replay_is_only_a_preview_warning(self) -> None:
+        checks: list[dict[str, str]] = []
+
+        def add(level: str, title: str, detail: str) -> None:
+            checks.append({"level": level, "title": title, "detail": detail})
+
+        _inspect_timeline(
+            {
+                "duration_sec": 4.0,
+                "all_narration_covered": True,
+                "narration": [{"covered": True}],
+                "clips": [
+                    {"event_id": 1, "source_start": 0, "source_end": 2, "output_start": 0, "output_end": 2},
+                    {"event_id": 1, "source_start": 0, "source_end": 2, "output_start": 2, "output_end": 4},
+                ],
+            },
+            10.0,
+            add,
+        )
+        repeated = next(item for item in checks if item["title"] == "相邻镜头重复播放")
+        self.assertEqual(repeated["level"], "warning")
+        self.assertIn("只有画面跳回感明显", repeated["detail"])
 
 
 if __name__ == "__main__":
