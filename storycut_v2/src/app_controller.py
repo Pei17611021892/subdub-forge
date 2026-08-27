@@ -25,7 +25,14 @@ from .analysis_service import (
 )
 from .media_service import analyze_media, extract_preview_frame, render_subtitle_effect_preview
 from .vision_service import api_configuration, describe_event_keyframes
-from .story_service import generate_story_script, refresh_story_timing
+from .story_service import (
+    generate_story_script,
+    narrative_strategy_label,
+    narrative_strategy_options,
+    normalize_narrative_strategy,
+    refresh_story_timing,
+)
+from .duration_revision_service import propose_duration_revision
 from .fact_review_service import review_story_facts
 from .matching_service import (
     apply_voice_timing,
@@ -72,9 +79,11 @@ class AppController(QObject):
     updateChanged = Signal()
     apiModelsChanged = Signal()
     qualityChanged = Signal()
+    durationRevisionChanged = Signal()
     updateDialogRequested = Signal()
     sourceVideoRelinkRequested = Signal()
     qualityDialogRequested = Signal()
+    durationRevisionDialogRequested = Signal()
     _mediaReady = Signal(object, str, str, int)
     _previewReady = Signal(str, str, int, float)
     _subtitleEffectPreviewReady = Signal(str, int)
@@ -94,6 +103,8 @@ class AppController(QObject):
     _voiceSrtProgressReady = Signal(str, int)
     _voiceSrtFinished = Signal(bool, str, object, int)
     _qualityCheckFinished = Signal(object, int)
+    _durationRevisionProgressReady = Signal(str, int)
+    _durationRevisionFinished = Signal(bool, str, object, int)
 
     def __init__(self, root: Path) -> None:
         super().__init__()
@@ -126,6 +137,8 @@ class AppController(QObject):
         self._analysis_eta_seconds = -1.0
         self._analysis_eta_updated_at = 0.0
         self._analysis_estimated_total = -1.0
+        self._analysis_eta_reliable = False
+        self._analysis_eta_observations: list[tuple[float, float]] = []
         self._model_download_progress = 0.0
         self._model_download_status = ""
         self._model_download_visible = False
@@ -134,6 +147,9 @@ class AppController(QObject):
         self._story_busy = False
         self._story_progress = 0.0
         self._story_status = "等待组织故事"
+        self._narrative_strategy = normalize_narrative_strategy(
+            self._config.get("story", {}).get("narrative_strategy", "auto")
+        )
         self._story: dict[str, object] = {}
         self._story_outline: list[dict[str, object]] = []
         self._story_narration: list[dict[str, object]] = []
@@ -163,6 +179,10 @@ class AppController(QObject):
         self._narration_audio_path = ""
         self._narration_duration_sec = 0.0
         self._synced_srt_path = ""
+        self._duration_revision_busy = False
+        self._duration_revision_job_id = 0
+        self._duration_revision_status = ""
+        self._duration_revision_proposal: dict[str, object] = {}
         self._quality_report: dict[str, object] = {}
         self._quality_busy = False
         self._quality_job_id = 0
@@ -171,9 +191,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.2.2"))
+            self._app_version = str(read_version().get("version", "0.2.3"))
         except Exception:
-            self._app_version = "0.2.2"
+            self._app_version = "0.2.3"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -202,6 +222,8 @@ class AppController(QObject):
         self._voiceSrtProgressReady.connect(self._apply_voice_srt_progress)
         self._voiceSrtFinished.connect(self._apply_voice_srt_finished)
         self._qualityCheckFinished.connect(self._apply_quality_check_finished)
+        self._durationRevisionProgressReady.connect(self._apply_duration_revision_progress)
+        self._durationRevisionFinished.connect(self._apply_duration_revision_finished)
         self._analysis_clock = QTimer(self)
         self._analysis_clock.setInterval(1000)
         self._analysis_clock.timeout.connect(self._tick_analysis_clock)
@@ -306,19 +328,22 @@ class AppController(QObject):
 
     @Property(str, notify=analysisChanged)
     def analysisEtaText(self) -> str:
-        if self._analysis_eta_seconds < 0:
-            return "预计剩余：正在根据当前算力计算"
+        if not self._analysis_busy:
+            return "处理完成" if self._analysis_progress >= 1.0 else "等待开始"
+        if not self._analysis_eta_reliable or self._analysis_eta_seconds < 0:
+            return "正在处理"
         remaining = self._analysis_eta_seconds - (time.monotonic() - self._analysis_eta_updated_at)
-        if self._analysis_busy and remaining <= 0:
-            return "预计剩余：当前阶段超出预估，正在修正"
-        remaining = max(0.0, remaining)
+        if remaining <= 0:
+            return "正在处理"
         return f"预计剩余约 {self._format_time(remaining)}"
+
+    @Property(bool, notify=analysisChanged)
+    def analysisEtaReliable(self) -> bool:
+        return self._analysis_eta_reliable and self._analysis_eta_seconds >= 0
 
     @Property(str, notify=analysisChanged)
     def analysisEstimatedTotalText(self) -> str:
-        if self._analysis_estimated_total < 0:
-            return "预计总用时：计算中"
-        return f"预计总用时约 {self._format_time(self._analysis_estimated_total)}"
+        return ""
 
     @Property(float, notify=analysisChanged)
     def modelDownloadProgress(self) -> float:
@@ -377,6 +402,28 @@ class AppController(QObject):
     @Property("QVariantList", notify=storyChanged)
     def storyNarration(self) -> list[dict[str, object]]:
         return self._story_narration
+
+    @Property(str, notify=storyChanged)
+    def narrativeStrategy(self) -> str:
+        return self._narrative_strategy
+
+    @Property("QVariantList", notify=storyChanged)
+    def narrativeStrategyOptions(self) -> list[dict[str, str]]:
+        return narrative_strategy_options()
+
+    @Property(str, notify=storyChanged)
+    def narrativeStrategyHint(self) -> str:
+        options = narrative_strategy_options()
+        selected = next(
+            item for item in options if item["value"] == self._narrative_strategy
+        )
+        if self._story and self._story.get("narrative_strategy_requested") == self._narrative_strategy:
+            resolved = str(self._story.get("narrative_strategy", ""))
+            if self._narrative_strategy == "auto" and resolved:
+                reason = str(self._story.get("narrative_strategy_reason_zh", "")).strip()
+                suffix = f"：{reason}" if reason else ""
+                return f"本稿自动采用“{narrative_strategy_label(resolved)}”{suffix}"
+        return selected["description"]
 
     @Property(bool, notify=factReviewChanged)
     def factReviewBusy(self) -> bool:
@@ -508,6 +555,129 @@ class AppController(QObject):
         if suggested is None:
             return f"{speed_text} · 超时较多，最高 1.25x 仍不够，需要删减或重写文案。"
         return f"{speed_text} · 可自动调整为 {suggested:.2f}x，并同步缩放 SRT 时间轴。"
+
+    @Property(bool, notify=voiceChanged)
+    def canReviseNarrationDuration(self) -> bool:
+        if not self.narrationAudioReady or not self.narrationOverShortsLimit:
+            return False
+        original_duration = self._narration_duration_sec * max(1.0, self._narration_speed)
+        return recommended_shorts_speed(original_duration) is None
+
+    @Property(bool, notify=durationRevisionChanged)
+    def durationRevisionBusy(self) -> bool:
+        return self._duration_revision_busy
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionStatus(self) -> str:
+        return self._duration_revision_status
+
+    @Property(bool, notify=durationRevisionChanged)
+    def durationRevisionReady(self) -> bool:
+        return bool(self._duration_revision_proposal.get("revised_story"))
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionSummary(self) -> str:
+        return str(self._duration_revision_proposal.get("summary_zh", ""))
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionBeforeStats(self) -> str:
+        if not self._duration_revision_proposal:
+            return ""
+        return (
+            f"{int(self._duration_revision_proposal.get('current_word_count', 0))} 词 · "
+            f"真实配音 {self._format_time(float(self._duration_revision_proposal.get('actual_duration_sec', 0)))}"
+        )
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionAfterStats(self) -> str:
+        if not self._duration_revision_proposal:
+            return ""
+        return (
+            f"{int(self._duration_revision_proposal.get('revised_word_count', 0))} 词 · "
+            f"按本次语速预计 {self._format_time(float(self._duration_revision_proposal.get('projected_duration_sec', 0)))}"
+        )
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionBeforeText(self) -> str:
+        return "\n\n".join(
+            str(item.get("text_en", "")).strip()
+            for item in self._story_narration
+            if str(item.get("text_en", "")).strip()
+        )
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionAfterText(self) -> str:
+        revised = self._duration_revision_proposal.get("revised_story", {})
+        if not isinstance(revised, dict):
+            return ""
+        return "\n\n".join(
+            str(item.get("text_en", "")).strip()
+            for item in revised.get("narration", [])
+            if isinstance(item, dict) and str(item.get("text_en", "")).strip()
+        )
+
+    @Property("QVariantList", notify=durationRevisionChanged)
+    def durationRevisionChanges(self) -> list[str]:
+        changes = self._duration_revision_proposal.get("removed_or_merged", [])
+        return [str(item) for item in changes] if isinstance(changes, list) else []
+
+    @Property(bool, notify=durationRevisionChanged)
+    def canRestoreDurationRevision(self) -> bool:
+        return self._duration_revision_archive_path() is not None
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionArchiveText(self) -> str:
+        archive = self._duration_revision_archive_path()
+        if not archive:
+            return ""
+        manifest_file = archive / "manifest.json"
+        try:
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            created = str(manifest.get("created_at", "")).replace("T", " ")[:19]
+            return f"可恢复应用前版本 · {created}" if created else "可恢复应用前版本"
+        except (OSError, ValueError, TypeError):
+            return "可恢复应用前版本"
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionRestoreCurrentStats(self) -> str:
+        words = int(self._story.get("word_count", 0) or 0)
+        duration = float(self._story.get("estimated_duration_sec", 0) or 0)
+        if self.narrationAudioReady and self._narration_duration_sec > 0:
+            return f"{words} 词 · 实际配音 {self._format_time(self._narration_duration_sec)}"
+        return f"{words} 词 · 预计 {self._format_time(duration)}"
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionRestoreCurrentText(self) -> str:
+        return "\n\n".join(
+            str(item.get("text_en", "")).strip()
+            for item in self._story_narration
+            if str(item.get("text_en", "")).strip()
+        )
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionRestoreArchivedStats(self) -> str:
+        bundle = self._duration_revision_archive_bundle()
+        story = bundle.get("story", {})
+        project = bundle.get("project", {})
+        words = int(story.get("word_count", 0) or 0) if isinstance(story, dict) else 0
+        voice = project.get("settings", {}).get("voice", {}) if isinstance(project, dict) else {}
+        voice = voice if isinstance(voice, dict) else {}
+        actual_duration = float(voice.get("duration_sec", 0) or 0)
+        if actual_duration > 0:
+            return f"{words} 词 · 实际配音 {self._format_time(actual_duration)}"
+        estimate = float(story.get("estimated_duration_sec", 0) or 0) if isinstance(story, dict) else 0
+        return f"{words} 词 · 预计 {self._format_time(estimate)}"
+
+    @Property(str, notify=durationRevisionChanged)
+    def durationRevisionRestoreArchivedText(self) -> str:
+        story = self._duration_revision_archive_bundle().get("story", {})
+        if not isinstance(story, dict):
+            return ""
+        return "\n\n".join(
+            str(item.get("text_en", "")).strip()
+            for item in story.get("narration", [])
+            if isinstance(item, dict) and str(item.get("text_en", "")).strip()
+        )
 
     @Property(str, notify=qualityChanged)
     def qualityCheckText(self) -> str:
@@ -907,6 +1077,11 @@ class AppController(QObject):
             self._analysis_content_mode = saved_mode if saved_mode in {"speech", "visual"} else "speech"
             settings["content_mode"] = self._analysis_content_mode
             settings.setdefault("fact_review_auto", self._fact_review_auto)
+            saved_strategy = normalize_narrative_strategy(
+                settings.get("narrative_strategy", self._narrative_strategy)
+            )
+            self._narrative_strategy = saved_strategy
+            settings["narrative_strategy"] = saved_strategy
         project_file.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -1067,6 +1242,12 @@ class AppController(QObject):
                     self._config.get("fact_review", {}).get("auto_after_story", False),
                 )
             )
+            self._narrative_strategy = normalize_narrative_strategy(
+                payload.get("settings", {}).get(
+                    "narrative_strategy",
+                    self._config.get("story", {}).get("narrative_strategy", "auto"),
+                )
+            )
             cover_path = project_file.parent / "cache" / "cover.jpg"
             self._cover_url = cover_path.as_uri() if cover_path.exists() else ""
             self._preview_url = ""
@@ -1095,7 +1276,7 @@ class AppController(QObject):
             self._load_subtitle_style(project_file)
             if not self._media and self._video_path and Path(self._video_path).exists():
                 self._start_media_analysis(Path(self._video_path), project_file)
-        except (OSError, ValueError, TypeError) as exc:
+        except Exception as exc:
             self._notice = f"无法打开项目：{exc}"
             self.noticeChanged.emit()
 
@@ -1207,6 +1388,29 @@ class AppController(QObject):
         self.analysisChanged.emit()
         self.noticeChanged.emit()
 
+    @Slot(str)
+    def setNarrativeStrategy(self, strategy: str) -> None:
+        normalized = normalize_narrative_strategy(strategy)
+        if normalized == self._narrative_strategy:
+            return
+        self._narrative_strategy = normalized
+        if self._current_project_file and self._current_project_file.exists():
+            try:
+                payload = json.loads(
+                    self._current_project_file.read_text(encoding="utf-8")
+                )
+                payload.setdefault("settings", {})["narrative_strategy"] = normalized
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        label = narrative_strategy_label(normalized)
+        self._notice = f"叙事策略已设为“{label}”，将在下次生成故事时生效"
+        self.storyChanged.emit()
+        self.noticeChanged.emit()
+
     @Slot()
     def startUnderstandingLocalOnly(self) -> None:
         self._start_understanding(skip_vision=True)
@@ -1220,12 +1424,14 @@ class AppController(QObject):
         self._analysis_progress = 0.01
         self._analysis_status = "准备理解原片…"
         self._analysis_started_at = time.monotonic()
-        self._analysis_estimated_total = self._estimate_analysis_total(self.durationSeconds)
+        self._analysis_estimated_total = -1.0
         self._model_download_progress = 0.0
         self._model_download_status = ""
         self._model_download_visible = False
-        self._analysis_eta_seconds = self._analysis_estimated_total
-        self._analysis_eta_updated_at = self._analysis_started_at
+        self._analysis_eta_seconds = -1.0
+        self._analysis_eta_updated_at = 0.0
+        self._analysis_eta_reliable = False
+        self._analysis_eta_observations = []
         self._analysis_clock.start()
         self.analysisChanged.emit()
         video = Path(self._video_path)
@@ -1475,6 +1681,10 @@ class AppController(QObject):
         except (OSError, ValueError, TypeError):
             pass
         self._story_job_id += 1
+        self._duration_revision_job_id += 1
+        self._duration_revision_proposal = {}
+        self._duration_revision_status = ""
+        self.durationRevisionChanged.emit()
         self._fact_review_job_id += 1
         job_id = self._story_job_id
         self._story_busy = True
@@ -1496,6 +1706,7 @@ class AppController(QObject):
                     self._config,
                     self._root,
                     report,
+                    narrative_strategy=self._narrative_strategy,
                 )
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
                 payload["stage"] = "scripted"
@@ -1511,7 +1722,9 @@ class AppController(QObject):
                 artifacts.pop("rough_cut", None)
                 artifacts.pop("rough_preview", None)
                 artifacts.pop("fact_review", None)
+                artifacts.pop("duration_revision_proposal", None)
                 (project_file.parent / "script" / "fact_review.json").unlink(missing_ok=True)
+                (project_file.parent / "script" / "duration_revision_proposal.json").unlink(missing_ok=True)
                 (project_file.parent / "timeline" / "matches.json").unlink(missing_ok=True)
                 (project_file.parent / "timeline" / "rough_cut.json").unlink(missing_ok=True)
                 project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1532,6 +1745,7 @@ class AppController(QObject):
         self._story["narration"] = self._story_narration
         story_file = self._current_project_file.parent / "script" / "story.json"
         story_file.write_text(json.dumps(self._story, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._invalidate_duration_revision()
         if self._fact_review:
             self._fact_review["stale"] = True
             self._fact_review_status = "英文解说已修改，旧审查结果需要重新检查"
@@ -2279,6 +2493,7 @@ class AppController(QObject):
             payload["settings"]["voice"]["audio_size"] = destination.stat().st_size
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._invalidate_duration_revision()
             self.voiceChanged.emit()
         except Exception as exc:
             self._notice = f"英文配音导入失败：{exc}"
@@ -2336,6 +2551,326 @@ class AppController(QObject):
             self.noticeChanged.emit()
             return
         self._start_narration_speed_processing(suggested)
+
+    @Slot()
+    def proposeNarrationDurationRevision(self) -> None:
+        if self._duration_revision_busy or not self._current_project_file:
+            return
+        if self.durationRevisionReady:
+            self.durationRevisionDialogRequested.emit()
+            return
+        if not self.canReviseNarrationDuration:
+            self._notice = "当前配音可通过安全加速适配，或尚未超过 Shorts 上限。"
+            self.noticeChanged.emit()
+            return
+        if not self.apiConfigured:
+            self._notice = "生成精简方案需要故事 API；请先打开 API 设置完成配置。"
+            self.noticeChanged.emit()
+            return
+
+        project_file = self._current_project_file
+        story_file = project_file.parent / "script" / "story.json"
+        events_file = project_file.parent / "analysis" / "events.json"
+        if not story_file.exists() or not events_file.exists():
+            self._notice = "找不到当前故事或原片事件，无法生成精简方案。"
+            self.noticeChanged.emit()
+            return
+
+        self._duration_revision_job_id += 1
+        job_id = self._duration_revision_job_id
+        self._duration_revision_busy = True
+        self._duration_revision_proposal = {}
+        self._duration_revision_status = "正在根据真实配音速度计算精简量…"
+        self.durationRevisionChanged.emit()
+        self.durationRevisionDialogRequested.emit()
+
+        def progress(_value: float, status: str) -> None:
+            self._durationRevisionProgressReady.emit(status, job_id)
+
+        def worker() -> None:
+            try:
+                proposal = propose_duration_revision(
+                    events_file,
+                    story_file,
+                    project_file.parent / "script" / "duration_revision_proposal.json",
+                    self._original_narration_duration(),
+                    deepcopy(self._config),
+                    self._root,
+                    progress,
+                )
+                self._durationRevisionFinished.emit(True, "", proposal, job_id)
+            except Exception as exc:
+                self._durationRevisionFinished.emit(False, str(exc), {}, job_id)
+
+        threading.Thread(target=worker, name="storycut-duration-revision", daemon=True).start()
+
+    @Slot(str, int)
+    def _apply_duration_revision_progress(self, status: str, job_id: int) -> None:
+        if job_id != self._duration_revision_job_id:
+            return
+        self._duration_revision_status = status
+        self.durationRevisionChanged.emit()
+
+    @Slot(bool, str, object, int)
+    def _apply_duration_revision_finished(
+        self, success: bool, message: str, proposal: object, job_id: int
+    ) -> None:
+        if job_id != self._duration_revision_job_id:
+            return
+        self._duration_revision_busy = False
+        if not success or not isinstance(proposal, dict):
+            self._duration_revision_status = f"精简方案生成失败：{message}"
+            self._notice = self._duration_revision_status
+            self.durationRevisionChanged.emit()
+            self.noticeChanged.emit()
+            return
+        self._duration_revision_proposal = dict(proposal)
+        self._duration_revision_status = "精简方案已生成；确认前不会修改当前项目。"
+        if self._current_project_file:
+            try:
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                payload.setdefault("artifacts", {})["duration_revision_proposal"] = (
+                    "script/duration_revision_proposal.json"
+                )
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        self.durationRevisionChanged.emit()
+
+    @Slot()
+    def applyNarrationDurationRevision(self) -> None:
+        if not self._current_project_file or self._duration_revision_busy:
+            return
+        revised = self._duration_revision_proposal.get("revised_story")
+        if not isinstance(revised, dict) or not revised.get("narration"):
+            self._notice = "没有可应用的精简方案。"
+            self.noticeChanged.emit()
+            return
+
+        project_file = self._current_project_file
+        project_dir = project_file.parent
+        story_file = project_dir / "script" / "story.json"
+        events_file = project_dir / "analysis" / "events.json"
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        temporary_story = story_file.with_name("story.duration_revision.tmp.json")
+        matches_file = project_dir / "timeline" / "matches.json"
+        rough_cut_file = project_dir / "timeline" / "rough_cut.json"
+        temporary_matches = matches_file.with_name("matches.duration_revision.tmp.json")
+        temporary_rough_cut = rough_cut_file.with_name("rough_cut.duration_revision.tmp.json")
+        try:
+            temporary_story.write_text(
+                json.dumps(revised, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            generate_shot_matches(temporary_story, events_file, temporary_matches)
+            build_rough_cut(temporary_matches, temporary_rough_cut)
+
+            archive_dir = project_dir / "archive" / f"duration_revision_{stamp}"
+            archive_dir.mkdir(parents=True, exist_ok=False)
+            self._snapshot_duration_revision_state(
+                project_dir,
+                archive_dir,
+                "应用 AI 精简稿前的完整状态",
+            )
+            audio_dir = project_dir / "audio"
+            for name in (
+                "narration.wav",
+                "narration_original.wav",
+                "narration.srt",
+                "narration_original.srt",
+                "narration_whisper.json",
+            ):
+                source = audio_dir / name
+                if source.exists():
+                    source.unlink()
+
+            temporary_story.replace(story_file)
+            temporary_matches.replace(matches_file)
+            temporary_rough_cut.replace(rough_cut_file)
+            prepare_tts_srt(story_file, project_dir / "script" / "tts")
+
+            payload = json.loads(project_file.read_text(encoding="utf-8"))
+            artifacts = payload.setdefault("artifacts", {})
+            artifacts["story"] = "script/story.json"
+            artifacts["matches"] = "timeline/matches.json"
+            artifacts["rough_cut"] = "timeline/rough_cut.json"
+            artifacts["tts_reference_srt"] = "script/tts/gpt_sovits_reference.srt"
+            artifacts["duration_revision_archive"] = archive_dir.relative_to(project_dir).as_posix()
+            for key in (
+                "narration_audio",
+                "narration_audio_original",
+                "narration_srt",
+                "narration_srt_original",
+                "narration_whisper",
+                "rough_preview",
+                "duration_revision_proposal",
+                "fact_review",
+            ):
+                artifacts.pop(key, None)
+            voice = payload.setdefault("settings", {}).setdefault("voice", {})
+            voice.update({"speed": 1.0, "duration_sec": 0.0, "audio_size": 0})
+            payload["stage"] = "matched"
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            (project_dir / "script" / "duration_revision_proposal.json").unlink(missing_ok=True)
+            (project_dir / "script" / "fact_review.json").unlink(missing_ok=True)
+            self._set_story(dict(revised))
+            self._load_matches(project_file)
+            self._narration_audio_path = ""
+            self._synced_srt_path = ""
+            self._narration_duration_sec = 0.0
+            self._narration_speed = 1.0
+            self._voice_status = "新 SRT 已准备；请重新生成并导入 GPT-SoVITS 配音"
+            self._export_path = ""
+            self._duration_revision_proposal = {}
+            self._duration_revision_status = "新稿已应用"
+            self._matching_status = "新稿已自动重新匹配镜头"
+            self._notice = "新稿与镜头已更新；旧故事、配音和同步 SRT 已安全归档。请重新导出 SRT 并生成配音。"
+            self.storyChanged.emit()
+            self.matchingChanged.emit()
+            self.voiceChanged.emit()
+            self.exportChanged.emit()
+            self.durationRevisionChanged.emit()
+            self.noticeChanged.emit()
+            self._refresh_recent_projects()
+        except Exception as exc:
+            self._notice = f"应用精简方案失败：{exc}。旧文件归档仍保留，请重新打开项目检查。"
+            self.noticeChanged.emit()
+        finally:
+            temporary_story.unlink(missing_ok=True)
+            temporary_matches.unlink(missing_ok=True)
+            temporary_rough_cut.unlink(missing_ok=True)
+
+    @Slot()
+    def restoreDurationRevisionArchive(self) -> None:
+        if not self._current_project_file or self._duration_revision_busy or self._voice_busy:
+            return
+        archive_dir = self._duration_revision_archive_path()
+        if not archive_dir:
+            self._notice = "找不到可恢复的应用前版本。"
+            self.noticeChanged.emit()
+            return
+        project_file = self._current_project_file
+        project_dir = project_file.parent
+        state_dir = archive_dir / "state"
+        saved_project = state_dir / "project.json"
+        if not saved_project.exists():
+            self._notice = "归档不完整：缺少应用前的 project.json。"
+            self.noticeChanged.emit()
+            return
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        rollback_dir = project_dir / "archive" / f"restore_replaced_{stamp}"
+        try:
+            rollback_dir.mkdir(parents=True, exist_ok=False)
+            self._snapshot_duration_revision_state(
+                project_dir,
+                rollback_dir,
+                "执行恢复前被替换的当前状态",
+            )
+            for folder_name in ("script", "timeline", "audio"):
+                current = project_dir / folder_name
+                replaced = rollback_dir / f"replaced_live_{folder_name}"
+                if current.exists():
+                    shutil.move(str(current), str(replaced))
+                archived_folder = state_dir / folder_name
+                if archived_folder.exists():
+                    shutil.copytree(archived_folder, current)
+                else:
+                    current.mkdir(parents=True, exist_ok=True)
+
+            restored_payload = json.loads(saved_project.read_text(encoding="utf-8"))
+            artifacts = restored_payload.setdefault("artifacts", {})
+            artifacts.pop("duration_revision_proposal", None)
+            artifacts["duration_revision_archive"] = rollback_dir.relative_to(project_dir).as_posix()
+            restored_payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            project_file.write_text(
+                json.dumps(restored_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (project_dir / "script" / "duration_revision_proposal.json").unlink(missing_ok=True)
+            self.openProject(project_file.as_uri())
+            self._notice = (
+                "已恢复 AI 精简前的故事、镜头、配音、SRT 和项目设置；"
+                "刚才被替换的版本也已另行归档，可再次恢复。"
+            )
+            self._duration_revision_status = "已恢复应用前版本"
+            self.durationRevisionChanged.emit()
+            self.noticeChanged.emit()
+            self._refresh_recent_projects()
+        except Exception as exc:
+            self._notice = f"恢复应用前版本失败：{exc}。现有与归档文件均未清理，请重新打开项目检查。"
+            self.noticeChanged.emit()
+
+    def _duration_revision_archive_path(self) -> Path | None:
+        if not self._current_project_file or not self._current_project_file.exists():
+            return None
+        try:
+            payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+            relative = str(payload.get("artifacts", {}).get("duration_revision_archive", "")).strip()
+            if not relative:
+                return None
+            project_dir = self._current_project_file.parent.resolve()
+            archive_root = (project_dir / "archive").resolve()
+            candidate = (project_dir / relative).resolve()
+            if archive_root not in candidate.parents or not (candidate / "state" / "project.json").exists():
+                return None
+            return candidate
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _duration_revision_archive_bundle(self) -> dict[str, object]:
+        archive = self._duration_revision_archive_path()
+        if not archive:
+            return {}
+        try:
+            state = archive / "state"
+            story = json.loads((state / "script" / "story.json").read_text(encoding="utf-8"))
+            project = json.loads((state / "project.json").read_text(encoding="utf-8"))
+            return {
+                "story": story if isinstance(story, dict) else {},
+                "project": project if isinstance(project, dict) else {},
+            }
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    @staticmethod
+    def _snapshot_duration_revision_state(
+        project_dir: Path,
+        archive_dir: Path,
+        reason: str,
+    ) -> None:
+        state_dir = archive_dir / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        project_file = project_dir / "project.json"
+        if not project_file.exists():
+            raise FileNotFoundError("当前项目缺少 project.json")
+        payload = json.loads(project_file.read_text(encoding="utf-8"))
+        payload.setdefault("artifacts", {}).pop("duration_revision_proposal", None)
+        (state_dir / "project.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        for folder_name in ("script", "timeline", "audio"):
+            source = project_dir / folder_name
+            if source.exists():
+                shutil.copytree(source, state_dir / folder_name)
+        (state_dir / "script" / "duration_revision_proposal.json").unlink(missing_ok=True)
+        (archive_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "reason": reason,
+                    "state": "state",
+                    "includes": ["project.json", "script", "timeline", "audio"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     @Slot()
     def restoreNarrationSpeed(self) -> None:
@@ -2444,6 +2979,25 @@ class AppController(QObject):
                 pass
         return self._narration_duration_sec * max(1.0, self._narration_speed)
 
+    def _invalidate_duration_revision(self) -> None:
+        if not self._current_project_file:
+            return
+        self._duration_revision_job_id += 1
+        self._duration_revision_busy = False
+        self._duration_revision_proposal = {}
+        self._duration_revision_status = ""
+        proposal_file = self._current_project_file.parent / "script" / "duration_revision_proposal.json"
+        proposal_file.unlink(missing_ok=True)
+        try:
+            payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+            payload.setdefault("artifacts", {}).pop("duration_revision_proposal", None)
+            self._current_project_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+        self.durationRevisionChanged.emit()
+
     def _start_narration_speed_processing(self, speed: float) -> None:
         if not self._current_project_file:
             return
@@ -2511,6 +3065,7 @@ class AppController(QObject):
         self._apply_voice_timing_to_matches(segments if isinstance(segments, list) and segments else None)
         if self._current_project_file:
             try:
+                working_audio = self._current_project_file.parent / "audio" / "narration.wav"
                 payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
                 payload.setdefault("settings", {}).setdefault("voice", {})[
                     "speed"
@@ -2528,8 +3083,9 @@ class AppController(QObject):
                 self._current_project_file.write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
-            except (OSError, ValueError, TypeError):
-                pass
+            except Exception as exc:
+                self._notice = f"配音已处理完成，但保存项目状态失败：{exc}"
+                self.noticeChanged.emit()
         action = "已恢复原速" if self._narration_speed == 1.0 else f"已调整为 {self._narration_speed:.2f}x"
         self._voice_status = (
             f"英文配音{action}，实际时长 {self._format_time(self._narration_duration_sec)}；"
@@ -2597,6 +3153,7 @@ class AppController(QObject):
         self._preview_job_id += 1
         self._analysis_job_id += 1
         self._story_job_id += 1
+        self._duration_revision_job_id += 1
         self._fact_review_job_id += 1
         self._export_job_id += 1
         self._quality_job_id += 1
@@ -2616,6 +3173,8 @@ class AppController(QObject):
         self._analysis_started_at = 0.0
         self._analysis_eta_seconds = -1.0
         self._analysis_estimated_total = -1.0
+        self._analysis_eta_reliable = False
+        self._analysis_eta_observations = []
         self._model_download_progress = 0.0
         self._model_download_status = ""
         self._model_download_visible = False
@@ -2643,6 +3202,9 @@ class AppController(QObject):
         self._narration_audio_path = ""
         self._narration_duration_sec = 0.0
         self._synced_srt_path = ""
+        self._duration_revision_busy = False
+        self._duration_revision_status = ""
+        self._duration_revision_proposal = {}
         self._quality_report = {}
         self._quality_busy = False
         self._subtitle_style = self._default_subtitle_style()
@@ -2657,6 +3219,7 @@ class AppController(QObject):
         self.matchingChanged.emit()
         self.exportChanged.emit()
         self.voiceChanged.emit()
+        self.durationRevisionChanged.emit()
         self.qualityChanged.emit()
         self.subtitleStyleChanged.emit()
         self.subtitleEffectPreviewChanged.emit()
@@ -2731,9 +3294,42 @@ class AppController(QObject):
             return
         self._analysis_progress = min(max(value, 0.0), 1.0)
         self._analysis_status = status
-        if eta_seconds >= 0:
-            self._analysis_eta_seconds = eta_seconds
-            self._analysis_eta_updated_at = time.monotonic()
+        now = time.monotonic()
+        elapsed = now - self._analysis_started_at if self._analysis_started_at else 0.0
+        if eta_seconds >= 5.0 and elapsed >= 30.0:
+            self._analysis_eta_observations.append((now, now + eta_seconds))
+            cutoff = now - 35.0
+            self._analysis_eta_observations = [
+                item for item in self._analysis_eta_observations if item[0] >= cutoff
+            ]
+            observations = self._analysis_eta_observations
+            span = observations[-1][0] - observations[0][0] if len(observations) >= 2 else 0.0
+            predicted_finishes = sorted(item[1] for item in observations)
+            median_finish = (
+                predicted_finishes[len(predicted_finishes) // 2]
+                if predicted_finishes
+                else now + eta_seconds
+            )
+            finish_range = (
+                predicted_finishes[-1] - predicted_finishes[0]
+                if len(predicted_finishes) >= 2
+                else float("inf")
+            )
+            tolerance = max(12.0, max(0.0, median_finish - now) * 0.08)
+            self._analysis_eta_reliable = (
+                len(observations) >= 4 and span >= 12.0 and finish_range <= tolerance
+            )
+            if self._analysis_eta_reliable:
+                self._analysis_eta_seconds = max(0.0, median_finish - now)
+                self._analysis_eta_updated_at = now
+            else:
+                self._analysis_eta_seconds = -1.0
+                self._analysis_eta_updated_at = 0.0
+        else:
+            self._analysis_eta_reliable = False
+            self._analysis_eta_seconds = -1.0
+            self._analysis_eta_updated_at = 0.0
+            self._analysis_eta_observations = []
         self.analysisChanged.emit()
 
     @Slot(float, str, bool, int)
@@ -2756,6 +3352,8 @@ class AppController(QObject):
         if success:
             self._analysis_eta_seconds = 0.0
             self._analysis_eta_updated_at = time.monotonic()
+        self._analysis_eta_reliable = False
+        self._analysis_eta_observations = []
         self._analysis_progress = 1.0 if success else self._analysis_progress
         self._analysis_status = message if success else f"分析失败：{message}"
         self._model_download_visible = False
@@ -2950,6 +3548,29 @@ class AppController(QObject):
         except (OSError, ValueError, TypeError):
             self._set_story({})
         self._load_fact_review(project_file)
+        proposal_file = project_file.parent / "script" / "duration_revision_proposal.json"
+        self._duration_revision_proposal = {}
+        self._duration_revision_status = ""
+        if proposal_file.exists():
+            try:
+                proposal = json.loads(proposal_file.read_text(encoding="utf-8"))
+                if (
+                    isinstance(proposal, dict)
+                    and int(proposal.get("schema_version", 0) or 0) >= 2
+                    and isinstance(proposal.get("revised_story"), dict)
+                ):
+                    self._duration_revision_proposal = proposal
+                    self._duration_revision_status = "已有未应用的精简方案，可重新查看对比。"
+                else:
+                    proposal_file.unlink(missing_ok=True)
+                    payload = json.loads(project_file.read_text(encoding="utf-8"))
+                    payload.setdefault("artifacts", {}).pop("duration_revision_proposal", None)
+                    project_file.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+            except (OSError, ValueError, TypeError):
+                pass
+        self.durationRevisionChanged.emit()
 
     def _load_matches(self, project_file: Path) -> None:
         matches_file = project_file.parent / "timeline" / "matches.json"
@@ -3064,10 +3685,10 @@ class AppController(QObject):
                     target=worker, name="storycut-voice-duration", daemon=True
                 ).start()
                 return
-        self._update_loaded_voice_status(audio, srt)
+        self._update_loaded_voice_status(audio, srt, project_file)
         self.voiceChanged.emit()
 
-    def _update_loaded_voice_status(self, audio: Path, srt: Path) -> None:
+    def _update_loaded_voice_status(self, audio: Path, srt: Path, project_file: Path) -> None:
         if audio.exists() and srt.exists():
             self._voice_status = (
                 f"英文配音与同步字幕已就绪，时长 {self._format_time(self._narration_duration_sec)}"
@@ -3105,7 +3726,7 @@ class AppController(QObject):
                 )
             except (OSError, ValueError, TypeError):
                 pass
-        self._update_loaded_voice_status(audio, srt)
+        self._update_loaded_voice_status(audio, srt, self._current_project_file)
         self.voiceChanged.emit()
 
     def _default_subtitle_style(self) -> dict[str, object]:

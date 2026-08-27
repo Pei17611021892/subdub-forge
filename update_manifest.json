@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "version": "2.0.2",
+  "version": "2.0.3",
   "scope": "repository",
   "files": [
     ".env.example",
@@ -19,6 +19,7 @@
     "storycut_v2/src/analysis_service.py",
     "storycut_v2/src/app_controller.py",
     "storycut_v2/src/config_manager.py",
+    "storycut_v2/src/duration_revision_service.py",
     "storycut_v2/src/export_service.py",
     "storycut_v2/src/fact_review_service.py",
     "storycut_v2/src/matching_service.py",
@@ -29,6 +30,7 @@
     "storycut_v2/src/vision_service.py",
     "storycut_v2/src/voice_service.py",
     "storycut_v2/tests/test_app_controller.py",
+    "storycut_v2/tests/test_duration_revision_service.py",
     "storycut_v2/tests/test_export_service.py",
     "storycut_v2/tests/test_fact_review_service.py",
     "storycut_v2/tests/test_quality_service.py",

@@ -8,10 +8,114 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from src.story_service import _normalize_story, generate_story_script, refresh_story_timing
+from src.story_service import (
+    _build_speech_story_prompt,
+    _normalize_story,
+    generate_story_script,
+    narrative_strategy_options,
+    refresh_story_timing,
+)
 
 
 class StoryServiceTests(unittest.TestCase):
+    def test_narrative_strategy_auto_and_none_keep_one_request_workflow(self) -> None:
+        options = {item["value"] for item in narrative_strategy_options()}
+        self.assertIn("auto", options)
+        self.assertIn("none", options)
+        self.assertIn("science_explainer", options)
+
+        auto_prompt = _build_speech_story_prompt([], 180, 300, "existing", "auto")
+        unchanged_prompt = _build_speech_story_prompt([], 180, 300, "existing", "none")
+        self.assertIn("First identify the dominant subject", auto_prompt)
+        self.assertNotIn("NARRATIVE STRATEGY", unchanged_prompt)
+
+    def test_speech_mode_rewrites_an_overlong_draft_before_failing(self) -> None:
+        events = [
+            {
+                "id": 1,
+                "start": 0,
+                "end": 30,
+                "transcript": "A locking fastener prevents rotation under vibration.",
+                "visual_description": "A bolt and locking washer are demonstrated.",
+            }
+        ]
+        overlong = {
+            "title": "Fasteners",
+            "angle": "解释防松原理",
+            "hook": "A bolt can loosen under vibration.",
+            "outline": [{"event_ids": [1], "purpose": "explain", "summary": "原理"}],
+            "narration": [
+                {
+                    "event_ids": [1],
+                    "text_en": " ".join(["mechanism"] * 500) + ".",
+                    "visual_query": "螺栓防松结构",
+                    "estimated_duration_sec": 205,
+                }
+            ],
+        }
+        revised = {
+            "title": "Fasteners",
+            "angle": "解释防松原理",
+            "hook": "Vibration keeps testing every threaded joint.",
+            "outline": [{"event_ids": [1], "purpose": "explain", "summary": "原理"}],
+            "narration": [
+                {
+                    "event_ids": [1],
+                    "text_en": "A locking washer adds resistance so vibration cannot rotate the nut freely.",
+                    "visual_query": "锁紧垫圈阻止螺母旋转",
+                    "estimated_duration_sec": 5,
+                }
+            ],
+        }
+        responses = iter([overlong, revised])
+        called_models: list[str] = []
+
+        class FakeCompletions:
+            def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                called_models.append(str(kwargs["model"]))
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content=json.dumps(next(responses)))
+                        )
+                    ]
+                )
+
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            events_path = root / "analysis" / "events.json"
+            story_path = root / "script" / "story.json"
+            events_path.parent.mkdir(parents=True)
+            events_path.write_text(
+                json.dumps({"content_mode": "speech", "events": events}), encoding="utf-8"
+            )
+            config = {
+                "shared": {"env_file": ".env"},
+                "story": {
+                    "model": "story-model",
+                    "editor_model": "editor-model",
+                    "temperature": 0.55,
+                },
+            }
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "openai.OpenAI", return_value=fake_client
+            ):
+                result = generate_story_script(
+                    events_path,
+                    story_path,
+                    180,
+                    config,
+                    root,
+                    lambda _value, _status: None,
+                )
+            story_saved = story_path.exists()
+
+        self.assertEqual(called_models, ["story-model", "editor-model"])
+        self.assertEqual(result["workflow"], "speech_story_editor_v2")
+        self.assertLess(result["estimated_duration_sec"], 179)
+        self.assertTrue(story_saved)
+
     def test_visual_mode_plans_then_runs_final_editor(self) -> None:
         events = [
             {
@@ -185,6 +289,24 @@ class StoryServiceTests(unittest.TestCase):
         self.assertEqual(refreshed["timing_model"], "english_word_syllable_v3")
         self.assertGreaterEqual(refreshed["narration"][0]["estimated_duration_sec"], 3.0)
         self.assertGreaterEqual(refreshed["estimated_duration_sec"], 3.0)
+
+    def test_measured_voice_projection_timing_is_preserved_on_reopen(self) -> None:
+        story = {
+            "timing_model": "measured_voice_projection_v1",
+            "estimated_duration_sec": 165.0,
+            "narration": [
+                {
+                    "id": 1,
+                    "text_en": "A measured line.",
+                    "estimated_duration_sec": 165.0,
+                }
+            ],
+        }
+
+        refreshed, changed = refresh_story_timing(story)
+
+        self.assertFalse(changed)
+        self.assertEqual(refreshed["estimated_duration_sec"], 165.0)
 
 
 if __name__ == "__main__":

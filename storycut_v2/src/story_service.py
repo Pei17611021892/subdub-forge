@@ -17,6 +17,105 @@ from .voice_service import (
 ProgressCallback = Callable[[float, str], None]
 
 
+NARRATIVE_STRATEGIES: tuple[dict[str, str], ...] = (
+    {
+        "value": "auto",
+        "label": "自动识别（推荐）",
+        "description": "根据素材内容自动选择最合适的讲法，不增加 API 请求。",
+    },
+    {
+        "value": "none",
+        "label": "不设置（当前逻辑）",
+        "description": "不注入叙事结构规则，完全沿用当前故事生成逻辑。",
+    },
+    {
+        "value": "science_explainer",
+        "label": "科学原理",
+        "description": "围绕现象、机制、证据与结论组织科普解说。",
+    },
+    {
+        "value": "engineering_process",
+        "label": "工程与过程",
+        "description": "突出目标、操作、困难、调整和最终结果。",
+    },
+    {
+        "value": "nature_observation",
+        "label": "自然与生物",
+        "description": "围绕环境、行为、生存原因和意义展开。",
+    },
+    {
+        "value": "human_documentary",
+        "label": "人物纪录",
+        "description": "关注人物处境、行动、阻力和有依据的情绪落点。",
+    },
+    {
+        "value": "cosmic_history",
+        "label": "宇宙与历史",
+        "description": "用悬念、尺度或时间线串联事实与最终余韵。",
+    },
+    {
+        "value": "general_story",
+        "label": "通用故事",
+        "description": "用起因、发展、转折与结果组织难以归类的素材。",
+    },
+)
+
+
+def narrative_strategy_options() -> list[dict[str, str]]:
+    return [dict(item) for item in NARRATIVE_STRATEGIES]
+
+
+def normalize_narrative_strategy(value: object) -> str:
+    requested = str(value or "auto").strip()
+    valid = {item["value"] for item in NARRATIVE_STRATEGIES}
+    return requested if requested in valid else "auto"
+
+
+def narrative_strategy_label(value: object) -> str:
+    normalized = normalize_narrative_strategy(value)
+    return next(
+        item["label"] for item in NARRATIVE_STRATEGIES if item["value"] == normalized
+    )
+
+
+def _resolved_narrative_strategy(
+    result: dict[str, Any], requested_strategy: str
+) -> str:
+    if requested_strategy != "auto":
+        return requested_strategy
+    resolved = normalize_narrative_strategy(result.get("narrative_strategy", "auto"))
+    return "general_story" if resolved in {"auto", "none"} else resolved
+
+
+def _narrative_strategy_prompt(strategy: str) -> str:
+    normalized = normalize_narrative_strategy(strategy)
+    if normalized == "none":
+        return ""
+    if normalized == "auto":
+        return """NARRATIVE STRATEGY
+- First identify the dominant subject and choose exactly one strategy key: science_explainer, engineering_process, nature_observation, human_documentary, cosmic_history, or general_story.
+- science_explainer: open with a concrete phenomenon or useful question, then connect mechanism, evidence, consequence, and conclusion.
+- engineering_process: establish the practical goal, then show operations, resistance, adjustments, turning point, and visible result.
+- nature_observation: connect environment, behavior, survival pressure or function, and grounded significance.
+- human_documentary: connect the person's visible situation, action, resistance, response, and an earned emotional landing without inventing private thoughts.
+- cosmic_history: use a factual mystery, scale contrast, or chronology to connect evidence with a clear final perspective.
+- general_story: use cause, development, turning point, and payoff when no specialist structure clearly fits.
+- Use the strategy as an editorial skeleton, not a rigid template. Return the selected key and a concise Chinese reason."""
+
+    guidance = {
+        "science_explainer": "Build around a concrete phenomenon or useful question, then connect mechanism, evidence, consequence, and conclusion.",
+        "engineering_process": "Build around the practical goal, operations, resistance, adjustments, turning point, and visible result.",
+        "nature_observation": "Build around environment, behavior, survival pressure or function, and grounded significance.",
+        "human_documentary": "Build around the person's visible situation, action, resistance, response, and an earned emotional landing without inventing private thoughts.",
+        "cosmic_history": "Use a factual mystery, scale contrast, or chronology to connect evidence with a clear final perspective.",
+        "general_story": "Use cause, development, turning point, and payoff while keeping the structure natural to the source.",
+    }
+    return f"""NARRATIVE STRATEGY
+- The user selected {normalized}. Do not classify or replace it with another strategy.
+- {guidance[normalized]}
+- Use it as an editorial skeleton, not a rigid template. Return {normalized} as narrative_strategy and briefly explain the choice in Chinese."""
+
+
 def generate_story_script(
     events_json: Path,
     story_json: Path,
@@ -24,6 +123,7 @@ def generate_story_script(
     config: dict[str, Any],
     app_root: Path,
     progress: ProgressCallback,
+    narrative_strategy: str = "auto",
 ) -> dict[str, Any]:
     from openai import OpenAI
 
@@ -85,6 +185,7 @@ def generate_story_script(
     model = str(story_config.get("model", "gpt-4o-mini"))
     editor_model = str(story_config.get("editor_model", "")).strip() or model
     temperature = max(0.0, min(1.2, float(story_config.get("temperature", 0.55))))
+    requested_strategy = normalize_narrative_strategy(narrative_strategy)
     plan: dict[str, Any] = {}
     if content_mode == "visual":
         progress(0.08, f"正在使用 {model} 通读全片并规划故事弧…")
@@ -94,6 +195,7 @@ def generate_story_script(
             minimum_event_coverage,
             maximum_event_coverage,
             outline_target,
+            requested_strategy,
         )
         plan = _chat_json(client, model, plan_prompt, temperature, base_url, "全片故事规划")
         plan = _normalize_visual_plan(plan, events)
@@ -123,6 +225,7 @@ def generate_story_script(
             minimum_event_coverage,
             maximum_event_coverage,
             outline_target,
+            requested_strategy,
         )
         result = _chat_json(client, editor_model, prompt, temperature, base_url, "最终故事编辑")
         normalized = _normalize_story(result, events, target_duration_sec, editor_model)
@@ -136,9 +239,52 @@ def generate_story_script(
             target_duration_sec,
             max_words,
             str(story_config.get("narrative_style", "natural_science_youtube")),
+            requested_strategy,
         )
         result = _chat_json(client, model, prompt, temperature, base_url, "故事生成")
         normalized = _normalize_story(result, events, target_duration_sec, model)
+        if float(normalized.get("estimated_duration_sec", 0)) >= SHORTS_MAX_DURATION_SEC:
+            safe_duration = 174.0
+            for attempt in range(1, 3):
+                draft_duration = max(
+                    1.0, float(normalized.get("estimated_duration_sec", 0) or 0)
+                )
+                draft_words = max(1, int(normalized.get("word_count", 0) or 0))
+                rewrite_max_words = max(
+                    30,
+                    min(
+                        max_words,
+                        int(draft_words * safe_duration / draft_duration * 0.96),
+                    ),
+                )
+                progress(
+                    0.70 + attempt * 0.07,
+                    (
+                        f"初稿预计 {draft_duration:.0f} 秒，正在由 {editor_model} "
+                        f"整篇压缩到 Shorts 安全线内（第 {attempt} 次）…"
+                    ),
+                )
+                rewrite_prompt = _build_speech_rewrite_prompt(
+                    compact_events,
+                    result,
+                    rewrite_max_words,
+                    safe_duration,
+                )
+                result = _chat_json(
+                    client,
+                    editor_model,
+                    rewrite_prompt,
+                    max(0.1, temperature - 0.1),
+                    base_url,
+                    "语音故事超时重编",
+                )
+                normalized = _normalize_story(
+                    result, events, round(safe_duration), editor_model
+                )
+                normalized["editor_model"] = editor_model
+                normalized["workflow"] = "speech_story_editor_v2"
+                if float(normalized.get("estimated_duration_sec", 0)) < SHORTS_MAX_DURATION_SEC:
+                    break
 
     progress(0.68, "正在校验事件覆盖率、故事阶段和解说长度…")
     bound_event_count = len(_narration_event_ids(normalized))
@@ -200,6 +346,20 @@ def generate_story_script(
             "请缩短故事后重试。"
         )
     normalized["content_mode"] = content_mode
+    resolved_strategy = _resolved_narrative_strategy(
+        plan if content_mode == "visual" else result,
+        requested_strategy,
+    )
+    normalized["narrative_strategy_requested"] = requested_strategy
+    normalized["narrative_strategy"] = resolved_strategy
+    normalized["narrative_strategy_label"] = narrative_strategy_label(resolved_strategy)
+    strategy_reason = str(
+        (plan if content_mode == "visual" else result).get(
+            "narrative_strategy_reason_zh", ""
+        )
+    ).strip()
+    if strategy_reason:
+        normalized["narrative_strategy_reason_zh"] = strategy_reason
     story_json.parent.mkdir(parents=True, exist_ok=True)
     story_json.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
     progress(1.0, f"故事组织完成，共 {len(normalized['narration'])} 句解说")
@@ -242,7 +402,9 @@ def _build_visual_plan_prompt(
     minimum_event_coverage: int,
     maximum_event_coverage: int,
     outline_target: int,
+    narrative_strategy: str,
 ) -> str:
+    strategy_guidance = _narrative_strategy_prompt(narrative_strategy)
     return f"""
 You are the senior story producer for a short-form narrated video. Do not write the final narration yet.
 Read the entire chronological event list and discover the strongest truthful story hidden inside it.
@@ -256,6 +418,8 @@ EDITORIAL GOAL
 - Prioritize visible state changes, effort, reactions, tool changes, failed or repeated attempts, before/after contrast, and clear payoff.
 - Select highlights rather than cataloguing the whole process. Routine repetitions may support a stage without becoming their own beat.
 - Combine repetitive events into stages, but preserve the strongest turning points from the beginning, middle, and end.
+
+{strategy_guidance}
 
 GROUNDING
 - Separate observation from interpretation.
@@ -272,6 +436,8 @@ Return exactly one JSON object and no Markdown:
   "premise": "中文说明人物正在完成什么可见任务",
   "central_question": "中文说明观众会关心的具体问题，不必写成问句",
   "emotional_curve": "中文说明从开头到结尾的情绪变化",
+  "narrative_strategy": "science_explainer|engineering_process|nature_observation|human_documentary|cosmic_history|general_story|none",
+  "narrative_strategy_reason_zh": "用一句中文说明为何这种讲法适合本片",
   "highlight_event_ids": [1, 2],
   "outline": [
     {{
@@ -301,7 +467,11 @@ def _build_visual_editor_prompt(
     minimum_event_coverage: int,
     maximum_event_coverage: int,
     outline_target: int,
+    narrative_strategy: str,
 ) -> str:
+    strategy_guidance = _narrative_strategy_prompt(
+        str(plan.get("narrative_strategy", narrative_strategy))
+    )
     return f"""
 You are the final story editor and native English narrator for an immersive observational video.
 Use the producer's plan and the evidence timeline to write the complete final narration.
@@ -321,6 +491,8 @@ STORY SHAPE
 - Establish an immediate goal, develop resistance and adjustments, preserve turning points, and earn the ending from a visible result.
 - Spend words on changes and consequences, not repeated descriptions of similar actions.
 - Select only the strongest actions needed for the arc. Do not narrate every cleaning, checking, opening, or tool-handling step.
+
+{strategy_guidance}
 
 VOICE AND RHYTHM
 - Write in an immersive third-person observational voice with warmth, breath, and human presence.
@@ -348,6 +520,8 @@ OUTPUT
   "title": "English title",
   "angle": "中文说明最终故事角度",
   "hook": "first English narration line",
+  "narrative_strategy": "the strategy key used by the producer",
+  "narrative_strategy_reason_zh": "一句中文选择理由",
   "selected_event_ids": [1, 2],
   "omitted_event_ids": [3],
   "outline": [
@@ -415,7 +589,9 @@ def _build_speech_story_prompt(
     target_duration_sec: int,
     max_words: int,
     requested_style: str,
+    narrative_strategy: str,
 ) -> str:
+    strategy_guidance = _narrative_strategy_prompt(narrative_strategy)
     return f"""
 You are a native English science YouTube writer and editor. Write like a knowledgeable person explaining something interesting to a curious audience.
 Do not sound like a documentary narrator, trailer writer, marketer, lecturer, or essayist.
@@ -425,6 +601,8 @@ TARGET
 - Maximum narration length: {max_words} English words.
 - Requested style profile: {requested_style}.
 - These are ceilings, not targets. Prefer the shortest script that preserves the useful story.
+
+{strategy_guidance}
 
 SOURCE AND FACTS
 - Treat the transcript as the main factual source and use visual descriptions to clarify actions, objects, setting, and shot selection.
@@ -444,11 +622,45 @@ Return exactly one JSON object and no Markdown:
   "title": "English title",
   "angle": "中文说明故事切入角度",
   "hook": "Natural English opening line",
+  "narrative_strategy": "science_explainer|engineering_process|nature_observation|human_documentary|cosmic_history|general_story|none",
+  "narrative_strategy_reason_zh": "用一句中文说明为何这种讲法适合本片",
   "selected_event_ids": [1, 2],
   "omitted_event_ids": [3],
   "outline": [{{"order": 1, "event_ids": [1], "purpose": "hook", "summary": "中文段落摘要"}}],
   "narration": [{{"id": 1, "event_ids": [1], "text_en": "English narration.", "visual_query": "需要的画面", "estimated_duration_sec": 3.2}}]
 }}
+
+SOURCE EVENTS:
+{json.dumps(events, ensure_ascii=False)}
+""".strip()
+
+
+def _build_speech_rewrite_prompt(
+    events: list[dict[str, Any]],
+    draft: dict[str, Any],
+    max_words: int,
+    safe_duration_sec: float,
+) -> str:
+    return f"""
+You are the final native-English editor for a science YouTube Shorts script.
+The rejected draft is too long. Replace the WHOLE script with a coherent shorter version; do not append notes and do not merely cut off the ending.
+
+NON-NEGOTIABLE DELIVERY RULES
+- The complete narration must be at most {max_words} English words.
+- Aim for no more than about {safe_duration_sec:.0f} seconds so real TTS pauses still remain below the 179-second Shorts limit.
+- Count every narration word before returning. Exceeding the word ceiling is a failure.
+- Preserve the opening reason to keep watching, the most useful mechanisms or causal explanations, the strongest supported examples, and a complete ending.
+- Remove repetition, secondary examples, excessive setup, filler transitions, and explanations that do not change understanding.
+- Merge adjacent ideas where one sentence can carry both. Never solve length by deleting only the ending.
+- Treat transcript and visible evidence as factual boundaries. Never invent claims, numbers, causes, results, labels, or unseen actions.
+- Write concise natural spoken English, not literal translation, trailer language, or generic AI prose.
+- Avoid isolated connectors and short comma fragments because every comma may become a GPT-SoVITS boundary.
+- Keep valid event_ids on every narration beat and provide a concise Chinese visual_query.
+
+Return exactly one complete JSON object in the same schema as the rejected draft, with title, angle, hook, selected_event_ids, omitted_event_ids, outline, and narration. Return no Markdown.
+
+REJECTED OVERLONG DRAFT:
+{json.dumps(draft, ensure_ascii=False)}
 
 SOURCE EVENTS:
 {json.dumps(events, ensure_ascii=False)}
@@ -494,6 +706,12 @@ def _normalize_visual_plan(
         "premise": str(result.get("premise", "")).strip(),
         "central_question": str(result.get("central_question", "")).strip(),
         "emotional_curve": str(result.get("emotional_curve", "")).strip(),
+        "narrative_strategy": normalize_narrative_strategy(
+            result.get("narrative_strategy", "auto")
+        ),
+        "narrative_strategy_reason_zh": str(
+            result.get("narrative_strategy_reason_zh", "")
+        ).strip(),
         "highlight_event_ids": highlights,
         "outline": outline,
     }
@@ -590,7 +808,10 @@ def _normalize_story(
 
 def refresh_story_timing(story: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Upgrade stories saved with the old, overly-fast per-line estimates locally."""
-    if not story or story.get("timing_model") == "english_word_syllable_v3":
+    if not story or story.get("timing_model") in {
+        "english_word_syllable_v3",
+        "measured_voice_projection_v1",
+    }:
         return story, False
 
     refreshed_items: list[dict[str, Any]] = []

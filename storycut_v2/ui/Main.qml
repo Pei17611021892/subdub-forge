@@ -20,7 +20,7 @@ ApplicationWindow {
     property color textMain: "#f4f4f5"
     property color textMuted: "#9ca3af"
     property int currentStep: 0
-    property int storyTargetDuration: 60
+    property int storyTargetDuration: 180
     property bool understandingDone: appController.events.length > 0
     property bool storyDone: appController.storyNarration.length > 0
     property bool matchingDone: appController.matches.length > 0
@@ -93,6 +93,36 @@ ApplicationWindow {
             duration: 850
             loops: Animation.Infinite
             running: loadingRing.running && loadingRing.visible
+        }
+    }
+
+    component ProcessingDots: Row {
+        id: processingDots
+        spacing: 2
+        Repeater {
+            model: 3
+            delegate: Item {
+                required property int index
+                width: 6
+                height: 14
+                Rectangle {
+                    id: movingDot
+                    x: 1
+                    y: 6
+                    width: 4
+                    height: 4
+                    radius: 2
+                    color: accentLight
+                    SequentialAnimation on y {
+                        running: processingDots.visible
+                        loops: Animation.Infinite
+                        PauseAnimation { duration: movingDot.parent.index * 120 }
+                        NumberAnimation { from: 6; to: 1; duration: 180; easing.type: Easing.OutQuad }
+                        NumberAnimation { from: 1; to: 6; duration: 220; easing.type: Easing.InQuad }
+                        PauseAnimation { duration: 360 - movingDot.parent.index * 60 }
+                    }
+                }
+            }
         }
     }
 
@@ -350,10 +380,13 @@ ApplicationWindow {
             interval: 60
             repeat: false
             onTriggered: {
-                appController.openProject(recentProjectsDialog.openingProjectUrl)
-                recentProjectsDialog.openingProject = false
-                recentProjectsDialog.openingProjectUrl = ""
-                recentProjectsDialog.close()
+                try {
+                    appController.openProject(recentProjectsDialog.openingProjectUrl)
+                } finally {
+                    recentProjectsDialog.openingProject = false
+                    recentProjectsDialog.openingProjectUrl = ""
+                    recentProjectsDialog.close()
+                }
             }
         }
 
@@ -672,6 +705,307 @@ ApplicationWindow {
         defaultSuffix: "srt"
         nameFilters: ["SRT 字幕 (*.srt)"]
         onAccepted: appController.saveTtsSrt(selectedFile.toString())
+    }
+
+    Dialog {
+        id: durationRevisionDialog
+        width: Math.min(window.width - 70, 980)
+        height: Math.min(window.height - 60, 720)
+        anchors.centerIn: parent
+        modal: true
+        padding: 0
+        closePolicy: appController.durationRevisionBusy ? Popup.NoAutoClose : Popup.CloseOnEscape
+
+        background: Rectangle {
+            radius: 18
+            color: "#12141b"
+            border.color: "#4b3a68"
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 24
+            spacing: 14
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                Rectangle {
+                    Layout.preferredWidth: 44
+                    Layout.preferredHeight: 44
+                    radius: 13
+                    color: "#302348"
+                    Text { anchors.centerIn: parent; text: "✂"; color: accentLight; font.pixelSize: 20; font.bold: true }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 3
+                    Text { text: "真实配音超时 · AI 精简方案"; color: textMain; font.pixelSize: 20; font.bold: true }
+                    Text {
+                        Layout.fillWidth: true
+                        text: appController.durationRevisionStatus
+                        color: textMuted
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+                }
+                GhostButton {
+                    text: "关闭"
+                    enabled: !appController.durationRevisionBusy
+                    onClicked: durationRevisionDialog.close()
+                }
+            }
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2b2f39" }
+
+            Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                visible: appController.durationRevisionBusy
+                LoadingRing {
+                    width: 54
+                    height: 54
+                    anchors.centerIn: parent
+                }
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.top: parent.verticalCenter
+                    anchors.topMargin: 42
+                    text: "正在保留主线、精彩镜头和完整结尾…"
+                    color: textMuted
+                    font.pixelSize: 11
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                visible: !appController.durationRevisionBusy && appController.durationRevisionReady
+                spacing: 12
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 58
+                    radius: 10
+                    color: "#1a1d25"
+                    border.color: "#303541"
+                    Text {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        text: appController.durationRevisionSummary
+                        color: "#d6d8df"
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 12
+                    Repeater {
+                        model: [
+                            { title: "当前故事", stats: appController.durationRevisionBeforeStats, body: appController.durationRevisionBeforeText, tone: "#f1b86b" },
+                            { title: "精简后", stats: appController.durationRevisionAfterStats, body: appController.durationRevisionAfterText, tone: "#8ee3b4" }
+                        ]
+                        delegate: Rectangle {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            radius: 12
+                            color: "#171920"
+                            border.color: "#303541"
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 14
+                                spacing: 8
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Text { text: modelData.title; color: modelData.tone; font.pixelSize: 14; font.bold: true }
+                                    Item { Layout.fillWidth: true }
+                                    Text { text: modelData.stats; color: textMuted; font.pixelSize: 10 }
+                                }
+                                ScrollView {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    clip: true
+                                    TextArea {
+                                        text: modelData.body
+                                        readOnly: true
+                                        selectByMouse: true
+                                        wrapMode: TextEdit.Wrap
+                                        color: "#d9dce4"
+                                        font.pixelSize: 11
+                                        background: Rectangle { color: "#101116"; radius: 8 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    visible: appController.durationRevisionChanges.length > 0
+                    text: "主要调整：" + appController.durationRevisionChanges.join("；")
+                    color: textMuted
+                    font.pixelSize: 10
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                        Layout.fillWidth: true
+                        text: "应用后会自动重匹配镜头；应用前的故事、镜头、配音、SRT 和项目设置会完整归档，可一键恢复。"
+                        color: "#aeb4c2"
+                        font.pixelSize: 10
+                        wrapMode: Text.WordWrap
+                    }
+                    GhostButton { text: "暂不应用"; onClicked: durationRevisionDialog.close() }
+                    FlatButton {
+                        text: "应用新稿并重新匹配"
+                        onClicked: {
+                            appController.applyNarrationDurationRevision()
+                            durationRevisionDialog.close()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: restoreRevisionDialog
+        objectName: "restoreRevisionDialog"
+        width: Math.min(window.width - 70, 980)
+        height: Math.min(window.height - 60, 700)
+        anchors.centerIn: parent
+        modal: true
+        padding: 0
+        closePolicy: Popup.CloseOnEscape
+        background: Rectangle {
+            radius: 16
+            color: "#14161d"
+            border.color: "#4b4260"
+        }
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 22
+            spacing: 14
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                Rectangle {
+                    Layout.preferredWidth: 44
+                    Layout.preferredHeight: 44
+                    radius: 13
+                    color: "#302348"
+                    Text { anchors.centerIn: parent; text: "↶"; color: accentLight; font.pixelSize: 22; font.bold: true }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 3
+                    Text { text: "版本对比与恢复"; color: textMain; font.pixelSize: 20; font.bold: true }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "右侧是即将恢复的版本。确认前不会修改当前项目。"
+                        color: textMuted
+                        font.pixelSize: 11
+                    }
+                }
+                GhostButton { text: "关闭"; onClicked: restoreRevisionDialog.close() }
+            }
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2b2f39" }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 12
+                Repeater {
+                    model: [
+                        {
+                            title: "当前版本",
+                            stats: appController.durationRevisionRestoreCurrentStats,
+                            body: appController.durationRevisionRestoreCurrentText,
+                            tone: "#8ee3b4",
+                            badge: "正在使用"
+                        },
+                        {
+                            title: "将恢复的版本",
+                            stats: appController.durationRevisionRestoreArchivedStats,
+                            body: appController.durationRevisionRestoreArchivedText,
+                            tone: "#f1b86b",
+                            badge: "归档版本"
+                        }
+                    ]
+                    delegate: Rectangle {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        radius: 12
+                        color: "#171920"
+                        border.color: "#303541"
+                        ColumnLayout {
+                            anchors.fill: parent
+                            anchors.margins: 14
+                            spacing: 8
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Text { text: modelData.title; color: modelData.tone; font.pixelSize: 14; font.bold: true }
+                                Rectangle {
+                                    Layout.preferredWidth: 58
+                                    Layout.preferredHeight: 22
+                                    radius: 7
+                                    color: "#242731"
+                                    Text { anchors.centerIn: parent; text: modelData.badge; color: modelData.tone; font.pixelSize: 9 }
+                                }
+                                Item { Layout.fillWidth: true }
+                                Text { text: modelData.stats; color: textMuted; font.pixelSize: 10 }
+                            }
+                            ScrollView {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                clip: true
+                                TextArea {
+                                    text: modelData.body
+                                    readOnly: true
+                                    selectByMouse: true
+                                    wrapMode: TextEdit.Wrap
+                                    color: "#d9dce4"
+                                    font.pixelSize: 11
+                                    background: Rectangle { color: "#101116"; radius: 8 }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 58
+                radius: 10
+                color: "#1a1d25"
+                border.color: "#303541"
+                Text {
+                    anchors.fill: parent
+                    anchors.margins: 11
+                    text: "恢复范围：故事、镜头匹配、粗剪时间线、英文配音、同步 SRT 和项目设置。当前版本会先另行归档，恢复后仍可撤回。  " + appController.durationRevisionArchiveText
+                    color: "#aeb4c2"
+                    font.pixelSize: 10
+                    wrapMode: Text.WordWrap
+                    verticalAlignment: Text.AlignVCenter
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                GhostButton { text: "保留当前版本"; onClicked: restoreRevisionDialog.close() }
+                FlatButton {
+                    text: "确认恢复右侧版本"
+                    onClicked: {
+                        restoreRevisionDialog.close()
+                        appController.restoreDurationRevisionArchive()
+                    }
+                }
+            }
+        }
     }
 
     Dialog {
@@ -1412,6 +1746,10 @@ ApplicationWindow {
         function onQualityDialogRequested() {
             if (!qualityCheckDialog.opened)
                 qualityCheckDialog.open()
+        }
+        function onDurationRevisionDialogRequested() {
+            if (!durationRevisionDialog.opened)
+                durationRevisionDialog.open()
         }
     }
 
@@ -2497,16 +2835,18 @@ ApplicationWindow {
                                     Layout.fillWidth: true
                                     Text { text: appController.analysisElapsedText; color: textMuted; font.pixelSize: 11 }
                                     Text { text: "·"; color: "#575b66"; font.pixelSize: 11 }
-                                    Text { text: appController.analysisEstimatedTotalText; color: textMuted; font.pixelSize: 11 }
-                                    Text { text: "·"; color: "#575b66"; font.pixelSize: 11 }
-                                    Text { text: appController.analysisEtaText; color: accentLight; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 3
+                                        Text { text: appController.analysisEtaText; color: accentLight; font.pixelSize: 11 }
+                                        ProcessingDots {
+                                            visible: appController.analysisBusy && !appController.analysisEtaReliable
+                                            Layout.preferredWidth: 22
+                                            Layout.preferredHeight: 14
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                    }
                                     Text { text: Math.round(appController.analysisProgress * 100) + "%"; color: understandingDone ? "#8ee3b4" : accentLight; font.pixelSize: 12; font.bold: true }
-                                }
-                                Text {
-                                    visible: appController.analysisBusy
-                                    text: "预计用时按低配电脑 CPU 算力估算，准确时间请以实际运行进度为准。"
-                                    color: "#717784"
-                                    font.pixelSize: 10
                                 }
                                 Text {
                                     Layout.fillWidth: true
@@ -2653,6 +2993,113 @@ ApplicationWindow {
                                     color: "#737986"
                                     font.pixelSize: 10
                                     Layout.fillWidth: true
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: storySection.expanded
+                                spacing: 10
+                                enabled: understandingDone && !appController.storyBusy
+                                opacity: enabled ? 1 : 0.45
+
+                                Text {
+                                    text: "叙事策略"
+                                    color: textMuted
+                                    font.pixelSize: 11
+                                    Layout.rightMargin: 4
+                                }
+                                ComboBox {
+                                    id: narrativeStrategyCombo
+                                    objectName: "narrativeStrategyCombo"
+                                    Layout.preferredWidth: 190
+                                    Layout.preferredHeight: 34
+                                    model: appController.narrativeStrategyOptions
+                                    textRole: "label"
+                                    valueRole: "value"
+
+                                    function syncSelection() {
+                                        for (let i = 0; i < model.length; ++i) {
+                                            if (String(model[i].value) === appController.narrativeStrategy) {
+                                                currentIndex = i
+                                                return
+                                            }
+                                        }
+                                        currentIndex = 0
+                                    }
+
+                                    Component.onCompleted: syncSelection()
+                                    onActivated: {
+                                        if (currentIndex >= 0)
+                                            appController.setNarrativeStrategy(String(model[currentIndex].value))
+                                    }
+                                    Connections {
+                                        target: appController
+                                        function onStoryChanged() { narrativeStrategyCombo.syncSelection() }
+                                    }
+                                    contentItem: Text {
+                                        leftPadding: 11
+                                        rightPadding: 30
+                                        text: narrativeStrategyCombo.displayText
+                                        color: textMain
+                                        font.pixelSize: 11
+                                        verticalAlignment: Text.AlignVCenter
+                                        elide: Text.ElideRight
+                                    }
+                                    indicator: Text {
+                                        x: narrativeStrategyCombo.width - width - 11
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: narrativeStrategyCombo.popup.visible ? "▴" : "▾"
+                                        color: accentLight
+                                        font.pixelSize: 11
+                                    }
+                                    background: Rectangle {
+                                        radius: 8
+                                        color: narrativeStrategyCombo.hovered ? "#252936" : "#1d2029"
+                                        border.color: narrativeStrategyCombo.activeFocus ? accent : "#383c48"
+                                    }
+                                    delegate: ItemDelegate {
+                                        required property var modelData
+                                        required property int index
+                                        width: narrativeStrategyCombo.width
+                                        height: 38
+                                        highlighted: narrativeStrategyCombo.highlightedIndex === index
+                                        contentItem: Text {
+                                            text: modelData.label
+                                            color: highlighted ? "white" : "#d3d6df"
+                                            font.pixelSize: 11
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+                                        background: Rectangle {
+                                            color: highlighted ? "#553494" : "transparent"
+                                        }
+                                    }
+                                    popup: Popup {
+                                        y: narrativeStrategyCombo.height + 4
+                                        width: narrativeStrategyCombo.width
+                                        implicitHeight: Math.min(contentItem.implicitHeight + 8, 330)
+                                        padding: 4
+                                        contentItem: ListView {
+                                            clip: true
+                                            implicitHeight: contentHeight
+                                            model: narrativeStrategyCombo.popup.visible
+                                                   ? narrativeStrategyCombo.delegateModel : null
+                                            currentIndex: narrativeStrategyCombo.highlightedIndex
+                                            ScrollIndicator.vertical: ScrollIndicator { }
+                                        }
+                                        background: Rectangle {
+                                            radius: 9
+                                            color: "#1a1d25"
+                                            border.color: "#3b4050"
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: appController.narrativeStrategyHint
+                                    color: "#858b99"
+                                    font.pixelSize: 10
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.WordWrap
                                 }
                             }
 
@@ -3162,15 +3609,29 @@ ApplicationWindow {
                                 }
                                 FlatButton {
                                     visible: appController.narrationOverShortsLimit
-                                    text: appController.voiceBusy ? "正在处理…" : (appController.canAutoFitNarration ? "自动适配至 3 分钟" : "需要删减文案")
-                                    enabled: appController.canAutoFitNarration && !appController.voiceBusy
-                                    onClicked: appController.autoFitNarrationToShorts()
+                                    text: appController.voiceBusy || appController.durationRevisionBusy
+                                          ? "正在处理…"
+                                          : (appController.canAutoFitNarration ? "自动适配至 3 分钟" : "AI 精简到 3 分钟")
+                                    enabled: !appController.voiceBusy && !appController.durationRevisionBusy
+                                             && (appController.canAutoFitNarration || appController.canReviseNarrationDuration)
+                                    onClicked: {
+                                        if (appController.canAutoFitNarration)
+                                            appController.autoFitNarrationToShorts()
+                                        else
+                                            appController.proposeNarrationDurationRevision()
+                                    }
                                 }
                                 GhostButton {
                                     visible: appController.narrationSpeed > 1.001
                                     text: "恢复原速"
                                     enabled: !appController.voiceBusy
                                     onClicked: appController.restoreNarrationSpeed()
+                                }
+                                GhostButton {
+                                    visible: appController.canRestoreDurationRevision
+                                    text: "恢复精简前版本"
+                                    enabled: !appController.voiceBusy && !appController.durationRevisionBusy
+                                    onClicked: restoreRevisionDialog.open()
                                 }
                             }
                             RowLayout {

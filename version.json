@@ -1,7 +1,7 @@
 {
   "name": "StoryCut",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "StoryCut 新增技术画面理解和可选事实审查，优化最近项目恢复，并为后台成片检查加入彩色状态结果和更准确的镜头复用提示。"
+  "notes": "StoryCut 新增真实配音超时智能修正、精简前后版本对比恢复，以及默认自动、可手动或关闭的题材叙事策略。"
 }

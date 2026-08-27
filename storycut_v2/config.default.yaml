@@ -14,6 +14,7 @@ shared:
 story:
   output_language: en
   target_duration_sec: 90
+  narrative_strategy: auto
   narrative_style: natural_science_youtube
   model: gpt-4o-mini
   editor_model: ''

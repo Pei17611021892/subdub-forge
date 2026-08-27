@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "version": "0.2.2",
+  "version": "0.2.3",
   "files": [
     "README.md",
     "config.default.yaml",
@@ -10,6 +10,7 @@
     "src/analysis_service.py",
     "src/app_controller.py",
     "src/config_manager.py",
+    "src/duration_revision_service.py",
     "src/export_service.py",
     "src/fact_review_service.py",
     "src/matching_service.py",
@@ -20,6 +21,7 @@
     "src/vision_service.py",
     "src/voice_service.py",
     "tests/test_app_controller.py",
+    "tests/test_duration_revision_service.py",
     "tests/test_export_service.py",
     "tests/test_fact_review_service.py",
     "tests/test_quality_service.py",
