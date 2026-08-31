@@ -2502,6 +2502,7 @@ ApplicationWindow {
 
             ScrollView {
                 id: mainScroll
+                objectName: "mainScroll"
                 anchors.fill: parent
                 contentWidth: availableWidth
                 contentHeight: mainContent.implicitHeight + mainContent.y + 30
@@ -2944,7 +2945,7 @@ ApplicationWindow {
                                 }
                                 FlatButton {
                                     text: appController.storyBusy ? "正在组织故事…" : storyDone ? "重新生成故事" : understandingDone ? "生成故事与英文解说  →" : "等待理解原片"
-                                    enabled: understandingDone && !appController.storyBusy && !appController.factReviewBusy
+                                    enabled: understandingDone && !appController.storyBusy && !appController.factReviewBusy && !appController.terminologyReviewBusy
                                     onClicked: {
                                         if (appController.refreshApiConfiguration()) {
                                             appController.generateStory(storyTargetDuration)
@@ -3132,17 +3133,183 @@ ApplicationWindow {
                             Rectangle {
                                 Layout.fillWidth: true
                                 visible: storySection.expanded && storyDone
-                                Layout.preferredHeight: visible ? factReviewContent.implicitHeight + 26 : 0
+                                Layout.preferredHeight: visible ? combinedReviewContent.implicitHeight + 26 : 0
                                 radius: 12
                                 color: "#15171e"
                                 border.color: appController.factReviewStatus.indexOf("高风险") >= 0 ? "#7f3d46" : "#303440"
+
+                                ColumnLayout {
+                                    id: combinedReviewContent
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: 13
+                                    spacing: 10
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 10
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 3
+                                            Text { text: "可选 · 文案审查"; color: textMain; font.pixelSize: 14; font.bold: true }
+                                            Text {
+                                                text: appController.contentReviewStatus
+                                                color: appController.contentReviewIssues.length > 0 ? "#f1c978" : textMuted
+                                                font.pixelSize: 11
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WordWrap
+                                            }
+                                        }
+                                        GhostButton {
+                                            visible: appController.contentReviewIssues.length > 1
+                                            text: "应用全部建议"
+                                            enabled: !appController.contentReviewBusy && !appController.storyBusy
+                                            onClicked: appController.applyAllContentReviewSuggestions()
+                                        }
+                                        GhostButton {
+                                            text: appController.contentReviewBusy ? "正在综合审查…" : "开始文案审查"
+                                            enabled: !appController.contentReviewBusy && !appController.storyBusy
+                                            onClicked: appController.runFactReview()
+                                        }
+                                    }
+
+                                    ProgressBar {
+                                        Layout.fillWidth: true
+                                        visible: appController.contentReviewBusy
+                                        indeterminate: true
+                                    }
+
+                                    Text {
+                                        visible: appController.contentReviewSummary !== ""
+                                        text: appController.contentReviewSummary
+                                        color: textMain
+                                        font.pixelSize: 11
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    Text {
+                                        visible: appController.contentReviewBreakdown !== ""
+                                        text: appController.contentReviewBreakdown
+                                        color: "#9fc5a8"
+                                        font.pixelSize: 10
+                                        font.bold: true
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    Flow {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        visible: appController.contentReviewCanonicalTerms.length > 0
+                                        Repeater {
+                                            model: appController.contentReviewCanonicalTerms
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                width: unifiedCanonicalText.implicitWidth + 18
+                                                height: 26
+                                                radius: 7
+                                                color: "#202735"
+                                                border.color: "#3b4c68"
+                                                Text {
+                                                    id: unifiedCanonicalText
+                                                    anchors.centerIn: parent
+                                                    text: (modelData.source_term ? modelData.source_term + " → " : "") + modelData.preferred_en
+                                                    color: "#b9d4ff"
+                                                    font.pixelSize: 9
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Repeater {
+                                        model: appController.contentReviewIssues
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 116
+                                            radius: 9
+                                            color: modelData.reviewType === "fact" && modelData.severity === "high" ? "#28191d"
+                                                   : modelData.reviewType === "terminology" ? "#211e18" : "#1c1e26"
+                                            border.color: modelData.reviewType === "fact" && modelData.severity === "high" ? "#7f3d46"
+                                                          : modelData.reviewType === "terminology" ? "#655431" : "#343843"
+                                            ColumnLayout {
+                                                anchors.fill: parent
+                                                anchors.margins: 10
+                                                spacing: 4
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    Rectangle {
+                                                        Layout.preferredWidth: unifiedTypeText.implicitWidth + 14
+                                                        Layout.preferredHeight: 22
+                                                        radius: 6
+                                                        color: modelData.reviewType === "fact" ? "#2b2145" : "#3a301e"
+                                                        Text {
+                                                            id: unifiedTypeText
+                                                            anchors.centerIn: parent
+                                                            text: modelData.reviewTypeText
+                                                            color: modelData.reviewType === "fact" ? accentLight : "#f1c978"
+                                                            font.pixelSize: 9
+                                                            font.bold: true
+                                                        }
+                                                    }
+                                                    Text { text: modelData.titleText; color: textMain; font.pixelSize: 10; font.bold: true }
+                                                    Text { text: "解说句 " + modelData.narrationText; color: textMuted; font.pixelSize: 9 }
+                                                    Item { Layout.fillWidth: true }
+                                                    Button {
+                                                        text: "应用建议"
+                                                        implicitWidth: 72
+                                                        implicitHeight: 25
+                                                        contentItem: Text {
+                                                            text: parent.text
+                                                            color: "#b8f3cf"
+                                                            font.pixelSize: 9
+                                                            horizontalAlignment: Text.AlignHCenter
+                                                            verticalAlignment: Text.AlignVCenter
+                                                        }
+                                                        background: Rectangle {
+                                                            radius: 6
+                                                            color: parent.hovered ? "#224633" : "#183729"
+                                                            border.color: "#347456"
+                                                        }
+                                                        onClicked: {
+                                                            if (modelData.reviewType === "fact")
+                                                                appController.applyFactReviewSuggestion(modelData.id)
+                                                            else
+                                                                appController.applyTerminologySuggestion(modelData.id)
+                                                        }
+                                                    }
+                                                }
+                                                Text { visible: modelData.subjectText !== ""; text: modelData.subjectText; color: modelData.reviewType === "terminology" ? "#d8c18f" : textMain; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                Text { text: modelData.reason_zh; color: "#b8bdc9"; font.pixelSize: 10; Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+                                                Text { text: "建议：" + modelData.suggestion_en; color: "#8ee3b4"; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: appController.contentReviewDisclaimer
+                                        color: "#737986"
+                                        font.pixelSize: 9
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                            Rectangle {
+                                visible: false
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: factReviewContent.implicitHeight + 22
+                                radius: 10
+                                color: "#181b22"
+                                border.color: "#303440"
 
                                 ColumnLayout {
                                     id: factReviewContent
                                     anchors.left: parent.left
                                     anchors.right: parent.right
                                     anchors.top: parent.top
-                                    anchors.margins: 13
+                                    anchors.margins: 11
                                     spacing: 9
 
                                     RowLayout {
@@ -3151,7 +3318,7 @@ ApplicationWindow {
                                         ColumnLayout {
                                             Layout.fillWidth: true
                                             spacing: 3
-                                            Text { text: "可选 · 科普事实审查"; color: textMain; font.pixelSize: 14; font.bold: true }
+                                            Text { text: "可选 · 文案审查"; color: textMain; font.pixelSize: 14; font.bold: true }
                                             Text {
                                                 text: appController.factReviewStatus
                                                 color: appController.factReviewStatus.indexOf("高风险") >= 0 ? "#ff9ba6" : textMuted
@@ -3160,15 +3327,9 @@ ApplicationWindow {
                                                 wrapMode: Text.WordWrap
                                             }
                                         }
-                                        Text { text: "生成后自动审查"; color: textMuted; font.pixelSize: 10 }
-                                        Switch {
-                                            checked: appController.factReviewAuto
-                                            enabled: !appController.storyBusy && !appController.factReviewBusy
-                                            onToggled: appController.setFactReviewAuto(checked)
-                                        }
                                         GhostButton {
-                                            text: appController.factReviewBusy ? "正在审查…" : "检查当前文案"
-                                            enabled: !appController.factReviewBusy && !appController.storyBusy
+                                            text: appController.factReviewBusy ? "正在综合审查…" : "开始文案审查"
+                                            enabled: !appController.factReviewBusy && !appController.terminologyReviewBusy && !appController.storyBusy
                                             onClicked: appController.runFactReview()
                                         }
                                     }
@@ -3234,6 +3395,140 @@ ApplicationWindow {
                                         Layout.fillWidth: true
                                         wrapMode: Text.WordWrap
                                     }
+                                }
+                            }
+
+                            Rectangle {
+                                visible: false
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: terminologyReviewContent.implicitHeight + 22
+                                radius: 10
+                                color: "#181b22"
+                                border.color: appController.terminologyReviewIssues.length > 0 ? "#6b5831" : "#303440"
+
+                                ColumnLayout {
+                                    id: terminologyReviewContent
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: 13
+                                    spacing: 9
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 10
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 3
+                                            Text { text: "术语、名称与单位"; color: textMain; font.pixelSize: 13; font.bold: true }
+                                            Text {
+                                                text: appController.terminologyReviewStatus
+                                                color: appController.terminologyReviewIssues.length > 0 ? "#f1c978" : textMuted
+                                                font.pixelSize: 11
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WordWrap
+                                            }
+                                        }
+                                        GhostButton {
+                                            visible: appController.terminologyReviewIssues.length > 1
+                                            text: "应用全部建议"
+                                            enabled: !appController.terminologyReviewBusy && !appController.storyBusy
+                                            onClicked: appController.applyAllTerminologySuggestions()
+                                        }
+                                    }
+
+                                    ProgressBar {
+                                        Layout.fillWidth: true
+                                        visible: appController.terminologyReviewBusy
+                                        indeterminate: true
+                                    }
+
+                                    Text {
+                                        visible: appController.terminologyReviewSummary !== ""
+                                        text: appController.terminologyReviewSummary
+                                        color: textMain
+                                        font.pixelSize: 11
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    Flow {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        visible: appController.terminologyCanonicalTerms.length > 0
+                                        Repeater {
+                                            model: appController.terminologyCanonicalTerms
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                width: canonicalTermText.implicitWidth + 18
+                                                height: 26
+                                                radius: 7
+                                                color: "#202735"
+                                                border.color: "#3b4c68"
+                                                Text {
+                                                    id: canonicalTermText
+                                                    anchors.centerIn: parent
+                                                    text: (modelData.source_term ? modelData.source_term + " → " : "") + modelData.preferred_en
+                                                    color: "#b9d4ff"
+                                                    font.pixelSize: 9
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Repeater {
+                                        model: appController.terminologyReviewIssues
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 112
+                                            radius: 9
+                                            color: "#211e18"
+                                            border.color: "#655431"
+                                            ColumnLayout {
+                                                anchors.fill: parent
+                                                anchors.margins: 10
+                                                spacing: 4
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    Text { text: modelData.categoryText + (modelData.term ? " · " + modelData.term : ""); color: "#f1c978"; font.pixelSize: 10; font.bold: true }
+                                                    Text { text: "解说句 " + modelData.narrationText; color: textMuted; font.pixelSize: 9 }
+                                                    Item { Layout.fillWidth: true }
+                                                    Button {
+                                                        text: "应用建议"
+                                                        implicitWidth: 72
+                                                        implicitHeight: 25
+                                                        contentItem: Text {
+                                                            text: parent.text
+                                                            color: "#b8f3cf"
+                                                            font.pixelSize: 9
+                                                            horizontalAlignment: Text.AlignHCenter
+                                                            verticalAlignment: Text.AlignVCenter
+                                                        }
+                                                        background: Rectangle {
+                                                            radius: 6
+                                                            color: parent.hovered ? "#224633" : "#183729"
+                                                            border.color: "#347456"
+                                                        }
+                                                        onClicked: appController.applyTerminologySuggestion(modelData.id)
+                                                    }
+                                                }
+                                                Text { visible: modelData.variantsText !== ""; text: "发现：" + modelData.variantsText; color: "#d8c18f"; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                Text { text: modelData.reason_zh; color: "#b8bdc9"; font.pixelSize: 10; Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+                                                Text { text: "建议：" + modelData.suggestion_en; color: "#8ee3b4"; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: appController.terminologyReviewDisclaimer
+                                        color: "#737986"
+                                        font.pixelSize: 9
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                    }
+                                }
+                            }
                                 }
                             }
 

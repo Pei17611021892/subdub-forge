@@ -30,10 +30,11 @@ from .story_service import (
     narrative_strategy_label,
     narrative_strategy_options,
     normalize_narrative_strategy,
+    normalize_story_after_text_edit,
     refresh_story_timing,
 )
 from .duration_revision_service import propose_duration_revision
-from .fact_review_service import review_story_facts
+from .content_review_service import review_story_content
 from .matching_service import (
     apply_voice_timing,
     adjust_shot_boundary,
@@ -44,6 +45,7 @@ from .matching_service import (
 from .export_service import render_rough_preview
 from .quality_service import (
     combine_quality_reports,
+    inspect_media_content,
     inspect_project_for_export,
     inspect_rendered_video,
 )
@@ -57,6 +59,8 @@ from .voice_service import (
     probe_audio_duration,
     recommended_shorts_speed,
     scale_srt_timeline,
+    split_gpt_sovits_units,
+    estimate_tts_unit_duration,
 )
 from .update_manager import check_for_update, download_and_apply, read_version
 
@@ -71,6 +75,7 @@ class AppController(QObject):
     eventsChanged = Signal()
     storyChanged = Signal()
     factReviewChanged = Signal()
+    terminologyReviewChanged = Signal()
     matchingChanged = Signal()
     exportChanged = Signal()
     voiceChanged = Signal()
@@ -161,6 +166,11 @@ class AppController(QObject):
         self._fact_review_auto = bool(
             self._config.get("fact_review", {}).get("auto_after_story", False)
         )
+        self._terminology_review_job_id = 0
+        self._terminology_review_busy = False
+        self._terminology_review_status = "可选功能，尚未检查术语一致性"
+        self._terminology_review: dict[str, object] = {}
+        self._terminology_review_issues: list[dict[str, object]] = []
         self._matching_busy = False
         self._matching_status = "等待匹配镜头"
         self._matches: list[dict[str, object]] = []
@@ -191,9 +201,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.2.3"))
+            self._app_version = str(read_version().get("version", "0.2.4"))
         except Exception:
-            self._app_version = "0.2.3"
+            self._app_version = "0.2.4"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -452,6 +462,120 @@ class AppController(QObject):
     @Property("QVariantList", notify=factReviewChanged)
     def factReviewIssues(self) -> list[dict[str, object]]:
         return self._fact_review_issues
+
+    @Property(bool, notify=terminologyReviewChanged)
+    def terminologyReviewBusy(self) -> bool:
+        return self._terminology_review_busy
+
+    @Property(str, notify=terminologyReviewChanged)
+    def terminologyReviewStatus(self) -> str:
+        return self._terminology_review_status
+
+    @Property(str, notify=terminologyReviewChanged)
+    def terminologyReviewSummary(self) -> str:
+        return str(self._terminology_review.get("summary_zh", ""))
+
+    @Property(str, notify=terminologyReviewChanged)
+    def terminologyReviewDisclaimer(self) -> str:
+        return str(
+            self._terminology_review.get(
+                "disclaimer",
+                "只检查文案中的术语、单位、名称和数字一致性；具体发音由配音工具处理。",
+            )
+        )
+
+    @Property("QVariantList", notify=terminologyReviewChanged)
+    def terminologyReviewIssues(self) -> list[dict[str, object]]:
+        return self._terminology_review_issues
+
+    @Property("QVariantList", notify=terminologyReviewChanged)
+    def terminologyCanonicalTerms(self) -> list[dict[str, object]]:
+        return [
+            dict(item)
+            for item in self._terminology_review.get("canonical_terms", [])
+            if isinstance(item, dict)
+        ]
+
+    @Property(bool, notify=terminologyReviewChanged)
+    def contentReviewBusy(self) -> bool:
+        return self._fact_review_busy or self._terminology_review_busy
+
+    @Property(str, notify=terminologyReviewChanged)
+    def contentReviewStatus(self) -> str:
+        if self.contentReviewBusy:
+            return "正在一次完成事实、证据与术语综合审查…"
+        if not self._fact_review and not self._terminology_review:
+            return "可选功能，尚未进行文案审查"
+        if bool(self._fact_review.get("stale", False)) or bool(
+            self._terminology_review.get("stale", False)
+        ):
+            return "英文解说已修改，旧文案审查结果需要重新检查"
+        fact_count = int(self._fact_review.get("issue_count", 0) or 0)
+        term_count = int(self._terminology_review.get("issue_count", 0) or 0)
+        if fact_count + term_count == 0:
+            return "文案审查完成：未发现明显事实或术语问题"
+        return f"文案审查完成：发现 {fact_count + term_count} 项建议"
+
+    @Property(str, notify=terminologyReviewChanged)
+    def contentReviewSummary(self) -> str:
+        summaries = [
+            str(self._fact_review.get("summary_zh", "")).strip(),
+            str(self._terminology_review.get("summary_zh", "")).strip(),
+        ]
+        return "；".join(item for item in summaries if item)
+
+    @Property(str, notify=terminologyReviewChanged)
+    def contentReviewBreakdown(self) -> str:
+        if not self._fact_review and not self._terminology_review:
+            return ""
+        fact_count = int(self._fact_review.get("issue_count", 0) or 0)
+        term_count = int(self._terminology_review.get("issue_count", 0) or 0)
+        canonical_count = len(self._terminology_review.get("canonical_terms", []))
+        fact_text = f"事实与证据：{fact_count} 项建议" if fact_count else "事实与证据：已检查通过"
+        term_text = f"术语一致性：{term_count} 项建议" if term_count else "术语一致性：已检查通过"
+        if canonical_count:
+            term_text += f"，已整理 {canonical_count} 个标准术语"
+        return f"{fact_text}　｜　{term_text}"
+
+    @Property("QVariantList", notify=terminologyReviewChanged)
+    def contentReviewIssues(self) -> list[dict[str, object]]:
+        combined: list[dict[str, object]] = []
+        for item in self._fact_review_issues:
+            value = dict(item)
+            value.update(
+                {
+                    "reviewType": "fact",
+                    "reviewTypeText": "事实与证据",
+                    "titleText": f"{value.get('severityText', '建议')} · {value.get('categoryText', '事实')}",
+                    "subjectText": str(value.get("claim_en", "")),
+                }
+            )
+            combined.append(value)
+        for item in self._terminology_review_issues:
+            value = dict(item)
+            variants = str(value.get("variantsText", "")).strip()
+            term = str(value.get("term", "")).strip()
+            value.update(
+                {
+                    "reviewType": "terminology",
+                    "reviewTypeText": "术语一致性",
+                    "titleText": str(value.get("categoryText", "术语")),
+                    "subjectText": variants or term,
+                }
+            )
+            combined.append(value)
+        return combined
+
+    @Property("QVariantList", notify=terminologyReviewChanged)
+    def contentReviewCanonicalTerms(self) -> list[dict[str, object]]:
+        return self.terminologyCanonicalTerms
+
+    @Property(str, notify=terminologyReviewChanged)
+    def contentReviewDisclaimer(self) -> str:
+        return (
+            "一次 API 请求同时检查事实、原片证据和术语一致性；"
+            "未联网检索权威来源，具体发音仍由配音工具处理。"
+        )
 
     @Property(bool, notify=matchingChanged)
     def matchingBusy(self) -> bool:
@@ -1652,7 +1776,12 @@ class AppController(QObject):
 
     @Slot(int)
     def generateStory(self, target_duration_sec: int) -> None:
-        if self._story_busy or self._fact_review_busy or not self._current_project_file:
+        if (
+            self._story_busy
+            or self._fact_review_busy
+            or self._terminology_review_busy
+            or not self._current_project_file
+        ):
             return
         if not self.apiConfigured:
             message = "未配置 OPENAI_API_KEY，无法生成故事。请在仓库根目录 .env 中配置后重试"
@@ -1686,6 +1815,7 @@ class AppController(QObject):
         self._duration_revision_status = ""
         self.durationRevisionChanged.emit()
         self._fact_review_job_id += 1
+        self._terminology_review_job_id += 1
         job_id = self._story_job_id
         self._story_busy = True
         self._story_progress = 0.02
@@ -1722,8 +1852,16 @@ class AppController(QObject):
                 artifacts.pop("rough_cut", None)
                 artifacts.pop("rough_preview", None)
                 artifacts.pop("fact_review", None)
+                artifacts.pop("terminology_review", None)
+                artifacts.pop("content_review", None)
                 artifacts.pop("duration_revision_proposal", None)
                 (project_file.parent / "script" / "fact_review.json").unlink(missing_ok=True)
+                (project_file.parent / "script" / "terminology_review.json").unlink(
+                    missing_ok=True
+                )
+                (project_file.parent / "script" / "content_review.json").unlink(
+                    missing_ok=True
+                )
                 (project_file.parent / "script" / "duration_revision_proposal.json").unlink(missing_ok=True)
                 (project_file.parent / "timeline" / "matches.json").unlink(missing_ok=True)
                 (project_file.parent / "timeline" / "rough_cut.json").unlink(missing_ok=True)
@@ -1741,10 +1879,65 @@ class AppController(QObject):
         if index < 0 or index >= len(self._story_narration) or not self._current_project_file:
             return
         cleaned = text.strip()
-        self._story_narration[index]["text_en"] = cleaned
+        narration_id = int(self._story_narration[index].get("id", index + 1) or index + 1)
+        self._apply_narration_replacements({narration_id: cleaned})
+
+    def _apply_narration_replacements(self, replacements: dict[int, str]) -> int:
+        if not self._current_project_file or not replacements:
+            return 0
+        measured_scale: float | None = None
+        if str(self._story.get("timing_model", "")).startswith("measured_voice"):
+            natural_total = sum(
+                estimate_tts_unit_duration(unit)
+                for item in self._story_narration
+                for unit in split_gpt_sovits_units(str(item.get("text_en", "")))
+            )
+            saved_total = float(self._story.get("estimated_duration_sec", 0) or 0)
+            if natural_total > 0 and saved_total > 0:
+                measured_scale = saved_total / natural_total
+
+        applied = 0
+        for item in self._story_narration:
+            narration_id = int(item.get("id", 0) or 0)
+            if narration_id in replacements:
+                item["text_en"] = str(replacements[narration_id]).strip()
+                applied += 1
+        if applied == 0:
+            return 0
         self._story["narration"] = self._story_narration
+        self._story = normalize_story_after_text_edit(
+            self._story, measured_timing_scale=measured_scale
+        )
+        self._story_narration = [
+            dict(item)
+            for item in self._story.get("narration", [])
+            if isinstance(item, dict)
+        ]
         story_file = self._current_project_file.parent / "script" / "story.json"
         story_file.write_text(json.dumps(self._story, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            prepare_tts_srt(
+                story_file, self._current_project_file.parent / "script" / "tts"
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+        if self._matches:
+            try:
+                events_file = self._current_project_file.parent / "analysis" / "events.json"
+                matches_file = self._current_project_file.parent / "timeline" / "matches.json"
+                if events_file.exists():
+                    generate_shot_matches(story_file, events_file, matches_file)
+                    build_rough_cut(
+                        matches_file,
+                        self._current_project_file.parent / "timeline" / "rough_cut.json",
+                    )
+                    self._load_matches(self._current_project_file)
+                    self._matching_status = "文案已重新断句，镜头已自动重新匹配"
+                    self.matchingChanged.emit()
+            except (OSError, ValueError, TypeError):
+                self._matches = []
+                self._matching_status = "文案断句已变化，请重新匹配镜头"
+                self.matchingChanged.emit()
         self._invalidate_duration_revision()
         if self._fact_review:
             self._fact_review["stale"] = True
@@ -1757,6 +1950,49 @@ class AppController(QObject):
             except OSError:
                 pass
             self.factReviewChanged.emit()
+        if self._terminology_review:
+            self._terminology_review["stale"] = True
+            self._terminology_review_status = (
+                "英文解说已修改，旧术语检查结果需要重新检查"
+            )
+            review_file = (
+                self._current_project_file.parent / "script" / "terminology_review.json"
+            )
+            try:
+                review_file.write_text(
+                    json.dumps(
+                        self._terminology_review, ensure_ascii=False, indent=2
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+            self.terminologyReviewChanged.emit()
+        if self._fact_review or self._terminology_review:
+            content_file = (
+                self._current_project_file.parent / "script" / "content_review.json"
+            )
+            try:
+                content_file.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "fact_review": self._fact_review,
+                            "terminology_review": self._terminology_review,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                (content_file.parent / "fact_review.json").unlink(missing_ok=True)
+                (content_file.parent / "terminology_review.json").unlink(
+                    missing_ok=True
+                )
+            except OSError:
+                pass
+        self.storyChanged.emit()
+        return applied
 
     @Slot(bool)
     def setFactReviewAuto(self, enabled: bool) -> None:
@@ -1812,48 +2048,146 @@ class AppController(QObject):
 
     @Slot()
     def runFactReview(self) -> None:
-        if self._fact_review_busy or self._story_busy or not self._current_project_file:
+        if (
+            self._fact_review_busy
+            or self._terminology_review_busy
+            or self._story_busy
+            or not self._current_project_file
+        ):
             return
         if not self.apiConfigured:
-            self._fact_review_status = "事实审查失败：请先配置 API Key"
+            self._fact_review_status = "文案审查失败：请先配置 API Key"
+            self._terminology_review_status = self._fact_review_status
             self._notice = self._fact_review_status
             self.factReviewChanged.emit()
+            self.terminologyReviewChanged.emit()
             self.noticeChanged.emit()
             return
         project_file = self._current_project_file
         events_file = project_file.parent / "analysis" / "events.json"
         story_file = project_file.parent / "script" / "story.json"
         if not events_file.exists() or not story_file.exists():
-            self._notice = "请先完成原片理解和故事生成，再进行事实审查"
+            self._notice = "请先完成原片理解和故事生成，再进行文案审查"
             self.noticeChanged.emit()
             return
 
         self._fact_review_job_id += 1
+        self._terminology_review_job_id += 1
         job_id = self._fact_review_job_id
         self._fact_review_busy = True
-        self._fact_review_status = "正在核对原片证据、数字、因果与术语…"
+        self._terminology_review_busy = True
+        self._fact_review_status = "正在一次完成事实、证据与术语综合审查…"
+        self._terminology_review_status = self._fact_review_status
         self.factReviewChanged.emit()
+        self.terminologyReviewChanged.emit()
 
         def worker() -> None:
             try:
-                report = review_story_facts(
+                report = review_story_content(
                     events_file,
                     story_file,
-                    project_file.parent / "script" / "fact_review.json",
+                    project_file.parent / "script" / "content_review.json",
                     self._config,
                     self._root,
                 )
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
-                payload.setdefault("artifacts", {})["fact_review"] = "script/fact_review.json"
+                artifacts = payload.setdefault("artifacts", {})
+                artifacts["content_review"] = "script/content_review.json"
+                artifacts.pop("fact_review", None)
+                artifacts.pop("terminology_review", None)
                 payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
                 project_file.write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                (project_file.parent / "script" / "fact_review.json").unlink(
+                    missing_ok=True
+                )
+                (project_file.parent / "script" / "terminology_review.json").unlink(
+                    missing_ok=True
                 )
                 self._factReviewFinished.emit(True, "", report, job_id)
             except Exception as exc:
                 self._factReviewFinished.emit(False, str(exc), {}, job_id)
 
-        threading.Thread(target=worker, name="storycut-fact-review", daemon=True).start()
+        threading.Thread(target=worker, name="storycut-content-review", daemon=True).start()
+
+    @Slot(int)
+    def applyTerminologySuggestion(self, issue_id: int) -> None:
+        if not self._current_project_file:
+            return
+        issue = next(
+            (
+                item
+                for item in self._terminology_review_issues
+                if int(item.get("id", 0) or 0) == issue_id
+            ),
+            None,
+        )
+        if not issue:
+            self._notice = "找不到这条术语建议，请重新检查后再试"
+            self.noticeChanged.emit()
+            return
+        narration_ids = issue.get("narration_ids", [])
+        narration_ids = narration_ids if isinstance(narration_ids, list) else []
+        suggestion = str(issue.get("suggestion_en", "")).strip()
+        if len(narration_ids) != 1 or not suggestion:
+            self._notice = "这条术语建议不能安全自动应用，请手动修改"
+            self.noticeChanged.emit()
+            return
+        narration_id = int(narration_ids[0])
+        index = next(
+            (
+                item_index
+                for item_index, item in enumerate(self._story_narration)
+                if int(item.get("id", 0) or 0) == narration_id
+            ),
+            -1,
+        )
+        if index < 0:
+            self._notice = "对应解说句已经变化，请重新检查术语"
+            self.noticeChanged.emit()
+            return
+        self.updateNarration(index, suggestion)
+        self._notice = f"已统一解说句 {narration_id} 的术语；建议重新检查确认"
+        self.storyChanged.emit()
+        self.noticeChanged.emit()
+
+    @Slot()
+    def applyAllTerminologySuggestions(self) -> None:
+        applicable = [
+            dict(item)
+            for item in self._terminology_review_issues
+            if len(item.get("narration_ids", [])) == 1
+            and str(item.get("suggestion_en", "")).strip()
+        ]
+        if not applicable:
+            self._notice = "当前没有可以安全批量应用的术语建议"
+            self.noticeChanged.emit()
+            return
+        replacements = {
+            int(issue["narration_ids"][0]): str(issue["suggestion_en"])
+            for issue in applicable
+        }
+        applied = self._apply_narration_replacements(replacements)
+        self._notice = f"已应用 {applied} 条术语统一建议；建议重新检查确认"
+        self.noticeChanged.emit()
+
+    @Slot()
+    def applyAllContentReviewSuggestions(self) -> None:
+        suggestions: dict[int, str] = {}
+        for issue in self.contentReviewIssues:
+            narration_ids = issue.get("narration_ids", [])
+            narration_ids = narration_ids if isinstance(narration_ids, list) else []
+            suggestion = str(issue.get("suggestion_en", "")).strip()
+            if len(narration_ids) == 1 and suggestion:
+                suggestions.setdefault(int(narration_ids[0]), suggestion)
+        if not suggestions:
+            self._notice = "当前没有可以安全批量应用的文案建议"
+            self.noticeChanged.emit()
+            return
+        applied = self._apply_narration_replacements(suggestions)
+        self._notice = f"已应用 {applied} 条文案审查建议；建议重新审查确认"
+        self.noticeChanged.emit()
 
     @Slot()
     def generateMatches(self) -> None:
@@ -1965,7 +2299,7 @@ class AppController(QObject):
         job_id = self._quality_job_id
         self._quality_busy = True
         self._quality_report = {}
-        self._notice = "正在检查项目文件、时间线、字幕与成片参数…"
+        self._notice = "正在检查项目，并扫描黑帧、静音与异常音量…"
         self.qualityChanged.emit()
         self.noticeChanged.emit()
         self.qualityDialogRequested.emit()
@@ -1989,7 +2323,9 @@ class AppController(QObject):
         threading.Thread(target=worker, name="storycut-quality-check", daemon=True).start()
 
     def _run_quality_check(self) -> bool:
-        self._quality_report = self._collect_quality_report()
+        # Preview generation performs this preflight on the UI thread, so keep
+        # the full FFmpeg decode scan in the explicit background check only.
+        self._quality_report = self._collect_quality_report(deep_scan=False)
         self.qualityChanged.emit()
         passed = bool(self._quality_report.get("passed", False))
         self._notice = (
@@ -2000,7 +2336,7 @@ class AppController(QObject):
         self.noticeChanged.emit()
         return passed
 
-    def _collect_quality_report(self) -> dict[str, object]:
+    def _collect_quality_report(self, deep_scan: bool = True) -> dict[str, object]:
         if not self._current_project_file:
             return {
                 "passed": False,
@@ -2022,6 +2358,7 @@ class AppController(QObject):
                 self._media,
             )
             render_report: dict[str, object] = {}
+            deep_report: dict[str, object] = {}
             rendered = Path(self._export_path) if self._export_path else None
             if rendered and rendered.exists():
                 expected_duration = 0.0
@@ -2049,7 +2386,34 @@ class AppController(QObject):
                     self._config,
                     self._root,
                 )
-            return combine_quality_reports(project_report, render_report)
+                if deep_scan:
+                    deep_report = inspect_media_content(
+                        rendered,
+                        True,
+                        bool(self.narrationAudioReady or self._preserve_original_audio),
+                        self._config,
+                        self._root,
+                    )
+            elif deep_scan and self.narrationAudioReady:
+                deep_report = combine_quality_reports(
+                    {
+                        "checks": [
+                            {
+                                "level": "info",
+                                "title": "黑帧扫描等待成片",
+                                "detail": "当前还没有成片预览；生成预览后再次检查，即可扫描最终画面。",
+                            }
+                        ]
+                    },
+                    inspect_media_content(
+                        Path(self._narration_audio_path),
+                        False,
+                        True,
+                        self._config,
+                        self._root,
+                    ),
+                )
+            return combine_quality_reports(project_report, render_report, deep_report)
 
     @Slot(object, int)
     def _apply_quality_check_finished(self, report: object, job_id: int) -> None:
@@ -2707,6 +3071,8 @@ class AppController(QObject):
                 "rough_preview",
                 "duration_revision_proposal",
                 "fact_review",
+                "terminology_review",
+                "content_review",
             ):
                 artifacts.pop(key, None)
             voice = payload.setdefault("settings", {}).setdefault("voice", {})
@@ -2717,7 +3083,13 @@ class AppController(QObject):
 
             (project_dir / "script" / "duration_revision_proposal.json").unlink(missing_ok=True)
             (project_dir / "script" / "fact_review.json").unlink(missing_ok=True)
+            (project_dir / "script" / "terminology_review.json").unlink(
+                missing_ok=True
+            )
+            (project_dir / "script" / "content_review.json").unlink(missing_ok=True)
             self._set_story(dict(revised))
+            self._set_fact_review({})
+            self._set_terminology_review({})
             self._load_matches(project_file)
             self._narration_audio_path = ""
             self._synced_srt_path = ""
@@ -3155,6 +3527,7 @@ class AppController(QObject):
         self._story_job_id += 1
         self._duration_revision_job_id += 1
         self._fact_review_job_id += 1
+        self._terminology_review_job_id += 1
         self._export_job_id += 1
         self._quality_job_id += 1
         self._subtitle_effect_preview_job_id += 1
@@ -3191,6 +3564,10 @@ class AppController(QObject):
         self._fact_review_auto = bool(
             self._config.get("fact_review", {}).get("auto_after_story", False)
         )
+        self._terminology_review_busy = False
+        self._terminology_review_status = "可选功能，尚未检查术语一致性"
+        self._terminology_review = {}
+        self._terminology_review_issues = []
         self._matching_status = "等待匹配镜头"
         self._matches = []
         self._export_progress = 0.0
@@ -3216,6 +3593,7 @@ class AppController(QObject):
         self.eventsChanged.emit()
         self.storyChanged.emit()
         self.factReviewChanged.emit()
+        self.terminologyReviewChanged.emit()
         self.matchingChanged.emit()
         self.exportChanged.emit()
         self.voiceChanged.emit()
@@ -3384,6 +3762,7 @@ class AppController(QObject):
         if success and isinstance(story, dict):
             self._set_story(story)
             self._set_fact_review({})
+            self._set_terminology_review({})
             self._matches = []
             self._matching_status = "故事已更新，请重新自动匹配镜头"
             self._export_path = ""
@@ -3402,23 +3781,42 @@ class AppController(QObject):
         if job_id != self._fact_review_job_id:
             return
         self._fact_review_busy = False
+        self._terminology_review_busy = False
         if success and isinstance(report, dict):
-            self._set_fact_review(report)
-            high = int(report.get("high_count", 0) or 0)
-            medium = int(report.get("medium_count", 0) or 0)
-            low = int(report.get("low_count", 0) or 0)
+            fact_report = report.get("fact_review", {})
+            terminology_report = report.get("terminology_review", {})
+            fact_report = fact_report if isinstance(fact_report, dict) else {}
+            terminology_report = (
+                terminology_report if isinstance(terminology_report, dict) else {}
+            )
+            self._set_fact_review(fact_report)
+            self._set_terminology_review(terminology_report)
+            high = int(fact_report.get("high_count", 0) or 0)
+            medium = int(fact_report.get("medium_count", 0) or 0)
+            low = int(fact_report.get("low_count", 0) or 0)
+            term_count = int(terminology_report.get("issue_count", 0) or 0)
             if high:
                 self._fact_review_status = f"审查完成：{high} 项高风险，{medium} 项需确认，{low} 项精度建议"
             elif medium or low:
                 self._fact_review_status = f"审查完成：未发现高风险，另有 {medium + low} 项建议确认"
             else:
                 self._fact_review_status = "审查完成：未发现明显事实风险"
-            self._notice = self._fact_review_status
+            self._terminology_review_status = (
+                "术语、单位和名称前后一致"
+                if term_count == 0
+                else f"发现 {term_count} 处可统一内容"
+            )
+            self._notice = (
+                f"文案审查完成：事实问题 {high + medium + low} 项，"
+                f"术语问题 {term_count} 项"
+            )
             self._refresh_recent_projects()
         else:
-            self._fact_review_status = f"事实审查失败：{message}"
+            self._fact_review_status = f"文案审查失败：{message}"
+            self._terminology_review_status = self._fact_review_status
             self._notice = self._fact_review_status
         self.factReviewChanged.emit()
+        self.terminologyReviewChanged.emit()
         self.noticeChanged.emit()
 
     @Slot(float, str, int)
@@ -3535,6 +3933,7 @@ class AppController(QObject):
         if not story_file.exists():
             self._set_story({})
             self._set_fact_review({})
+            self._set_terminology_review({})
             return
         try:
             story = json.loads(story_file.read_text(encoding="utf-8"))
@@ -3547,7 +3946,7 @@ class AppController(QObject):
             self._set_story(story)
         except (OSError, ValueError, TypeError):
             self._set_story({})
-        self._load_fact_review(project_file)
+        self._load_content_review(project_file)
         proposal_file = project_file.parent / "script" / "duration_revision_proposal.json"
         self._duration_revision_proposal = {}
         self._duration_revision_status = ""
@@ -3895,6 +4294,80 @@ class AppController(QObject):
             self._set_fact_review(report if isinstance(report, dict) else {})
         except (OSError, ValueError, TypeError):
             self._set_fact_review({})
+
+    def _load_content_review(self, project_file: Path) -> None:
+        review_file = project_file.parent / "script" / "content_review.json"
+        if review_file.exists():
+            try:
+                report = json.loads(review_file.read_text(encoding="utf-8"))
+                fact = report.get("fact_review", {}) if isinstance(report, dict) else {}
+                terminology = (
+                    report.get("terminology_review", {})
+                    if isinstance(report, dict)
+                    else {}
+                )
+                self._set_fact_review(fact if isinstance(fact, dict) else {})
+                self._set_terminology_review(
+                    terminology if isinstance(terminology, dict) else {}
+                )
+                return
+            except (OSError, ValueError, TypeError):
+                pass
+        self._load_fact_review(project_file)
+        self._load_terminology_review(project_file)
+
+    def _set_terminology_review(self, report: dict[str, object]) -> None:
+        self._terminology_review = dict(report)
+        category_names = {
+            "term_variant": "术语译法",
+            "name_consistency": "专有名称",
+            "abbreviation": "缩写",
+            "capitalization": "大小写",
+            "unit_format": "单位格式",
+            "number_consistency": "数字一致性",
+        }
+        issues: list[dict[str, object]] = []
+        for raw in report.get("issues", []):
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            item["categoryText"] = category_names.get(
+                str(item.get("category", "term_variant")), "术语"
+            )
+            item["narrationText"] = "、".join(
+                str(value) for value in item.get("narration_ids", [])
+            )
+            variants = item.get("variants", [])
+            item["variantsText"] = " / ".join(
+                str(value) for value in variants if str(value).strip()
+            ) if isinstance(variants, list) else ""
+            issues.append(item)
+        self._terminology_review_issues = issues
+        if not report:
+            self._terminology_review_status = "可选功能，尚未检查术语一致性"
+        elif bool(report.get("stale", False)):
+            self._terminology_review_status = (
+                "英文解说已修改，旧术语检查结果需要重新检查"
+            )
+        else:
+            count = int(report.get("issue_count", len(issues)) or 0)
+            self._terminology_review_status = (
+                "术语检查完成：术语、单位和名称前后一致"
+                if count == 0
+                else f"术语检查完成：发现 {count} 处可统一内容"
+            )
+        self.terminologyReviewChanged.emit()
+
+    def _load_terminology_review(self, project_file: Path) -> None:
+        review_file = project_file.parent / "script" / "terminology_review.json"
+        if not review_file.exists():
+            self._set_terminology_review({})
+            return
+        try:
+            report = json.loads(review_file.read_text(encoding="utf-8"))
+            self._set_terminology_review(report if isinstance(report, dict) else {})
+        except (OSError, ValueError, TypeError):
+            self._set_terminology_review({})
 
     def _ensure_source_video(self) -> bool:
         source = Path(self._video_path) if self._video_path else None

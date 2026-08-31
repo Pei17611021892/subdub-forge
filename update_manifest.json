@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "version": "2.0.3",
+  "version": "2.0.5",
   "scope": "repository",
   "files": [
     ".env.example",
@@ -26,6 +26,7 @@
     "storycut_v2/src/media_service.py",
     "storycut_v2/src/quality_service.py",
     "storycut_v2/src/story_service.py",
+    "storycut_v2/src/content_review_service.py",
     "storycut_v2/src/update_manager.py",
     "storycut_v2/src/vision_service.py",
     "storycut_v2/src/voice_service.py",
@@ -36,6 +37,7 @@
     "storycut_v2/tests/test_quality_service.py",
     "storycut_v2/tests/test_repository_updater.py",
     "storycut_v2/tests/test_story_service.py",
+    "storycut_v2/tests/test_content_review_service.py",
     "storycut_v2/tests/test_vision_service.py",
     "storycut_v2/tests/test_voice_service.py",
     "storycut_v2/ui/Main.qml",

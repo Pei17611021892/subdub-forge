@@ -4,8 +4,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from src.quality_service import _inspect_render_probe, _inspect_timeline, inspect_project_for_export
+from src.quality_service import (
+    _inspect_render_probe,
+    _inspect_timeline,
+    inspect_media_content,
+    inspect_project_for_export,
+)
 
 
 class QualityServiceTests(unittest.TestCase):
@@ -168,6 +175,72 @@ class QualityServiceTests(unittest.TestCase):
         repeated = next(item for item in checks if item["title"] == "相邻镜头重复播放")
         self.assertEqual(repeated["level"], "warning")
         self.assertIn("只有画面跳回感明显", repeated["detail"])
+
+    def test_deep_scan_reports_black_silence_and_low_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            media = Path(temporary_dir) / "preview.mp4"
+            media.write_bytes(b"preview")
+            processes = [
+                SimpleNamespace(
+                    returncode=0,
+                    stderr="[blackdetect] black_start:2 black_end:3.2 black_duration:1.2",
+                ),
+                SimpleNamespace(
+                    returncode=0,
+                    stderr=(
+                        "[silencedetect] silence_start:4\n"
+                        "[silencedetect] silence_end:6.5 | silence_duration:2.5\n"
+                        "[Parsed_volumedetect] mean_volume: -34.0 dB\n"
+                        "[Parsed_volumedetect] max_volume: -4.0 dB\n"
+                    ),
+                ),
+            ]
+            with patch("src.quality_service._resolve_tool", return_value="ffmpeg"), patch(
+                "src.quality_service.subprocess.run", side_effect=processes
+            ):
+                report = inspect_media_content(
+                    media,
+                    True,
+                    True,
+                    {"shared": {}, "quality": {}},
+                    Path(temporary_dir),
+                )
+
+            warning_titles = {
+                item["title"] for item in report["checks"] if item["level"] == "warning"
+            }
+            self.assertIn("检测到连续黑画面", warning_titles)
+            self.assertIn("检测到较长静音", warning_titles)
+            self.assertIn("整体音量偏低", warning_titles)
+            self.assertTrue(report["passed"])
+
+    def test_deep_scan_passes_clean_media(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            media = Path(temporary_dir) / "preview.mp4"
+            media.write_bytes(b"preview")
+            processes = [
+                SimpleNamespace(returncode=0, stderr="no black frames"),
+                SimpleNamespace(
+                    returncode=0,
+                    stderr=(
+                        "[Parsed_volumedetect] mean_volume: -18.0 dB\n"
+                        "[Parsed_volumedetect] max_volume: -1.2 dB\n"
+                    ),
+                ),
+            ]
+            with patch("src.quality_service._resolve_tool", return_value="ffmpeg"), patch(
+                "src.quality_service.subprocess.run", side_effect=processes
+            ):
+                report = inspect_media_content(
+                    media,
+                    True,
+                    True,
+                    {"shared": {}, "quality": {}},
+                    Path(temporary_dir),
+                )
+
+            self.assertEqual(report["warning_count"], 0)
+            self.assertEqual(report["pass_count"], 3)
 
 
 if __name__ == "__main__":

@@ -106,6 +106,180 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertEqual(controller._story_narration[1]["text_en"], "Safer two.")
             self.assertTrue(controller._fact_review["stale"])
 
+    def test_terminology_suggestion_replaces_line_and_marks_report_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            (project / "script").mkdir(parents=True)
+            project_file = project / "project.json"
+            project_file.write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+            controller = self._controller(root)
+            controller._current_project_file = project_file
+            controller._set_story(
+                {
+                    "narration": [
+                        {"id": 1, "text_en": "A lock washer resists rotation.", "event_ids": [1]},
+                        {"id": 2, "text_en": "The locking washer stays in place.", "event_ids": [2]},
+                    ]
+                }
+            )
+            (project / "script" / "story.json").write_text(
+                json.dumps(controller._story), encoding="utf-8"
+            )
+            controller._set_terminology_review(
+                {
+                    "issue_count": 1,
+                    "issues": [
+                        {
+                            "id": 1,
+                            "category": "term_variant",
+                            "narration_ids": [1],
+                            "suggestion_en": "A locking washer resists rotation.",
+                        }
+                    ],
+                }
+            )
+
+            controller.applyTerminologySuggestion(1)
+
+            self.assertEqual(
+                controller._story_narration[0]["text_en"],
+                "A locking washer resists rotation.",
+            )
+            self.assertTrue(controller._terminology_review["stale"])
+
+    def test_combined_content_review_updates_both_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            controller = self._controller(Path(temporary_dir))
+            controller._fact_review_job_id = 7
+            controller._fact_review_busy = True
+            controller._terminology_review_busy = True
+
+            controller._apply_fact_review_finished(
+                True,
+                "",
+                {
+                    "fact_review": {
+                        "issue_count": 1,
+                        "high_count": 0,
+                        "medium_count": 1,
+                        "low_count": 0,
+                        "issues": [],
+                    },
+                    "terminology_review": {
+                        "issue_count": 1,
+                        "issues": [
+                            {
+                                "id": 1,
+                                "category": "term_variant",
+                                "narration_ids": [2],
+                                "suggestion_en": "A consistent term.",
+                            }
+                        ],
+                    },
+                },
+                7,
+            )
+
+            self.assertFalse(controller.factReviewBusy)
+            self.assertFalse(controller.terminologyReviewBusy)
+            self.assertEqual(controller._fact_review["issue_count"], 1)
+            self.assertEqual(controller._terminology_review["issue_count"], 1)
+
+    def test_review_suggestion_resplits_story_and_regenerates_reference_srt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            (project / "script").mkdir(parents=True)
+            project_file = project / "project.json"
+            project_file.write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+            controller = self._controller(root)
+            controller._current_project_file = project_file
+            controller._set_story(
+                {
+                    "timing_model": "english_word_syllable_v3",
+                    "narration": [
+                        {
+                            "id": 1,
+                            "text_en": "A cotter pin blocks the nut.",
+                            "event_ids": [1],
+                        },
+                        {
+                            "id": 2,
+                            "text_en": "The repair is now secure.",
+                            "event_ids": [2],
+                        },
+                    ],
+                }
+            )
+            story_file = project / "script" / "story.json"
+            story_file.write_text(json.dumps(controller._story), encoding="utf-8")
+
+            controller.updateNarration(
+                0,
+                "With a drilled bolt and a castellated nut, a cotter pin physically blocks the nut.",
+            )
+
+            saved = json.loads(story_file.read_text(encoding="utf-8"))
+            self.assertEqual(len(saved["narration"]), 3)
+            self.assertEqual([item["id"] for item in saved["narration"]], [1, 2, 3])
+            self.assertEqual(saved["narration"][2]["text_en"], "The repair is now secure.")
+            self.assertGreater(saved["estimated_duration_sec"], 0)
+            srt = (project / "script" / "tts" / "gpt_sovits_reference.srt").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("1\n00:00:00,000 -->", srt)
+            self.assertIn("3\n", srt)
+            self.assertIn("The repair is now secure.", srt)
+
+    def test_batch_review_replacements_use_original_ids_before_resplitting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            (project / "script").mkdir(parents=True)
+            project_file = project / "project.json"
+            project_file.write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+            controller = self._controller(root)
+            controller._current_project_file = project_file
+            controller._set_story(
+                {
+                    "timing_model": "english_word_syllable_v3",
+                    "narration": [
+                        {"id": 1, "text_en": "Original first line.", "event_ids": [1]},
+                        {"id": 2, "text_en": "Original second line.", "event_ids": [2]},
+                    ],
+                }
+            )
+            (project / "script" / "story.json").write_text(
+                json.dumps(controller._story), encoding="utf-8"
+            )
+            controller._set_fact_review(
+                {
+                    "issue_count": 2,
+                    "issues": [
+                        {
+                            "id": 1,
+                            "severity": "medium",
+                            "narration_ids": [1],
+                            "suggestion_en": "The first clause explains the setup, the second clause states the result.",
+                        },
+                        {
+                            "id": 2,
+                            "severity": "medium",
+                            "narration_ids": [2],
+                            "suggestion_en": "The second original line is safely replaced.",
+                        },
+                    ],
+                }
+            )
+
+            controller.applyAllContentReviewSuggestions()
+
+            texts = [item["text_en"] for item in controller._story_narration]
+            self.assertIn("The second original line is safely replaced.", texts)
+            self.assertNotIn("Original second line.", texts)
+            self.assertEqual(controller._fact_review["stale"], True)
+
     def test_cached_voice_duration_avoids_blocking_probe(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

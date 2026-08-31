@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -145,6 +146,150 @@ def inspect_rendered_video(
     except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
         add("error", "输出文件无法读取", f"ffprobe 检查失败：{exc}")
     return _report(checks)
+
+
+def inspect_media_content(
+    media_file: Path,
+    check_video: bool,
+    check_audio: bool,
+    config: dict[str, Any],
+    app_root: Path,
+) -> dict[str, Any]:
+    """Decode media locally and look for long black frames, silence and abnormal levels."""
+    checks: list[dict[str, str]] = []
+
+    def add(level: str, title: str, detail: str) -> None:
+        checks.append({"level": level, "title": title, "detail": detail})
+
+    if not media_file.exists():
+        add("error", "深度检查文件缺失", f"找不到 {media_file.name}。")
+        return _report(checks)
+    shared = config.get("shared", {})
+    ffmpeg = _resolve_tool(str(shared.get("ffmpeg_bin", "ffmpeg")), app_root, "ffmpeg")
+    if not ffmpeg:
+        add("warning", "无法执行深度检查", "未找到 FFmpeg，已跳过黑帧、静音和音量扫描。")
+        return _report(checks)
+
+    settings = config.get("quality", {})
+    timeout_sec = max(30, int(settings.get("deep_scan_timeout_sec", 300) or 300))
+    if check_video:
+        black_min = max(0.1, float(settings.get("black_min_duration_sec", 0.5) or 0.5))
+        black_ratio = min(1.0, max(0.5, float(settings.get("black_picture_ratio", 0.98) or 0.98)))
+        try:
+            process = subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-nostats",
+                    "-i",
+                    str(media_file),
+                    "-an",
+                    "-vf",
+                    f"blackdetect=d={black_min:.3f}:pic_th={black_ratio:.3f}:pix_th=0.10",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_sec,
+                check=False,
+            )
+            if process.returncode != 0:
+                raise RuntimeError(process.stderr.strip()[-500:] or f"FFmpeg 退出码 {process.returncode}")
+            black_segments = _parse_detected_durations(process.stderr, "black_duration")
+            if black_segments:
+                longest = max(black_segments)
+                total = sum(black_segments)
+                add(
+                    "warning",
+                    "检测到连续黑画面",
+                    f"共 {len(black_segments)} 处、累计 {total:.1f} 秒，最长 {longest:.1f} 秒。"
+                    "片头片尾淡黑可能正常；若出现在解说中间，建议查看预览并更换镜头。",
+                )
+            else:
+                add("pass", "黑帧扫描", f"未发现持续 {black_min:.1f} 秒以上的连续黑画面。")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            add("warning", "黑帧扫描未完成", str(exc))
+
+    if check_audio:
+        silence_min = max(0.2, float(settings.get("silence_min_duration_sec", 1.5) or 1.5))
+        silence_db = float(settings.get("silence_threshold_db", -45.0) or -45.0)
+        try:
+            process = subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-nostats",
+                    "-i",
+                    str(media_file),
+                    "-vn",
+                    "-af",
+                    f"silencedetect=noise={silence_db:.1f}dB:d={silence_min:.3f},volumedetect",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_sec,
+                check=False,
+            )
+            if process.returncode != 0:
+                raise RuntimeError(process.stderr.strip()[-500:] or f"FFmpeg 退出码 {process.returncode}")
+            silence_segments = _parse_detected_durations(process.stderr, "silence_duration")
+            if silence_segments:
+                add(
+                    "warning",
+                    "检测到较长静音",
+                    f"共 {len(silence_segments)} 处、累计 {sum(silence_segments):.1f} 秒，"
+                    f"最长 {max(silence_segments):.1f} 秒。片头片尾留白可能正常，请重点检查中段。",
+                )
+            else:
+                add("pass", "静音扫描", f"未发现持续 {silence_min:.1f} 秒以上的异常静音。")
+            _inspect_volume_output(process.stderr, settings, add)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            add("warning", "静音与音量扫描未完成", str(exc))
+
+    if not check_video and not check_audio:
+        add("info", "深度检查", "文件中没有需要扫描的音视频轨道。")
+    return _report(checks)
+
+
+def _parse_detected_durations(output: str, field: str) -> list[float]:
+    return [
+        float(value)
+        for value in re.findall(rf"{re.escape(field)}:\s*([0-9]+(?:\.[0-9]+)?)", output)
+    ]
+
+
+def _inspect_volume_output(output: str, settings: dict[str, Any], add) -> None:
+    mean_matches = re.findall(r"mean_volume:\s*(-?inf|-?[0-9]+(?:\.[0-9]+)?)\s*dB", output)
+    peak_matches = re.findall(r"max_volume:\s*(-?inf|-?[0-9]+(?:\.[0-9]+)?)\s*dB", output)
+    if not mean_matches or not peak_matches:
+        add("warning", "音量统计不可用", "FFmpeg 没有返回平均音量和峰值音量。")
+        return
+    if mean_matches[-1] == "-inf" or peak_matches[-1] == "-inf":
+        add("warning", "音轨几乎无声", "整条音轨没有检测到有效音量。")
+        return
+    mean_db = float(mean_matches[-1])
+    peak_db = float(peak_matches[-1])
+    quiet_mean = float(settings.get("quiet_mean_db", -30.0) or -30.0)
+    loud_mean = float(settings.get("loud_mean_db", -10.0) or -10.0)
+    clipping_peak = float(settings.get("clipping_peak_db", -0.1) or -0.1)
+    detail = f"平均音量 {mean_db:.1f} dB，峰值 {peak_db:.1f} dB。"
+    if peak_db >= clipping_peak:
+        add("warning", "音频峰值过高", detail + "可能接近削波，建议试听爆音并适当降低配音增益。")
+    elif mean_db < quiet_mean:
+        add("warning", "整体音量偏低", detail + "手机外放可能听不清，建议提高配音响度。")
+    elif mean_db > loud_mean:
+        add("warning", "整体音量偏高", detail + "长时间聆听可能刺耳，建议试听并适当降低增益。")
+    else:
+        add("pass", "音量范围", detail + "未发现明显过低、过高或削波风险。")
 
 
 def combine_quality_reports(*reports: dict[str, Any]) -> dict[str, Any]:

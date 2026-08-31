@@ -25,6 +25,9 @@ fact_review:
   auto_after_story: false
   model: ''
 
+content_review:
+  model: ''
+
 analysis:
   content_mode: speech
   asr_model: large-v3
@@ -52,6 +55,16 @@ vision:
   max_high_detail_events: 6
   high_detail_batch_size: 3
   high_detail_width: 1440
+
+quality:
+  deep_scan_timeout_sec: 300
+  black_min_duration_sec: 0.5
+  black_picture_ratio: 0.98
+  silence_min_duration_sec: 1.5
+  silence_threshold_db: -45
+  quiet_mean_db: -30
+  loud_mean_db: -10
+  clipping_peak_db: -0.1
 
 export:
   width: 1080

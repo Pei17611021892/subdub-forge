@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "version": "0.2.3",
+  "version": "0.2.5",
   "files": [
     "README.md",
     "config.default.yaml",
@@ -17,6 +17,7 @@
     "src/media_service.py",
     "src/quality_service.py",
     "src/story_service.py",
+    "src/content_review_service.py",
     "src/update_manager.py",
     "src/vision_service.py",
     "src/voice_service.py",
@@ -27,6 +28,7 @@
     "tests/test_quality_service.py",
     "tests/test_repository_updater.py",
     "tests/test_story_service.py",
+    "tests/test_content_review_service.py",
     "tests/test_vision_service.py",
     "tests/test_voice_service.py",
     "ui/Main.qml",

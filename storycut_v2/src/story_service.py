@@ -811,6 +811,7 @@ def refresh_story_timing(story: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     if not story or story.get("timing_model") in {
         "english_word_syllable_v3",
         "measured_voice_projection_v1",
+        "measured_voice_edit_projection_v1",
     }:
         return story, False
 
@@ -844,6 +845,65 @@ def refresh_story_timing(story: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         2,
     )
     return refreshed, True
+
+
+def normalize_story_after_text_edit(
+    story: dict[str, Any], measured_timing_scale: float | None = None
+) -> dict[str, Any]:
+    """Re-split edited narration exactly like GPT-SoVITS and refresh its timeline."""
+    old_items = [
+        dict(item) for item in story.get("narration", []) if isinstance(item, dict)
+    ]
+    old_natural_total = sum(
+        estimate_tts_unit_duration(unit)
+        for item in old_items
+        for unit in split_gpt_sovits_units(str(item.get("text_en", "")))
+    )
+    old_saved_total = float(story.get("estimated_duration_sec", 0) or 0)
+    measured = str(story.get("timing_model", "")).startswith("measured_voice")
+    timing_scale = 1.0
+    if measured:
+        if measured_timing_scale is not None and measured_timing_scale > 0:
+            timing_scale = max(0.6, min(2.0, measured_timing_scale))
+        elif old_natural_total > 0 and old_saved_total > 0:
+            timing_scale = max(0.6, min(2.0, old_saved_total / old_natural_total))
+
+    refreshed_items: list[dict[str, Any]] = []
+    for raw_item in old_items:
+        text = str(raw_item.get("text_en", "")).strip()
+        if not text:
+            continue
+        for unit in split_gpt_sovits_units(text):
+            word_count = max(1, len(re.findall(r"\b[\w'-]+\b", unit)))
+            refreshed_items.append(
+                {
+                    "id": len(refreshed_items) + 1,
+                    "event_ids": list(raw_item.get("event_ids", [])),
+                    "text_en": unit,
+                    "visual_query": str(raw_item.get("visual_query", "")).strip(),
+                    "estimated_duration_sec": round(
+                        estimate_tts_unit_duration(unit) * timing_scale, 2
+                    ),
+                    "word_count": word_count,
+                }
+            )
+    refreshed = dict(story)
+    refreshed["timing_model"] = (
+        "measured_voice_edit_projection_v1"
+        if measured
+        else "english_word_syllable_v3"
+    )
+    refreshed["narration"] = refreshed_items
+    refreshed["word_count"] = sum(
+        int(item.get("word_count", 0)) for item in refreshed_items
+    )
+    refreshed["estimated_duration_sec"] = round(
+        sum(float(item.get("estimated_duration_sec", 0)) for item in refreshed_items),
+        2,
+    )
+    if refreshed_items:
+        refreshed["hook"] = str(refreshed_items[0].get("text_en", ""))
+    return refreshed
 
 
 def _narration_event_ids(story: dict[str, Any]) -> set[int]:
