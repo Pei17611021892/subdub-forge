@@ -3162,9 +3162,9 @@ ApplicationWindow {
                                             }
                                         }
                                         GhostButton {
-                                            visible: appController.contentReviewIssues.length > 1
+                                            visible: appController.contentReviewPendingCount > 1
                                             text: "应用全部建议"
-                                            enabled: !appController.contentReviewBusy && !appController.storyBusy
+                                            enabled: appController.contentReviewPendingCount > 0 && !appController.contentReviewBusy && !appController.storyBusy
                                             onClicked: appController.applyAllContentReviewSuggestions()
                                         }
                                         GhostButton {
@@ -3230,9 +3230,11 @@ ApplicationWindow {
                                             Layout.fillWidth: true
                                             Layout.preferredHeight: 116
                                             radius: 9
-                                            color: modelData.reviewType === "fact" && modelData.severity === "high" ? "#28191d"
+                                            color: modelData.applied ? "#16251d"
+                                                   : modelData.reviewType === "fact" && modelData.severity === "high" ? "#28191d"
                                                    : modelData.reviewType === "terminology" ? "#211e18" : "#1c1e26"
-                                            border.color: modelData.reviewType === "fact" && modelData.severity === "high" ? "#7f3d46"
+                                            border.color: modelData.applied ? "#347456"
+                                                          : modelData.reviewType === "fact" && modelData.severity === "high" ? "#7f3d46"
                                                           : modelData.reviewType === "terminology" ? "#655431" : "#343843"
                                             ColumnLayout {
                                                 anchors.fill: parent
@@ -3258,19 +3260,21 @@ ApplicationWindow {
                                                     Text { text: "解说句 " + modelData.narrationText; color: textMuted; font.pixelSize: 9 }
                                                     Item { Layout.fillWidth: true }
                                                     Button {
-                                                        text: "应用建议"
+                                                        text: modelData.applied ? "✓ 已应用"
+                                                              : modelData.suggestion_en ? "应用建议" : "手动处理"
                                                         implicitWidth: 72
                                                         implicitHeight: 25
+                                                        enabled: !modelData.applied && modelData.suggestion_en !== "" && !appController.contentReviewBusy && !appController.storyBusy
                                                         contentItem: Text {
                                                             text: parent.text
-                                                            color: "#b8f3cf"
+                                                            color: modelData.applied ? "#91e5b4" : "#b8f3cf"
                                                             font.pixelSize: 9
                                                             horizontalAlignment: Text.AlignHCenter
                                                             verticalAlignment: Text.AlignVCenter
                                                         }
                                                         background: Rectangle {
                                                             radius: 6
-                                                            color: parent.hovered ? "#224633" : "#183729"
+                                                            color: modelData.applied ? "#183729" : parent.hovered ? "#224633" : "#183729"
                                                             border.color: "#347456"
                                                         }
                                                         onClicked: {

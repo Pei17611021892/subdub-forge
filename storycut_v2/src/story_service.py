@@ -124,6 +124,8 @@ def generate_story_script(
     app_root: Path,
     progress: ProgressCallback,
     narrative_strategy: str = "auto",
+    layered_structure_json: Path | None = None,
+    planning_words_per_second: float | None = None,
 ) -> dict[str, Any]:
     from openai import OpenAI
 
@@ -139,6 +141,13 @@ def generate_story_script(
     content_mode = str(events_payload.get("content_mode", "speech"))
     if not events:
         raise ValueError("events.json 中没有可用于组织故事的事件")
+    layered_structure: dict[str, Any] = {}
+    if layered_structure_json and layered_structure_json.exists():
+        try:
+            value = json.loads(layered_structure_json.read_text(encoding="utf-8"))
+            layered_structure = value if isinstance(value, dict) else {}
+        except (OSError, ValueError, TypeError):
+            layered_structure = {}
 
     compact_events = [
         {
@@ -155,15 +164,31 @@ def generate_story_script(
         }
         for event in events
     ]
-    shorts_max_words = round(SHORTS_MAX_DURATION_SEC * 1.85)
-    max_words = min(shorts_max_words, max(30, round(target_duration_sec * 1.9)))
+    configured_wps = float(story_config.get("planning_words_per_second", 1.45) or 1.45)
+    effective_wps = max(
+        0.9,
+        min(2.2, float(planning_words_per_second or configured_wps)),
+    )
+    configured_safe_duration = float(
+        story_config.get("planning_safe_duration_sec", 174) or 174
+    )
+    safe_duration = max(
+        12.0,
+        min(
+            configured_safe_duration,
+            SHORTS_MAX_DURATION_SEC - 5.0,
+            float(target_duration_sec) - 4.0 if target_duration_sec > 20 else float(target_duration_sec),
+        ),
+    )
+    shorts_max_words = max(30, int((SHORTS_MAX_DURATION_SEC - 5.0) * effective_wps))
+    max_words = max(30, min(shorts_max_words, int(safe_duration * effective_wps)))
     described_event_ids = [
         int(event.get("id", 0))
         for event in events
         if str(event.get("visual_description", "")).strip()
     ]
     minimum_words = (
-        min(max_words, max(60, round(target_duration_sec * 1.55)))
+        min(max_words, max(45, round(max_words * 0.82)))
         if content_mode == "visual"
         else 0
     )
@@ -196,6 +221,7 @@ def generate_story_script(
             maximum_event_coverage,
             outline_target,
             requested_strategy,
+            layered_structure,
         )
         plan = _chat_json(client, model, plan_prompt, temperature, base_url, "全片故事规划")
         plan = _normalize_visual_plan(plan, events)
@@ -226,9 +252,16 @@ def generate_story_script(
             maximum_event_coverage,
             outline_target,
             requested_strategy,
+            layered_structure,
         )
         result = _chat_json(client, editor_model, prompt, temperature, base_url, "最终故事编辑")
-        normalized = _normalize_story(result, events, target_duration_sec, editor_model)
+        normalized = _normalize_story(
+            result,
+            events,
+            target_duration_sec,
+            editor_model,
+            planning_words_per_second=effective_wps,
+        )
         normalized["planner_model"] = model
         normalized["editor_model"] = editor_model
         normalized["workflow"] = "visual_story_editor_v2"
@@ -240,16 +273,33 @@ def generate_story_script(
             max_words,
             str(story_config.get("narrative_style", "natural_science_youtube")),
             requested_strategy,
+            layered_structure,
         )
         result = _chat_json(client, model, prompt, temperature, base_url, "故事生成")
-        normalized = _normalize_story(result, events, target_duration_sec, model)
-        if float(normalized.get("estimated_duration_sec", 0)) >= SHORTS_MAX_DURATION_SEC:
-            safe_duration = 174.0
-            for attempt in range(1, 3):
-                draft_duration = max(
-                    1.0, float(normalized.get("estimated_duration_sec", 0) or 0)
-                )
-                draft_words = max(1, int(normalized.get("word_count", 0) or 0))
+        normalized = _normalize_story(
+            result,
+            events,
+            target_duration_sec,
+            model,
+            planning_words_per_second=effective_wps,
+        )
+        for attempt in range(1, 3):
+            draft_duration = max(
+                1.0, float(normalized.get("estimated_duration_sec", 0) or 0)
+            )
+            broad_bindings = _overbroad_narration_bindings(normalized)
+            missing_critical = _missing_critical_event_ids(normalized, layered_structure)
+            broken_tts_units = _problematic_tts_unit_ids(normalized)
+            if (
+                draft_duration <= safe_duration
+                and not broad_bindings
+                and not missing_critical
+                and not broken_tts_units
+            ):
+                break
+            draft_words = max(1, int(normalized.get("word_count", 0) or 0))
+            rewrite_max_words = max_words
+            if draft_duration > safe_duration:
                 rewrite_max_words = max(
                     30,
                     min(
@@ -257,34 +307,51 @@ def generate_story_script(
                         int(draft_words * safe_duration / draft_duration * 0.96),
                     ),
                 )
-                progress(
-                    0.70 + attempt * 0.07,
-                    (
-                        f"初稿预计 {draft_duration:.0f} 秒，正在由 {editor_model} "
-                        f"整篇压缩到 Shorts 安全线内（第 {attempt} 次）…"
-                    ),
+            reason_parts = []
+            if draft_duration > safe_duration:
+                reason_parts.append(f"预计 {draft_duration:.0f} 秒，超过 {safe_duration:.0f} 秒安全预算")
+            if broad_bindings:
+                reason_parts.append("部分解说绑定了过多镜头事件")
+            if missing_critical:
+                reason_parts.append(
+                    "遗漏关键事件 " + ", ".join(str(item) for item in missing_critical)
                 )
-                rewrite_prompt = _build_speech_rewrite_prompt(
-                    compact_events,
-                    result,
-                    rewrite_max_words,
-                    safe_duration,
+            if broken_tts_units:
+                reason_parts.append(
+                    "GPT-SoVITS 短分句不完整："
+                    + ", ".join(str(item) for item in broken_tts_units[:8])
                 )
-                result = _chat_json(
-                    client,
-                    editor_model,
-                    rewrite_prompt,
-                    max(0.1, temperature - 0.1),
-                    base_url,
-                    "语音故事超时重编",
-                )
-                normalized = _normalize_story(
-                    result, events, round(safe_duration), editor_model
-                )
-                normalized["editor_model"] = editor_model
-                normalized["workflow"] = "speech_story_editor_v2"
-                if float(normalized.get("estimated_duration_sec", 0)) < SHORTS_MAX_DURATION_SEC:
-                    break
+            progress(
+                0.70 + attempt * 0.07,
+                f"初稿{'；'.join(reason_parts)}，正在由 {editor_model} 整篇重编（第 {attempt} 次）…",
+            )
+            rewrite_prompt = _build_speech_rewrite_prompt(
+                compact_events,
+                result,
+                rewrite_max_words,
+                safe_duration,
+                layered_structure,
+                missing_critical_event_ids=missing_critical,
+                fix_binding_precision=bool(broad_bindings),
+                problematic_tts_unit_ids=broken_tts_units,
+            )
+            result = _chat_json(
+                client,
+                editor_model,
+                rewrite_prompt,
+                max(0.1, temperature - 0.1),
+                base_url,
+                "语音故事整篇重编",
+            )
+            normalized = _normalize_story(
+                result,
+                events,
+                target_duration_sec,
+                editor_model,
+                planning_words_per_second=effective_wps,
+            )
+            normalized["editor_model"] = editor_model
+            normalized["workflow"] = "speech_story_editor_v2"
 
     progress(0.68, "正在校验事件覆盖率、故事阶段和解说长度…")
     bound_event_count = len(_narration_event_ids(normalized))
@@ -294,6 +361,7 @@ def generate_story_script(
         or len(normalized.get("outline", [])) < max(5, round(outline_target * 0.7))
         or not _covers_timeline_sections(normalized, events)
         or float(normalized.get("estimated_duration_sec", 0)) >= SHORTS_MAX_DURATION_SEC
+        or _problematic_tts_unit_ids(normalized)
     ):
         draft_duration = float(normalized.get("estimated_duration_sec", 0))
         length_problem = "超过 Shorts 三分钟限制" if draft_duration >= SHORTS_MAX_DURATION_SEC else "偏短"
@@ -312,9 +380,16 @@ def generate_story_script(
             minimum_event_coverage,
             maximum_event_coverage,
             outline_target,
+            layered_structure,
         )
         result = _chat_json(client, editor_model, retry_prompt, temperature, base_url, "最终故事重编")
-        normalized = _normalize_story(result, events, target_duration_sec, editor_model)
+        normalized = _normalize_story(
+            result,
+            events,
+            target_duration_sec,
+            editor_model,
+            planning_words_per_second=effective_wps,
+        )
         normalized["planner_model"] = model
         normalized["editor_model"] = editor_model
         normalized["workflow"] = "visual_story_editor_v2"
@@ -328,6 +403,7 @@ def generate_story_script(
             or len(normalized.get("outline", [])) < minimum_acceptable_outline
             or not _covers_timeline_sections(normalized, events)
             or float(normalized.get("estimated_duration_sec", 0)) >= SHORTS_MAX_DURATION_SEC
+            or _problematic_tts_unit_ids(normalized)
         ):
             raise RuntimeError(
                 "最终故事编辑后仍未达到可用标准："
@@ -340,11 +416,32 @@ def generate_story_script(
                 "请在 API 设置中选择能力更强的故事生成或最终编辑模型后重试。"
             )
     progress(0.88, "正在整理解说断句与镜头绑定…")
-    if float(normalized.get("estimated_duration_sec", 0)) >= SHORTS_MAX_DURATION_SEC:
+    final_duration = float(normalized.get("estimated_duration_sec", 0))
+    final_broad_bindings = _overbroad_narration_bindings(normalized)
+    final_missing_critical = _missing_critical_event_ids(normalized, layered_structure)
+    final_broken_tts_units = _problematic_tts_unit_ids(normalized)
+    if final_duration >= SHORTS_MAX_DURATION_SEC:
         raise RuntimeError(
             f"预计旁白约 {normalized.get('estimated_duration_sec', 0)} 秒，超过 Shorts 三分钟限制。"
             "请缩短故事后重试。"
         )
+    if content_mode == "speech" and (
+        final_broad_bindings or final_missing_critical or final_broken_tts_units
+    ):
+        details = []
+        if final_broad_bindings:
+            details.append("部分解说仍绑定超过 4 个事件")
+        if final_missing_critical:
+            details.append(
+                "仍遗漏关键事件 " + ", ".join(str(item) for item in final_missing_critical)
+            )
+        if final_broken_tts_units:
+            details.append(
+                "语音单元 "
+                + ", ".join(str(item) for item in final_broken_tts_units[:8])
+                + " 仍是过短或依赖下句的片段"
+            )
+        raise RuntimeError("故事重编后仍未达到可用标准：" + "；".join(details) + "。请重试。")
     normalized["content_mode"] = content_mode
     resolved_strategy = _resolved_narrative_strategy(
         plan if content_mode == "visual" else result,
@@ -360,6 +457,9 @@ def generate_story_script(
     ).strip()
     if strategy_reason:
         normalized["narrative_strategy_reason_zh"] = strategy_reason
+    normalized["layered_analysis_used"] = bool(layered_structure)
+    if layered_structure:
+        normalized["layered_analysis_model"] = str(layered_structure.get("model", ""))
     story_json.parent.mkdir(parents=True, exist_ok=True)
     story_json.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
     progress(1.0, f"故事组织完成，共 {len(normalized['narration'])} 句解说")
@@ -403,8 +503,10 @@ def _build_visual_plan_prompt(
     maximum_event_coverage: int,
     outline_target: int,
     narrative_strategy: str,
+    layered_structure: dict[str, Any] | None = None,
 ) -> str:
     strategy_guidance = _narrative_strategy_prompt(narrative_strategy)
+    layered_guidance = _layered_structure_prompt(layered_structure)
     return f"""
 You are the senior story producer for a short-form narrated video. Do not write the final narration yet.
 Read the entire chronological event list and discover the strongest truthful story hidden inside it.
@@ -420,6 +522,8 @@ EDITORIAL GOAL
 - Combine repetitive events into stages, but preserve the strongest turning points from the beginning, middle, and end.
 
 {strategy_guidance}
+
+{layered_guidance}
 
 GROUNDING
 - Separate observation from interpretation.
@@ -468,10 +572,12 @@ def _build_visual_editor_prompt(
     maximum_event_coverage: int,
     outline_target: int,
     narrative_strategy: str,
+    layered_structure: dict[str, Any] | None = None,
 ) -> str:
     strategy_guidance = _narrative_strategy_prompt(
         str(plan.get("narrative_strategy", narrative_strategy))
     )
+    layered_guidance = _layered_structure_prompt(layered_structure)
     return f"""
 You are the final story editor and native English narrator for an immersive observational video.
 Use the producer's plan and the evidence timeline to write the complete final narration.
@@ -494,12 +600,16 @@ STORY SHAPE
 
 {strategy_guidance}
 
+{layered_guidance}
+
 VOICE AND RHYTHM
 - Write in an immersive third-person observational voice with warmth, breath, and human presence.
 - Use concrete sensory-looking details that are actually visible: balance, weight, distance, texture, light, water movement, effort, hesitation, reaction, and before/after contrast.
 - A grounded metaphor, personification, onomatopoeia, or cross-sensory image is allowed when supported, but use at most one conspicuous literary device per story stage.
 - Vary sentence rhythm. Most final sentences should be about 8-18 English words; an occasional shorter line may create emphasis.
 - Every comma is also a TTS boundary. Each comma-delimited clause must be independently speakable and normally contain at least five words. Prefer complete sentences over chains of short comma fragments.
+- Colons, semicolons, periods, question marks, and exclamation marks are also GPT-SoVITS boundaries. Every resulting unit must be a complete thought that works without the following unit.
+- Never leave a colon-ended setup or a dependent opening such as "After the first attempt," "If space is limited," or "Where failure is dangerous," as its own unit. Rewrite it as a complete sentence.
 - Never create standalone fragments such as "Next," "Finally," or "A woman,".
 - Avoid generic AI emotion and documentary filler such as "showing her determination", "confidence and skill", "adventure awaits", "this moment encapsulates", or "a testament to".
 - Do not force a rhetorical question as the opening. Begin with the most specific atmosphere, action, contrast, or unresolved practical situation.
@@ -514,6 +624,7 @@ INTERPRETATION BOUNDARY
 OUTPUT
 - Draft the narration as a coherent whole, then divide it into semantic beats for editing.
 - Each narration beat must bind to the event IDs that support it and include a concise Chinese visual_query.
+- Bind each beat to only 1-4 event IDs that directly support that exact line; never attach an entire stage or chapter to every sentence.
 - event_ids are evidence references, not decoration. Do not bind a line to an unrelated highlight.
 - Return exactly one JSON object and no Markdown:
 {{
@@ -551,7 +662,9 @@ def _build_visual_rewrite_prompt(
     minimum_event_coverage: int,
     maximum_event_coverage: int,
     outline_target: int,
+    layered_structure: dict[str, Any] | None = None,
 ) -> str:
+    layered_guidance = _layered_structure_prompt(layered_structure)
     return f"""
 Act as the final story editor. Replace the rejected draft completely; do not append filler to it.
 
@@ -572,6 +685,11 @@ NON-NEGOTIABLE ACCEPTANCE RULES
 - Avoid generic claims about determination, confidence, skill, adventure, inspiration, or environmental virtue.
 - Do not use standalone connector fragments.
 - Every comma becomes a TTS boundary, so avoid short comma-delimited fragments.
+- Colons, semicolons, periods, question marks, and exclamation marks are also GPT-SoVITS boundaries. Every resulting unit must be a complete independently speakable thought.
+- Never leave a colon-ended setup or a dependent opening such as "After the first attempt," "If space is limited," or "Where failure is dangerous," as its own unit.
+- Bind every narration beat to only 1-4 directly supporting event IDs. Do not reuse an outline stage's full event list on each line.
+
+{layered_guidance}
 
 PRODUCER'S PLAN:
 {json.dumps(plan, ensure_ascii=False)}
@@ -590,8 +708,10 @@ def _build_speech_story_prompt(
     max_words: int,
     requested_style: str,
     narrative_strategy: str,
+    layered_structure: dict[str, Any] | None = None,
 ) -> str:
     strategy_guidance = _narrative_strategy_prompt(narrative_strategy)
+    layered_guidance = _layered_structure_prompt(layered_structure)
     return f"""
 You are a native English science YouTube writer and editor. Write like a knowledgeable person explaining something interesting to a curious audience.
 Do not sound like a documentary narrator, trailer writer, marketer, lecturer, or essayist.
@@ -604,18 +724,24 @@ TARGET
 
 {strategy_guidance}
 
+{layered_guidance}
+
 SOURCE AND FACTS
 - Treat the transcript as the main factual source and use visual descriptions to clarify actions, objects, setting, and shot selection.
 - Use clearly visible labels, chart trends, diagram relationships, tables, and formulas as supporting evidence. Preserve uncertainty and never invent unreadable values or mathematical conclusions.
 - Condense and rewrite the spoken material without losing its supported meaning.
 - Never invent facts, causes, results, quotations, or unseen actions.
 - Every sentence must add information, explain a mechanism, or create a necessary transition.
+- Bind each narration beat to only 1-4 event IDs that directly support that exact line. Never copy an outline or chapter's entire event list onto every sentence.
 
 VOICE
 - Write natural spoken English with varied rhythm, not literal translation or generic AI prose.
 - Let concrete facts create curiosity; do not force drama, emotional filler, abstract praise, or a rhetorical question.
 - Avoid "Let's explore", "Let's take a look", "In this video", "But here's the thing", "fascinating", "remarkable", and other reusable filler.
 - Draft coherent narration first. Do not make it choppy for subtitles; the application splits GPT-SoVITS units afterward.
+- Every comma, semicolon, colon, period, question mark, and exclamation mark creates a separate GPT-SoVITS audio unit. Every resulting unit must be grammatically complete and understandable without the next unit.
+- Never end a unit with a colon. Avoid dependent comma fragments such as "After millions of cycles," "If space is limited," or "Where failure is dangerous,". Prefer complete sentences with periods.
+- A comma-ended unit must normally contain at least five English words.
 
 Return exactly one JSON object and no Markdown:
 {{
@@ -640,10 +766,33 @@ def _build_speech_rewrite_prompt(
     draft: dict[str, Any],
     max_words: int,
     safe_duration_sec: float,
+    layered_structure: dict[str, Any] | None = None,
+    missing_critical_event_ids: list[int] | None = None,
+    fix_binding_precision: bool = False,
+    problematic_tts_unit_ids: list[int] | None = None,
 ) -> str:
+    layered_guidance = _layered_structure_prompt(layered_structure)
+    correction_guidance = []
+    if missing_critical_event_ids:
+        correction_guidance.append(
+            "The replacement must truthfully retain these critical source events: "
+            + ", ".join(str(item) for item in missing_critical_event_ids)
+            + "."
+        )
+    if fix_binding_precision:
+        correction_guidance.append(
+            "Repair evidence binding: every narration beat must reference only 1-4 directly supporting event IDs."
+        )
+    if problematic_tts_unit_ids:
+        correction_guidance.append(
+            "Rewrite the broken GPT-SoVITS units "
+            + ", ".join(str(item) for item in problematic_tts_unit_ids)
+            + ". Each comma, semicolon, colon, period, question mark, and exclamation mark creates a separate audio unit. Every resulting unit must be a complete independently speakable thought."
+        )
+    correction_text = "\n".join(f"- {item}" for item in correction_guidance)
     return f"""
 You are the final native-English editor for a science YouTube Shorts script.
-The rejected draft is too long. Replace the WHOLE script with a coherent shorter version; do not append notes and do not merely cut off the ending.
+The rejected draft failed delivery length, critical coverage, or evidence-binding precision. Replace the WHOLE script with a coherent corrected version; do not append notes and do not merely cut off the ending.
 
 NON-NEGOTIABLE DELIVERY RULES
 - The complete narration must be at most {max_words} English words.
@@ -655,7 +804,14 @@ NON-NEGOTIABLE DELIVERY RULES
 - Treat transcript and visible evidence as factual boundaries. Never invent claims, numbers, causes, results, labels, or unseen actions.
 - Write concise natural spoken English, not literal translation, trailer language, or generic AI prose.
 - Avoid isolated connectors and short comma fragments because every comma may become a GPT-SoVITS boundary.
+- Every comma, semicolon, colon, period, question mark, and exclamation mark creates a separate GPT-SoVITS audio unit. Each resulting unit must be grammatically complete and understandable without the next unit.
+- Never end a unit with a colon. Do not leave dependent openings such as "After millions of cycles," "If space is limited," or "Where failure is dangerous," as separate units. Rewrite them as complete sentences.
+- A comma-ended unit must normally contain at least five English words. Prefer short complete sentences with periods when in doubt.
 - Keep valid event_ids on every narration beat and provide a concise Chinese visual_query.
+- Every narration beat must bind to only 1-4 event IDs that directly support that exact line. Never paste a chapter or outline's full event list onto multiple lines.
+{correction_text}
+
+{layered_guidance}
 
 Return exactly one complete JSON object in the same schema as the rejected draft, with title, angle, hook, selected_event_ids, omitted_event_ids, outline, and narration. Return no Markdown.
 
@@ -664,6 +820,38 @@ REJECTED OVERLONG DRAFT:
 
 SOURCE EVENTS:
 {json.dumps(events, ensure_ascii=False)}
+""".strip()
+
+
+def _layered_structure_prompt(layered_structure: dict[str, Any] | None) -> str:
+    if not layered_structure:
+        return ""
+    compact = {
+        "whole_video_summary_zh": layered_structure.get("whole_video_summary_zh", ""),
+        "central_thread_zh": layered_structure.get("central_thread_zh", ""),
+        "global_progression_zh": layered_structure.get("global_progression_zh", ""),
+        "chapters": layered_structure.get("chapters", []),
+        "cross_chapter_connections": layered_structure.get("cross_chapter_connections", []),
+        "global_turning_point_event_ids": layered_structure.get(
+            "global_turning_point_event_ids", []
+        ),
+        "recommended_highlight_event_ids": layered_structure.get(
+            "recommended_highlight_event_ids", []
+        ),
+        "routine_or_repetitive_event_ids": layered_structure.get(
+            "routine_or_repetitive_event_ids", []
+        ),
+        "story_angles": layered_structure.get("story_angles", []),
+        "editorial_cautions_zh": layered_structure.get("editorial_cautions_zh", []),
+    }
+    return f"""
+OPTIONAL LONG-VIDEO LAYERED ANALYSIS
+- Use this as a global editorial map that connects distant events and distinguishes turning points from repetition.
+- This map ranks editorial priorities; it is not a checklist. Do not expand every chapter, highlight, or secondary detail into narration.
+- Preserve the critical turning points, then omit routine or secondary material once the concise causal story is complete.
+- It is guidance, not new evidence. Every final claim and event binding must still be supported by SOURCE EVENTS.
+- Prefer its cross-chapter connections and highlights when they remain consistent with the detailed timeline.
+{json.dumps(compact, ensure_ascii=False)}
 """.strip()
 
 
@@ -700,7 +888,7 @@ def _normalize_visual_plan(
         raise ValueError("故事规划模型没有返回可用的全片故事阶段")
     outline_ids = {event_id for item in outline for event_id in item["event_ids"]}
     highlights = sorted(set(ids(result.get("highlight_event_ids"))) | outline_ids)
-    return {
+    normalized = {
         "title": str(result.get("title", "Untitled Story")).strip(),
         "angle": str(result.get("angle", "")).strip(),
         "premise": str(result.get("premise", "")).strip(),
@@ -715,6 +903,7 @@ def _normalize_visual_plan(
         "highlight_event_ids": highlights,
         "outline": outline,
     }
+    return normalized
 
 
 def _normalize_story(
@@ -722,6 +911,7 @@ def _normalize_story(
     events: list[dict[str, Any]],
     target_duration_sec: int,
     model: str,
+    planning_words_per_second: float | None = None,
 ) -> dict[str, Any]:
     valid_ids = {int(event.get("id", 0)) for event in events}
 
@@ -768,6 +958,20 @@ def _normalize_story(
     narration = _merge_short_narration_items(narration)
     total_words = sum(int(item.get("word_count", 0)) for item in narration)
     total_duration = sum(float(item.get("estimated_duration_sec", 0)) for item in narration)
+    timing_model = "english_word_syllable_v3"
+    effective_wps = None
+    if planning_words_per_second and total_words > 0 and narration:
+        effective_wps = max(0.9, min(2.2, float(planning_words_per_second)))
+        planned_total = total_words / effective_wps
+        if total_duration > 0:
+            scale = planned_total / total_duration
+            for item in narration:
+                item["estimated_duration_sec"] = round(
+                    float(item.get("estimated_duration_sec", 0)) * scale,
+                    2,
+                )
+        total_duration = sum(float(item.get("estimated_duration_sec", 0)) for item in narration)
+        timing_model = "planning_voice_rate_v1"
 
     narration_selected = {event_id for item in narration for event_id in item["event_ids"]}
     selected = sorted(narration_selected)
@@ -789,9 +993,9 @@ def _normalize_story(
             }
         )
 
-    return {
+    normalized = {
         "schema_version": 1,
-        "timing_model": "english_word_syllable_v3",
+        "timing_model": timing_model,
         "model": model,
         "target_duration_sec": target_duration_sec,
         "estimated_duration_sec": round(total_duration, 2),
@@ -804,12 +1008,16 @@ def _normalize_story(
         "outline": outline,
         "narration": narration,
     }
+    if effective_wps is not None:
+        normalized["planning_words_per_second"] = round(effective_wps, 3)
+    return normalized
 
 
 def refresh_story_timing(story: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Upgrade stories saved with the old, overly-fast per-line estimates locally."""
     if not story or story.get("timing_model") in {
         "english_word_syllable_v3",
+        "planning_voice_rate_v1",
         "measured_voice_projection_v1",
         "measured_voice_edit_projection_v1",
     }:
@@ -861,6 +1069,7 @@ def normalize_story_after_text_edit(
     )
     old_saved_total = float(story.get("estimated_duration_sec", 0) or 0)
     measured = str(story.get("timing_model", "")).startswith("measured_voice")
+    planning = str(story.get("timing_model", "")) == "planning_voice_rate_v1"
     timing_scale = 1.0
     if measured:
         if measured_timing_scale is not None and measured_timing_scale > 0:
@@ -887,10 +1096,31 @@ def normalize_story_after_text_edit(
                     "word_count": word_count,
                 }
             )
+    if planning and refreshed_items:
+        planning_wps = max(
+            0.9,
+            min(2.2, float(story.get("planning_words_per_second", 1.45) or 1.45)),
+        )
+        planned_total = sum(
+            int(item.get("word_count", 0)) for item in refreshed_items
+        ) / planning_wps
+        natural_total = sum(
+            float(item.get("estimated_duration_sec", 0)) for item in refreshed_items
+        )
+        if natural_total > 0:
+            for item in refreshed_items:
+                item["estimated_duration_sec"] = round(
+                    float(item.get("estimated_duration_sec", 0))
+                    * planned_total
+                    / natural_total,
+                    2,
+                )
     refreshed = dict(story)
     refreshed["timing_model"] = (
         "measured_voice_edit_projection_v1"
         if measured
+        else "planning_voice_rate_v1"
+        if planning
         else "english_word_syllable_v3"
     )
     refreshed["narration"] = refreshed_items
@@ -916,6 +1146,83 @@ def _narration_event_ids(story: dict[str, Any]) -> set[int]:
     }
 
 
+def _overbroad_narration_bindings(story: dict[str, Any], limit: int = 4) -> list[int]:
+    return [
+        int(item.get("id", index) or index)
+        for index, item in enumerate(story.get("narration", []), start=1)
+        if isinstance(item, dict)
+        and len(
+            {
+                int(event_id)
+                for event_id in item.get("event_ids", [])
+                if str(event_id).isdigit()
+            }
+        )
+        > limit
+    ]
+
+
+_DEPENDENT_TTS_OPENING = re.compile(
+    r"^(?:and\s+where|but\s+if|even\s+if|even\s+though|as\s+soon\s+as|"
+    r"after|before|when|whenever|where|wherever|if|unless|although|though|"
+    r"while|because|since|once|until)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _problematic_tts_unit_ids(story: dict[str, Any]) -> list[int]:
+    """Find punctuation-split units that GPT-SoVITS cannot read naturally alone."""
+    problematic: list[int] = []
+    for index, item in enumerate(story.get("narration", []), start=1):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text_en", "")).strip()
+        if not text:
+            continue
+        unit_id = int(item.get("id", index) or index)
+        actual_units = split_gpt_sovits_units(text)
+        is_problematic = False
+        for unit in actual_units:
+            words = len(re.findall(r"\b[\w'-]+\b", unit))
+            if words < 3:
+                is_problematic = True
+                break
+            if _DEPENDENT_TTS_OPENING.match(unit) and words < 6:
+                is_problematic = True
+                break
+            if unit.endswith((":", "：")):
+                is_problematic = True
+                break
+            if unit.endswith((",", "，")) and (
+                words < 5 or _DEPENDENT_TTS_OPENING.match(unit)
+            ):
+                is_problematic = True
+                break
+        if is_problematic:
+            problematic.append(unit_id)
+    return problematic
+
+
+def _critical_layered_event_ids(layered_structure: dict[str, Any] | None) -> set[int]:
+    if not layered_structure:
+        return set()
+    return {
+        int(event_id)
+        for key in (
+            "global_turning_point_event_ids",
+            "recommended_highlight_event_ids",
+        )
+        for event_id in layered_structure.get(key, [])
+        if str(event_id).isdigit()
+    }
+
+
+def _missing_critical_event_ids(
+    story: dict[str, Any], layered_structure: dict[str, Any] | None
+) -> list[int]:
+    return sorted(_critical_layered_event_ids(layered_structure) - _narration_event_ids(story))
+
+
 def _covers_timeline_sections(
     story: dict[str, Any],
     events: list[dict[str, Any]],
@@ -939,53 +1246,13 @@ def _covers_timeline_sections(
 
 
 def _merge_short_narration_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = []
-    pending: dict[str, Any] | None = None
-
-    def combine(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
-        left_text = str(left.get("text_en", "")).rstrip()
-        right_text = str(right.get("text_en", "")).lstrip()
-        separator = "" if left_text.endswith(("-", "—", "–")) else " "
-        queries = [
-            value for value in (
-                str(left.get("visual_query", "")).strip(),
-                str(right.get("visual_query", "")).strip(),
-            )
-            if value
-        ]
-        return {
-            "id": 0,
-            "event_ids": sorted(set(left.get("event_ids", [])) | set(right.get("event_ids", []))),
-            "text_en": f"{left_text}{separator}{right_text}".strip(),
-            "visual_query": "；".join(dict.fromkeys(queries)),
-            "estimated_duration_sec": round(
-                float(left.get("estimated_duration_sec", 0))
-                + float(right.get("estimated_duration_sec", 0)),
-                2,
-            ),
-            "word_count": int(left.get("word_count", 0)) + int(right.get("word_count", 0)),
-        }
-
-    for item in items:
-        current = dict(item)
-        if pending is not None:
-            current = combine(pending, current)
-            pending = None
-        if int(current.get("word_count", 0)) < 3:
-            if merged:
-                merged[-1] = combine(merged[-1], current)
-            else:
-                pending = current
-        else:
-            merged.append(current)
-    if pending is not None:
-        if merged:
-            merged[-1] = combine(merged[-1], pending)
-        else:
-            merged.append(pending)
-    for index, item in enumerate(merged, start=1):
+    # Keep the same boundaries GPT-SoVITS will use. Joining text while leaving
+    # punctuation in place only makes the UI look merged; the TTS tool splits it
+    # again and produces timing/SRT drift.
+    normalized = [dict(item) for item in items]
+    for index, item in enumerate(normalized, start=1):
         item["id"] = index
-    return merged
+    return normalized
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:

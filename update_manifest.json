@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "version": "2.0.5",
+  "version": "2.0.6",
   "scope": "repository",
   "files": [
     ".env.example",
@@ -22,6 +22,7 @@
     "storycut_v2/src/duration_revision_service.py",
     "storycut_v2/src/export_service.py",
     "storycut_v2/src/fact_review_service.py",
+    "storycut_v2/src/layered_analysis_service.py",
     "storycut_v2/src/matching_service.py",
     "storycut_v2/src/media_service.py",
     "storycut_v2/src/quality_service.py",
@@ -34,6 +35,7 @@
     "storycut_v2/tests/test_duration_revision_service.py",
     "storycut_v2/tests/test_export_service.py",
     "storycut_v2/tests/test_fact_review_service.py",
+    "storycut_v2/tests/test_layered_analysis_service.py",
     "storycut_v2/tests/test_quality_service.py",
     "storycut_v2/tests/test_repository_updater.py",
     "storycut_v2/tests/test_story_service.py",

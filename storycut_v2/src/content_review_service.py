@@ -12,6 +12,7 @@ from .fact_review_service import (
     _select_evidence_events,
 )
 from .vision_service import api_configuration, friendly_api_error
+from .voice_service import split_gpt_sovits_units
 
 
 _TERM_CATEGORIES = {
@@ -85,6 +86,11 @@ def review_story_content(
         narration,
         model,
     )
+    for issue in fact_report.get("issues", []):
+        if isinstance(issue, dict):
+            issue["suggestion_en"] = _safe_single_tts_suggestion(
+                str(issue.get("suggestion_en", ""))
+            )
     terminology_report = _normalize_terminology_report(
         raw.get("terminology_review", {})
         if isinstance(raw.get("terminology_review"), dict)
@@ -138,6 +144,8 @@ TERMINOLOGY REVIEW
 
 SAFE APPLICATION
 - Every issue must bind to exactly one narration ID and provide a complete, minimally corrected replacement for that line.
+- GPT-SoVITS treats every comma, semicolon, colon, period, question mark, and exclamation mark as an audio-unit boundary. Every suggestion_en must remain one complete independently speakable unit and must not introduce a second sentence or punctuation-split clause.
+- Do not end suggestion_en with a comma, semicolon, or colon. Do not return dependent fragments such as "After many cycles," or "If space is limited,".
 - Combine multiple problems affecting the same line into one issue inside each section. Return at most 12 issues per section.
 - If one line has both a factual problem and a terminology problem, put the fully combined replacement only in fact_review and omit that line from terminology_review so two suggestions can never overwrite each other.
 
@@ -216,9 +224,10 @@ def _normalize_terminology_report(
         )
         if len(narration_ids) != 1 or narration_ids[0] in occupied_ids:
             continue
-        suggestion = str(raw.get("suggestion_en", "")).strip()
-        if not suggestion:
+        raw_suggestion = str(raw.get("suggestion_en", "")).strip()
+        if not raw_suggestion:
             continue
+        suggestion = _safe_single_tts_suggestion(raw_suggestion)
         occupied_ids.add(narration_ids[0])
         category = str(raw.get("category", "term_variant")).lower()
         variants = raw.get("variants", [])
@@ -261,3 +270,11 @@ def _normalize_terminology_report(
         "issues": issues,
         "disclaimer": "只检查文案中的术语、单位、名称和数字一致性；具体发音由配音工具处理。",
     }
+
+
+def _safe_single_tts_suggestion(value: str) -> str:
+    suggestion = value.strip()
+    if not suggestion or suggestion.endswith((",", "，", ";", "；", ":", "：")):
+        return ""
+    units = split_gpt_sovits_units(suggestion)
+    return suggestion if len(units) == 1 else ""

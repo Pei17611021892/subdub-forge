@@ -11,8 +11,10 @@ from unittest.mock import patch
 from src.story_service import (
     _build_speech_story_prompt,
     _normalize_story,
+    _problematic_tts_unit_ids,
     generate_story_script,
     narrative_strategy_options,
+    normalize_story_after_text_edit,
     refresh_story_timing,
 )
 
@@ -28,6 +30,70 @@ class StoryServiceTests(unittest.TestCase):
         unchanged_prompt = _build_speech_story_prompt([], 180, 300, "existing", "none")
         self.assertIn("First identify the dominant subject", auto_prompt)
         self.assertNotIn("NARRATIVE STRATEGY", unchanged_prompt)
+
+    def test_layered_structure_is_optional_prompt_context(self) -> None:
+        default_prompt = _build_speech_story_prompt([], 180, 300, "existing", "none")
+        layered_prompt = _build_speech_story_prompt(
+            [],
+            180,
+            300,
+            "existing",
+            "none",
+            {
+                "central_thread_zh": "跨章节核心任务",
+                "recommended_highlight_event_ids": [2, 8],
+            },
+        )
+        self.assertNotIn("OPTIONAL LONG-VIDEO LAYERED ANALYSIS", default_prompt)
+        self.assertIn("OPTIONAL LONG-VIDEO LAYERED ANALYSIS", layered_prompt)
+        self.assertIn("跨章节核心任务", layered_prompt)
+        self.assertIn("not a checklist", layered_prompt)
+        self.assertIn("only 1-4 event IDs", layered_prompt)
+
+    def test_planning_voice_rate_calibrates_story_duration(self) -> None:
+        words = " ".join(f"word{index}" for index in range(300)) + "."
+        result = _normalize_story(
+            {
+                "narration": [
+                    {
+                        "event_ids": [1],
+                        "text_en": words,
+                        "visual_query": "测试画面",
+                    }
+                ]
+            },
+            [{"id": 1}],
+            180,
+            "test-model",
+            planning_words_per_second=1.339,
+        )
+
+        self.assertEqual(result["timing_model"], "planning_voice_rate_v1")
+        self.assertEqual(result["planning_words_per_second"], 1.339)
+        self.assertAlmostEqual(result["estimated_duration_sec"], 224.05, delta=0.1)
+
+        edited = normalize_story_after_text_edit(result)
+        self.assertEqual(edited["timing_model"], "planning_voice_rate_v1")
+        self.assertAlmostEqual(
+            edited["estimated_duration_sec"],
+            edited["word_count"] / 1.339,
+            delta=0.1,
+        )
+
+    def test_gpt_sovits_fragment_check_catches_dependent_and_short_units(self) -> None:
+        story = {
+            "narration": [
+                {"id": 1, "text_en": "A clamped joint looks perfectly still,"},
+                {"id": 2, "text_en": "After millions of cycles,"},
+                {"id": 3, "text_en": "the nut starts turning,"},
+                {"id": 4, "text_en": "The next idea stops rotation itself:"},
+                {"id": 5, "text_en": "The nut can eventually fall off."},
+                {"id": 6, "text_en": "Once machines start running."},
+                {"id": 7, "text_en": "Motors spin. Gears hit. Structures flex."},
+            ]
+        }
+
+        self.assertEqual(_problematic_tts_unit_ids(story), [2, 3, 4, 6, 7])
 
     def test_speech_mode_rewrites_an_overlong_draft_before_failing(self) -> None:
         events = [
@@ -115,6 +181,61 @@ class StoryServiceTests(unittest.TestCase):
         self.assertEqual(result["workflow"], "speech_story_editor_v2")
         self.assertLess(result["estimated_duration_sec"], 179)
         self.assertTrue(story_saved)
+
+    def test_speech_mode_rewrites_broken_gpt_sovits_units(self) -> None:
+        events = [{"id": 1, "start": 0, "end": 10, "transcript": "持续震动会让螺母松动。"}]
+        broken = {
+            "title": "Fasteners",
+            "outline": [{"event_ids": [1], "purpose": "explain", "summary": "原理"}],
+            "narration": [
+                {
+                    "event_ids": [1],
+                    "text_en": "After millions of cycles, the nut can begin to turn.",
+                    "visual_query": "震动中的螺母",
+                }
+            ],
+        }
+        revised = {
+            "title": "Fasteners",
+            "outline": [{"event_ids": [1], "purpose": "explain", "summary": "原理"}],
+            "narration": [
+                {
+                    "event_ids": [1],
+                    "text_en": "Millions of vibration cycles can gradually overcome the friction holding the nut.",
+                    "visual_query": "震动中的螺母",
+                }
+            ],
+        }
+        responses = iter([broken, revised])
+        prompts: list[str] = []
+
+        class FakeCompletions:
+            def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                prompts.append(str(kwargs["messages"][0]["content"]))
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(next(responses))))]
+                )
+
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            events_path = root / "analysis" / "events.json"
+            story_path = root / "script" / "story.json"
+            events_path.parent.mkdir(parents=True)
+            events_path.write_text(
+                json.dumps({"content_mode": "speech", "events": events}), encoding="utf-8"
+            )
+            config = {"shared": {"env_file": ".env"}, "story": {"model": "model"}}
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "openai.OpenAI", return_value=fake_client
+            ):
+                result = generate_story_script(
+                    events_path, story_path, 180, config, root, lambda *_args: None
+                )
+
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("broken GPT-SoVITS units", prompts[1])
+        self.assertEqual(_problematic_tts_unit_ids(result), [])
 
     def test_visual_mode_plans_then_runs_final_editor(self) -> None:
         events = [
@@ -246,7 +367,7 @@ class StoryServiceTests(unittest.TestCase):
             self.assertTrue(story_path.exists())
             self.assertTrue(story_path.with_name("story_plan.json").exists())
 
-    def test_short_connector_is_not_left_as_its_own_tts_unit(self) -> None:
+    def test_short_connector_remains_visible_for_tts_quality_validation(self) -> None:
         events = [{"id": 1}, {"id": 2}]
         result = _normalize_story(
             {
@@ -263,9 +384,9 @@ class StoryServiceTests(unittest.TestCase):
             60,
             "test-model",
         )
-        self.assertEqual(len(result["narration"]), 1)
-        self.assertTrue(result["narration"][0]["text_en"].startswith("Next,"))
-        self.assertEqual(result["narration"][0]["event_ids"], [1, 2])
+        self.assertEqual(len(result["narration"]), 2)
+        self.assertEqual(result["narration"][0]["text_en"], "Next,")
+        self.assertEqual(_problematic_tts_unit_ids(result), [1])
 
     def test_old_story_timing_is_upgraded_without_an_api_call(self) -> None:
         refreshed, changed = refresh_story_timing(

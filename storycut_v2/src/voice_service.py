@@ -365,26 +365,7 @@ def split_gpt_sovits_units(text: str) -> list[str]:
     tail = cleaned[start:].strip()
     if tail:
         units.append(tail)
-    units = units or [cleaned]
-    # GPT-SoVITS splits at punctuation, but isolated connectors such as
-    # "Next," or "All right," sound unnatural and inflate the displayed line
-    # count. Merge very short fragments into the following unit (or the
-    # preceding one when they occur at the end).
-    merged: list[str] = []
-    pending: list[str] = []
-    for unit in units:
-        word_count = len(re.findall(r"\b[\w'-]+\b", unit))
-        if word_count < 3:
-            pending.append(unit)
-            continue
-        if pending:
-            unit = " ".join([*pending, unit])
-            pending = []
-        merged.append(unit)
-    if pending:
-        tail = " ".join(pending)
-        if merged:
-            merged[-1] = f"{merged[-1]} {tail}"
-        else:
-            merged.append(tail)
-    return merged
+    # Do not merge short units locally. GPT-SoVITS still sees the punctuation
+    # inside a merged SRT line and splits it again, so merging would only hide
+    # the real voice-unit count from StoryCut's validation and timing model.
+    return units or [cleaned]

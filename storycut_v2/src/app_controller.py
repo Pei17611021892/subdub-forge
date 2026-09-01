@@ -35,6 +35,7 @@ from .story_service import (
 )
 from .duration_revision_service import propose_duration_revision
 from .content_review_service import review_story_content
+from .layered_analysis_service import analyze_layered_structure
 from .matching_service import (
     apply_voice_timing,
     adjust_shot_boundary,
@@ -135,6 +136,9 @@ class AppController(QObject):
         self._analysis_content_mode = str(
             self._config.get("analysis", {}).get("content_mode", "speech")
         )
+        self._layered_analysis_enabled = bool(
+            self._config.get("layered_analysis", {}).get("enabled", True)
+        )
         self._analysis_busy = False
         self._analysis_progress = 0.0
         self._analysis_status = "等待开始"
@@ -201,9 +205,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.2.4"))
+            self._app_version = str(read_version().get("version", "0.2.6"))
         except Exception:
-            self._app_version = "0.2.4"
+            self._app_version = "0.2.6"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -330,6 +334,50 @@ class AppController(QObject):
         if self._analysis_content_mode == "visual":
             return "纯画面叙事：跳过语音识别，连续采样画面并详细分析动作、环境和事件变化。"
         return "语音与画面：转写人声，并用关键画面补充上下文（现有默认流程）。"
+
+    @Property(bool, notify=analysisChanged)
+    def layeredAnalysisEnabled(self) -> bool:
+        return self._layered_analysis_enabled
+
+    @Property(bool, notify=analysisChanged)
+    def layeredAnalysisSuggested(self) -> bool:
+        threshold = max(
+            60.0,
+            float(
+                self._config.get("layered_analysis", {}).get(
+                    "suggestion_threshold_sec", 300
+                )
+                or 300
+            ),
+        )
+        return self.durationSeconds >= threshold and not self._layered_analysis_enabled
+
+    @Property(str, notify=analysisChanged)
+    def layeredAnalysisHint(self) -> str:
+        threshold = max(
+            60.0,
+            float(
+                self._config.get("layered_analysis", {}).get(
+                    "suggestion_threshold_sec", 300
+                )
+                or 300
+            ),
+        )
+        if self._layered_analysis_enabled:
+            layered_file = (
+                self._current_project_file.parent / "analysis" / "layered_structure.json"
+                if self._current_project_file
+                else None
+            )
+            if layered_file and layered_file.exists():
+                return "分层理解已生成；下次组织故事会引用全片章节、跨场景联系和关键转折。"
+            return "已开启；重新理解原片时会增加分段分析与全片综合 API 请求。"
+        if self.durationSeconds >= threshold:
+            return (
+                f"视频达到 {self._format_time(threshold)}，建议开启。"
+                "它能连接远距离场景并区分关键转折与重复内容。"
+            )
+        return "可选增强，默认关闭；不开启时完全沿用当前理解与故事生成流程。"
 
     @Property(str, notify=analysisChanged)
     def analysisElapsedText(self) -> str:
@@ -509,7 +557,19 @@ class AppController(QObject):
         if bool(self._fact_review.get("stale", False)) or bool(
             self._terminology_review.get("stale", False)
         ):
+            applied_count = sum(
+                bool(item.get("applied", False)) for item in self.contentReviewIssues
+            )
+            if applied_count:
+                return f"已应用 {applied_count} 条建议；文案已更新，建议重新审查"
             return "英文解说已修改，旧文案审查结果需要重新检查"
+        all_issues = self.contentReviewIssues
+        applied_count = sum(bool(item.get("applied", False)) for item in all_issues)
+        pending_count = self.contentReviewPendingCount
+        if all_issues and pending_count == 0 and applied_count:
+            return f"文案审查完成：全部 {applied_count} 条可应用建议已应用"
+        if applied_count:
+            return f"已应用 {applied_count} 条建议，剩余 {pending_count} 条待处理"
         fact_count = int(self._fact_review.get("issue_count", 0) or 0)
         term_count = int(self._terminology_review.get("issue_count", 0) or 0)
         if fact_count + term_count == 0:
@@ -565,6 +625,20 @@ class AppController(QObject):
             )
             combined.append(value)
         return combined
+
+    @Property(int, notify=terminologyReviewChanged)
+    def contentReviewPendingCount(self) -> int:
+        return sum(
+            1
+            for item in self.contentReviewIssues
+            if not bool(item.get("applied", False))
+            and len(item.get("narration_ids", [])) == 1
+            and bool(str(item.get("suggestion_en", "")).strip())
+            and len(
+                split_gpt_sovits_units(str(item.get("suggestion_en", "")))
+            )
+            == 1
+        )
 
     @Property("QVariantList", notify=terminologyReviewChanged)
     def contentReviewCanonicalTerms(self) -> list[dict[str, object]]:
@@ -1206,6 +1280,10 @@ class AppController(QObject):
             )
             self._narrative_strategy = saved_strategy
             settings["narrative_strategy"] = saved_strategy
+            self._layered_analysis_enabled = bool(
+                self._config.get("layered_analysis", {}).get("enabled", True)
+            )
+            settings["layered_analysis_enabled"] = self._layered_analysis_enabled
         project_file.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -1372,6 +1450,9 @@ class AppController(QObject):
                     self._config.get("story", {}).get("narrative_strategy", "auto"),
                 )
             )
+            self._layered_analysis_enabled = bool(
+                self._config.get("layered_analysis", {}).get("enabled", True)
+            )
             cover_path = project_file.parent / "cache" / "cover.jpg"
             self._cover_url = cover_path.as_uri() if cover_path.exists() else ""
             self._preview_url = ""
@@ -1512,6 +1593,40 @@ class AppController(QObject):
         self.analysisChanged.emit()
         self.noticeChanged.emit()
 
+    @Slot(bool)
+    def setLayeredAnalysisEnabled(self, enabled: bool) -> None:
+        if not bool(
+            self._config.get("layered_analysis", {}).get("manual_control", False)
+        ):
+            self._notice = "分层理解已由 StoryCut 自动管理，无需手动设置"
+            self.noticeChanged.emit()
+            return
+        value = bool(enabled)
+        if value == self._layered_analysis_enabled:
+            return
+        self._layered_analysis_enabled = value
+        if self._current_project_file and self._current_project_file.exists():
+            try:
+                payload = json.loads(
+                    self._current_project_file.read_text(encoding="utf-8")
+                )
+                payload.setdefault("settings", {})[
+                    "layered_analysis_enabled"
+                ] = value
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        self._notice = (
+            "已开启分层理解；请重新理解原片以生成全片结构"
+            if value
+            else "已关闭分层理解；后续将完全沿用当前默认流程"
+        )
+        self.analysisChanged.emit()
+        self.noticeChanged.emit()
+
     @Slot(str)
     def setNarrativeStrategy(self, strategy: str) -> None:
         normalized = normalize_narrative_strategy(strategy)
@@ -1563,6 +1678,7 @@ class AppController(QObject):
         analysis_dir = project_file.parent / "analysis"
         audio = analysis_dir / "audio_16k_mono.wav"
         content_mode = self._analysis_content_mode
+        layered_enabled = self._layered_analysis_enabled
 
         status_file = analysis_dir / "status.json"
 
@@ -1699,7 +1815,8 @@ class AppController(QObject):
                             if value > 0.02:
                                 elapsed = time.monotonic() - vision_started
                                 eta = elapsed * (1.0 - value) / value
-                            report(0.82 + value * 0.17, status, max(3.0, eta))
+                            span = 0.10 if layered_enabled else 0.17
+                            report(0.82 + value * span, status, max(3.0, eta))
 
                         describe_event_keyframes(
                             analysis_dir / "events.json",
@@ -1714,7 +1831,32 @@ class AppController(QObject):
                                 f"纯画面叙事必须完成视觉描述，当前无法继续：{exc}"
                             ) from exc
                         vision_warning = str(exc)
-                        report(0.99, f"视觉描述已跳过：{vision_warning}")
+                        report(
+                            0.92 if layered_enabled else 0.99,
+                            f"视觉描述已跳过：{vision_warning}",
+                        )
+                layered_file = analysis_dir / "layered_structure.json"
+                layered_warning = ""
+                if layered_enabled and not skip_vision:
+                    try:
+                        def layered_report(value: float, status: str) -> None:
+                            report(0.92 + min(max(value, 0.0), 1.0) * 0.07, status)
+
+                        analyze_layered_structure(
+                            analysis_dir / "events.json",
+                            layered_file,
+                            self._config,
+                            self._root,
+                            layered_report,
+                        )
+                    except Exception as exc:
+                        layered_file.unlink(missing_ok=True)
+                        layered_warning = str(exc)
+                        report(0.99, f"基础理解已完成；分层理解未生成：{layered_warning}")
+                else:
+                    layered_file.unlink(missing_ok=True)
+                    if layered_enabled and skip_vision:
+                        layered_warning = "仅本地预处理不会调用分层理解 API"
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
                 payload["stage"] = "understood"
                 payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
@@ -1727,15 +1869,27 @@ class AppController(QObject):
                 payload["artifacts"]["scenes"] = "analysis/scenes.json"
                 payload["artifacts"]["keyframes"] = "analysis/keyframes"
                 payload["artifacts"]["events"] = "analysis/events.json"
+                if layered_file.exists():
+                    payload["artifacts"]["layered_structure"] = "analysis/layered_structure.json"
+                else:
+                    payload["artifacts"].pop("layered_structure", None)
                 if vision_warning:
                     payload.setdefault("warnings", {})["vision"] = vision_warning
                 else:
                     payload.get("warnings", {}).pop("vision", None)
+                if layered_warning:
+                    payload.setdefault("warnings", {})["layered_analysis"] = layered_warning
+                else:
+                    payload.get("warnings", {}).pop("layered_analysis", None)
                 project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
                 if skip_vision:
                     message = "本地结构化完成；未生成视觉描述。配置 API 后建议重新理解原片，再组织故事"
                 elif vision_warning:
                     message = f"原片结构化完成；视觉描述生成失败：{vision_warning}"
+                elif layered_file.exists():
+                    message = "原片与分层结构理解完成，可以开始组织故事"
+                elif layered_warning:
+                    message = f"原片理解完成；分层理解未生成：{layered_warning}"
                 else:
                     message = "原片理解完成，可以开始组织故事"
                 status_file.write_text(
@@ -1837,6 +1991,12 @@ class AppController(QObject):
                     self._root,
                     report,
                     narrative_strategy=self._narrative_strategy,
+                    layered_structure_json=(
+                        project_file.parent / "analysis" / "layered_structure.json"
+                        if self._layered_analysis_enabled
+                        else None
+                    ),
+                    planning_words_per_second=self._planning_words_per_second(),
                 )
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
                 payload["stage"] = "scripted"
@@ -1882,7 +2042,11 @@ class AppController(QObject):
         narration_id = int(self._story_narration[index].get("id", index + 1) or index + 1)
         self._apply_narration_replacements({narration_id: cleaned})
 
-    def _apply_narration_replacements(self, replacements: dict[int, str]) -> int:
+    def _apply_narration_replacements(
+        self,
+        replacements: dict[int, str],
+        invalidate_reviews: bool = True,
+    ) -> int:
         if not self._current_project_file or not replacements:
             return 0
         measured_scale: float | None = None
@@ -1939,7 +2103,7 @@ class AppController(QObject):
                 self._matching_status = "文案断句已变化，请重新匹配镜头"
                 self.matchingChanged.emit()
         self._invalidate_duration_revision()
-        if self._fact_review:
+        if invalidate_reviews and self._fact_review:
             self._fact_review["stale"] = True
             self._fact_review_status = "英文解说已修改，旧审查结果需要重新检查"
             review_file = self._current_project_file.parent / "script" / "fact_review.json"
@@ -1950,7 +2114,7 @@ class AppController(QObject):
             except OSError:
                 pass
             self.factReviewChanged.emit()
-        if self._terminology_review:
+        if invalidate_reviews and self._terminology_review:
             self._terminology_review["stale"] = True
             self._terminology_review_status = (
                 "英文解说已修改，旧术语检查结果需要重新检查"
@@ -1968,7 +2132,7 @@ class AppController(QObject):
             except OSError:
                 pass
             self.terminologyReviewChanged.emit()
-        if self._fact_review or self._terminology_review:
+        if invalidate_reviews and (self._fact_review or self._terminology_review):
             content_file = (
                 self._current_project_file.parent / "script" / "content_review.json"
             )
@@ -2021,10 +2185,18 @@ class AppController(QObject):
             self._notice = "找不到这条事实审查建议，请重新审查后再试"
             self.noticeChanged.emit()
             return
+        if bool(issue.get("applied", False)):
+            self._notice = "这条事实审查建议已经应用"
+            self.noticeChanged.emit()
+            return
         suggestion = str(issue.get("suggestion_en", "")).strip()
         narration_ids = issue.get("narration_ids", [])
         narration_ids = narration_ids if isinstance(narration_ids, list) else []
-        if not suggestion or len(narration_ids) != 1:
+        if (
+            not suggestion
+            or len(narration_ids) != 1
+            or len(split_gpt_sovits_units(suggestion)) != 1
+        ):
             self._notice = "这条建议不能安全地自动应用，请根据原因手动修改对应解说"
             self.noticeChanged.emit()
             return
@@ -2041,8 +2213,12 @@ class AppController(QObject):
             self._notice = "对应解说句已经变化，请重新进行事实审查"
             self.noticeChanged.emit()
             return
-        self.updateNarration(index, suggestion)
-        self._notice = f"已将建议应用到解说句 {narration_id}；请重新审查确认"
+        applied = self._apply_narration_replacements(
+            {narration_id: suggestion}, invalidate_reviews=False
+        )
+        if applied:
+            self._mark_content_review_issues_applied([("fact", issue_id)])
+        self._notice = f"已将建议应用到解说句 {narration_id}"
         self.storyChanged.emit()
         self.noticeChanged.emit()
 
@@ -2127,10 +2303,18 @@ class AppController(QObject):
             self._notice = "找不到这条术语建议，请重新检查后再试"
             self.noticeChanged.emit()
             return
+        if bool(issue.get("applied", False)):
+            self._notice = "这条术语建议已经应用"
+            self.noticeChanged.emit()
+            return
         narration_ids = issue.get("narration_ids", [])
         narration_ids = narration_ids if isinstance(narration_ids, list) else []
         suggestion = str(issue.get("suggestion_en", "")).strip()
-        if len(narration_ids) != 1 or not suggestion:
+        if (
+            len(narration_ids) != 1
+            or not suggestion
+            or len(split_gpt_sovits_units(suggestion)) != 1
+        ):
             self._notice = "这条术语建议不能安全自动应用，请手动修改"
             self.noticeChanged.emit()
             return
@@ -2147,8 +2331,12 @@ class AppController(QObject):
             self._notice = "对应解说句已经变化，请重新检查术语"
             self.noticeChanged.emit()
             return
-        self.updateNarration(index, suggestion)
-        self._notice = f"已统一解说句 {narration_id} 的术语；建议重新检查确认"
+        applied = self._apply_narration_replacements(
+            {narration_id: suggestion}, invalidate_reviews=False
+        )
+        if applied:
+            self._mark_content_review_issues_applied([("terminology", issue_id)])
+        self._notice = f"已统一解说句 {narration_id} 的术语"
         self.storyChanged.emit()
         self.noticeChanged.emit()
 
@@ -2159,6 +2347,8 @@ class AppController(QObject):
             for item in self._terminology_review_issues
             if len(item.get("narration_ids", [])) == 1
             and str(item.get("suggestion_en", "")).strip()
+            and not bool(item.get("applied", False))
+            and len(split_gpt_sovits_units(str(item.get("suggestion_en", "")))) == 1
         ]
         if not applicable:
             self._notice = "当前没有可以安全批量应用的术语建议"
@@ -2168,26 +2358,86 @@ class AppController(QObject):
             int(issue["narration_ids"][0]): str(issue["suggestion_en"])
             for issue in applicable
         }
-        applied = self._apply_narration_replacements(replacements)
-        self._notice = f"已应用 {applied} 条术语统一建议；建议重新检查确认"
+        applied = self._apply_narration_replacements(
+            replacements, invalidate_reviews=False
+        )
+        if applied:
+            self._mark_content_review_issues_applied(
+                [("terminology", int(issue.get("id", 0) or 0)) for issue in applicable]
+            )
+        self._notice = f"已应用 {applied} 条术语统一建议"
         self.noticeChanged.emit()
 
     @Slot()
     def applyAllContentReviewSuggestions(self) -> None:
         suggestions: dict[int, str] = {}
+        selected: list[tuple[str, int]] = []
         for issue in self.contentReviewIssues:
             narration_ids = issue.get("narration_ids", [])
             narration_ids = narration_ids if isinstance(narration_ids, list) else []
             suggestion = str(issue.get("suggestion_en", "")).strip()
-            if len(narration_ids) == 1 and suggestion:
-                suggestions.setdefault(int(narration_ids[0]), suggestion)
+            if (
+                len(narration_ids) == 1
+                and suggestion
+                and not bool(issue.get("applied", False))
+                and len(split_gpt_sovits_units(suggestion)) == 1
+            ):
+                narration_id = int(narration_ids[0])
+                if narration_id not in suggestions:
+                    suggestions[narration_id] = suggestion
+                    selected.append(
+                        (str(issue.get("reviewType", "fact")), int(issue.get("id", 0) or 0))
+                    )
         if not suggestions:
             self._notice = "当前没有可以安全批量应用的文案建议"
             self.noticeChanged.emit()
             return
-        applied = self._apply_narration_replacements(suggestions)
-        self._notice = f"已应用 {applied} 条文案审查建议；建议重新审查确认"
+        applied = self._apply_narration_replacements(
+            suggestions, invalidate_reviews=False
+        )
+        if applied:
+            self._mark_content_review_issues_applied(selected)
+        self._notice = f"已应用 {applied} 条文案审查建议"
         self.noticeChanged.emit()
+
+    def _mark_content_review_issues_applied(
+        self, entries: list[tuple[str, int]]
+    ) -> None:
+        targets = {(review_type, int(issue_id)) for review_type, issue_id in entries}
+        for review_type, report, ui_issues in (
+            ("fact", self._fact_review, self._fact_review_issues),
+            ("terminology", self._terminology_review, self._terminology_review_issues),
+        ):
+            target_ids = {
+                issue_id for item_type, issue_id in targets if item_type == review_type
+            }
+            if not target_ids:
+                continue
+            for item in report.get("issues", []):
+                if isinstance(item, dict) and int(item.get("id", 0) or 0) in target_ids:
+                    item["applied"] = True
+            for item in ui_issues:
+                if int(item.get("id", 0) or 0) in target_ids:
+                    item["applied"] = True
+        if self._current_project_file:
+            content_file = self._current_project_file.parent / "script" / "content_review.json"
+            try:
+                content_file.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "fact_review": self._fact_review,
+                            "terminology_review": self._terminology_review,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+        self.factReviewChanged.emit()
+        self.terminologyReviewChanged.emit()
 
     @Slot()
     def generateMatches(self) -> None:
@@ -3486,6 +3736,38 @@ class AppController(QObject):
             candidate = f"{base}-{suffix}"
         return candidate
 
+    def _planning_words_per_second(self) -> float:
+        """Use the user's completed GPT-SoVITS projects to plan future script length."""
+        fallback = float(
+            self._config.get("story", {}).get("planning_words_per_second", 1.45)
+            or 1.45
+        )
+        samples: list[float] = []
+        for story_file in self._projects_dir.glob("*/script/story.json"):
+            try:
+                story = json.loads(story_file.read_text(encoding="utf-8"))
+                if not str(story.get("timing_model", "")).startswith("measured_voice"):
+                    continue
+                words = int(story.get("word_count", 0) or 0)
+                duration = float(story.get("estimated_duration_sec", 0) or 0)
+                if words < 20 or duration < 10:
+                    continue
+                rate = words / duration
+                if 0.9 <= rate <= 2.2:
+                    samples.append(rate)
+            except (OSError, ValueError, TypeError):
+                continue
+        if not samples:
+            return max(0.9, min(2.2, fallback))
+        samples.sort()
+        middle = len(samples) // 2
+        median = (
+            samples[middle]
+            if len(samples) % 2
+            else (samples[middle - 1] + samples[middle]) / 2
+        )
+        return round(max(0.9, min(2.2, median)), 3)
+
     def _refresh_recent_projects(self) -> None:
         projects: list[dict[str, str]] = []
         stage_names = {
@@ -3541,6 +3823,9 @@ class AppController(QObject):
         self._analysis_progress = 0.0
         self._analysis_content_mode = str(
             self._config.get("analysis", {}).get("content_mode", "speech")
+        )
+        self._layered_analysis_enabled = bool(
+            self._config.get("layered_analysis", {}).get("enabled", True)
         )
         self._analysis_status = "等待开始"
         self._analysis_started_at = 0.0
@@ -3608,6 +3893,7 @@ class AppController(QObject):
         self._media_busy = True
         self._notice = "正在读取视频信息并生成封面…"
         self.mediaChanged.emit()
+        self.analysisChanged.emit()
         self.noticeChanged.emit()
 
         def worker() -> None:
@@ -3638,6 +3924,7 @@ class AppController(QObject):
             self._notice = f"视频信息读取完成（{backend}）。可以进入原片分析。"
             self._refresh_recent_projects()
         self.mediaChanged.emit()
+        self.analysisChanged.emit()
         self.noticeChanged.emit()
 
     @Slot(str, str, int, float)

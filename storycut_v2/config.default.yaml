@@ -20,6 +20,8 @@ story:
   editor_model: ''
   base_url: ''
   temperature: 0.55
+  planning_words_per_second: 1.45
+  planning_safe_duration_sec: 174
 
 fact_review:
   auto_after_story: false
@@ -27,6 +29,15 @@ fact_review:
 
 content_review:
   model: ''
+
+layered_analysis:
+  enabled: true
+  suggestion_threshold_sec: 300
+  model: ''
+  temperature: 0.25
+  chunk_duration_sec: 180
+  max_events_per_chunk: 45
+  max_chunks: 10
 
 analysis:
   content_mode: speech

@@ -8,10 +8,20 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from src.content_review_service import review_story_content
+from src.content_review_service import _safe_single_tts_suggestion, review_story_content
 
 
 class ContentReviewServiceTests(unittest.TestCase):
+    def test_direct_apply_suggestion_must_remain_one_complete_tts_unit(self) -> None:
+        self.assertEqual(
+            _safe_single_tts_suggestion("The locking washer resists rotation."),
+            "The locking washer resists rotation.",
+        )
+        self.assertEqual(_safe_single_tts_suggestion("After many cycles,"), "")
+        self.assertEqual(
+            _safe_single_tts_suggestion("The nut turns, and it can fall off."), ""
+        )
+
     def test_one_request_returns_fact_and_terminology_reports(self) -> None:
         response_payload = {
             "fact_review": {
@@ -53,9 +63,11 @@ class ContentReviewServiceTests(unittest.TestCase):
         class FakeCompletions:
             def __init__(self) -> None:
                 self.calls = 0
+                self.prompt = ""
 
-            def create(self, **_kwargs):  # type: ignore[no-untyped-def]
+            def create(self, **kwargs):  # type: ignore[no-untyped-def]
                 self.calls += 1
+                self.prompt = str(kwargs["messages"][0]["content"])
                 return SimpleNamespace(
                     choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(response_payload)))]
                 )
@@ -89,6 +101,7 @@ class ContentReviewServiceTests(unittest.TestCase):
                 )
 
             self.assertEqual(completions.calls, 1)
+            self.assertIn("complete independently speakable unit", completions.prompt)
             self.assertEqual(report["fact_review"]["medium_count"], 1)
             self.assertEqual(report["terminology_review"]["issue_count"], 1)
             self.assertEqual(
