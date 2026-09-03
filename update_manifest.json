@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "version": "2.0.6",
+  "version": "2.0.7",
   "scope": "repository",
   "files": [
     ".env.example",
@@ -11,7 +11,6 @@
     "README.md",
     "repository_updater.py",
     "requirements.txt",
-    "storycut_v2/README.md",
     "storycut_v2/config.default.yaml",
     "storycut_v2/main.py",
     "storycut_v2/requirements.txt",
@@ -26,6 +25,7 @@
     "storycut_v2/src/matching_service.py",
     "storycut_v2/src/media_service.py",
     "storycut_v2/src/quality_service.py",
+    "storycut_v2/src/series_service.py",
     "storycut_v2/src/story_service.py",
     "storycut_v2/src/content_review_service.py",
     "storycut_v2/src/update_manager.py",
@@ -38,6 +38,7 @@
     "storycut_v2/tests/test_layered_analysis_service.py",
     "storycut_v2/tests/test_quality_service.py",
     "storycut_v2/tests/test_repository_updater.py",
+    "storycut_v2/tests/test_series_service.py",
     "storycut_v2/tests/test_story_service.py",
     "storycut_v2/tests/test_content_review_service.py",
     "storycut_v2/tests/test_vision_service.py",
@@ -49,5 +50,7 @@
     "version.json",
     "点我启动StoryCut（AI解说剪辑）.vbs"
   ],
-  "remove": []
+  "remove": [
+    "storycut_v2/README.md"
+  ]
 }

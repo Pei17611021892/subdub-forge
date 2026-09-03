@@ -490,7 +490,9 @@ ApplicationWindow {
                                 elide: Text.ElideMiddle
                             }
                             Text {
-                                text: modelData.stageText + (modelData.updatedText ? "  ·  " + modelData.updatedText : "")
+                                text: (modelData.seriesText ? modelData.seriesText + "  ·  " : "")
+                                      + modelData.stageText
+                                      + (modelData.updatedText ? "  ·  " + modelData.updatedText : "")
                                 color: "#8b91a0"
                                 font.pixelSize: 10
                             }
@@ -549,6 +551,7 @@ ApplicationWindow {
                             onClicked: {
                                 deleteProjectDialog.projectName = modelData.name
                                 deleteProjectDialog.projectFile = modelData.projectFile
+                                deleteProjectDialog.seriesText = modelData.seriesText || ""
                                 deleteProjectDialog.open()
                             }
                         }
@@ -604,6 +607,7 @@ ApplicationWindow {
         id: deleteProjectDialog
         property string projectName: ""
         property string projectFile: ""
+        property string seriesText: ""
         width: 470
         anchors.centerIn: parent
         modal: true
@@ -621,7 +625,9 @@ ApplicationWindow {
             Text { text: "确认删除项目？"; color: textMain; font.pixelSize: 19; font.bold: true }
             Text {
                 Layout.fillWidth: true
-                text: "将永久删除“" + deleteProjectDialog.projectName + "”的项目文件、分析结果、配音、预览和导出缓存。"
+                text: "将永久删除“" + deleteProjectDialog.projectName + "”"
+                      + (deleteProjectDialog.seriesText !== "" ? "的全部 " + deleteProjectDialog.seriesText : "")
+                      + "项目文件、分析结果、配音、预览和导出缓存。"
                 color: textMuted
                 font.pixelSize: 12
                 wrapMode: Text.WordWrap
@@ -2952,6 +2958,62 @@ ApplicationWindow {
                                         } else {
                                             apiPreflightDialog.requestedAction = "story"
                                             apiPreflightDialog.open()
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                visible: storySection.expanded && appController.seriesParts.length > 1
+                                Layout.preferredHeight: visible ? seriesPartContent.implicitHeight + 24 : 0
+                                radius: 11
+                                color: "#181b23"
+                                border.color: "#3c3155"
+
+                                ColumnLayout {
+                                    id: seriesPartContent
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: 12
+                                    spacing: 9
+                                    Text {
+                                        text: appController.seriesSummary
+                                        color: "#cfc6e9"
+                                        font.pixelSize: 11
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    Flow {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        Repeater {
+                                            model: appController.seriesParts
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                width: Math.min(210, Math.max(86, partLabel.implicitWidth + 28))
+                                                height: 34
+                                                radius: 9
+                                                color: modelData.current ? "#6d28d9" : "#252832"
+                                                border.color: modelData.current ? accentLight : "#3a3e49"
+                                                Text {
+                                                    id: partLabel
+                                                    anchors.centerIn: parent
+                                                    width: Math.min(180, implicitWidth)
+                                                    text: "第 " + modelData.partIndex + " 集 · " + modelData.title
+                                                    color: modelData.current ? "white" : "#d3d6df"
+                                                    font.pixelSize: 11
+                                                    font.bold: modelData.current
+                                                    elide: Text.ElideRight
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    enabled: !modelData.current && !appController.storyBusy
+                                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                                    onClicked: appController.openSeriesPart(modelData.partIndex)
+                                                }
+                                            }
                                         }
                                     }
                                 }

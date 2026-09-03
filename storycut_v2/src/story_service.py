@@ -126,6 +126,7 @@ def generate_story_script(
     narrative_strategy: str = "auto",
     layered_structure_json: Path | None = None,
     planning_words_per_second: float | None = None,
+    allow_incomplete_for_series_evaluation: bool = False,
 ) -> dict[str, Any]:
     from openai import OpenAI
 
@@ -397,13 +398,18 @@ def generate_story_script(
         minimum_acceptable_words = round(minimum_words * 0.85)
         minimum_acceptable_coverage = max(8, round(minimum_event_coverage * 0.8))
         minimum_acceptable_outline = max(5, round(outline_target * 0.7))
-        if (
+        coverage_invalid = (
             int(normalized.get("word_count", 0)) < minimum_acceptable_words
             or bound_event_count < minimum_acceptable_coverage
             or len(normalized.get("outline", [])) < minimum_acceptable_outline
             or not _covers_timeline_sections(normalized, events)
-            or float(normalized.get("estimated_duration_sec", 0)) >= SHORTS_MAX_DURATION_SEC
-            or _problematic_tts_unit_ids(normalized)
+        )
+        delivery_invalid = (
+            float(normalized.get("estimated_duration_sec", 0)) >= SHORTS_MAX_DURATION_SEC
+            or bool(_problematic_tts_unit_ids(normalized))
+        )
+        if delivery_invalid or (
+            coverage_invalid and not allow_incomplete_for_series_evaluation
         ):
             raise RuntimeError(
                 "最终故事编辑后仍未达到可用标准："
@@ -425,15 +431,18 @@ def generate_story_script(
             f"预计旁白约 {normalized.get('estimated_duration_sec', 0)} 秒，超过 Shorts 三分钟限制。"
             "请缩短故事后重试。"
         )
+    blocking_missing_critical = (
+        final_missing_critical if not allow_incomplete_for_series_evaluation else []
+    )
     if content_mode == "speech" and (
-        final_broad_bindings or final_missing_critical or final_broken_tts_units
+        final_broad_bindings or blocking_missing_critical or final_broken_tts_units
     ):
         details = []
         if final_broad_bindings:
             details.append("部分解说仍绑定超过 4 个事件")
-        if final_missing_critical:
+        if blocking_missing_critical:
             details.append(
-                "仍遗漏关键事件 " + ", ".join(str(item) for item in final_missing_critical)
+                "仍遗漏关键事件 " + ", ".join(str(item) for item in blocking_missing_critical)
             )
         if final_broken_tts_units:
             details.append(
@@ -843,6 +852,7 @@ def _layered_structure_prompt(layered_structure: dict[str, Any] | None) -> str:
         ),
         "story_angles": layered_structure.get("story_angles", []),
         "editorial_cautions_zh": layered_structure.get("editorial_cautions_zh", []),
+        "series_part_plan": layered_structure.get("series_part_plan", {}),
     }
     return f"""
 OPTIONAL LONG-VIDEO LAYERED ANALYSIS
@@ -851,6 +861,7 @@ OPTIONAL LONG-VIDEO LAYERED ANALYSIS
 - Preserve the critical turning points, then omit routine or secondary material once the concise causal story is complete.
 - It is guidance, not new evidence. Every final claim and event binding must still be supported by SOURCE EVENTS.
 - Prefer its cross-chapter connections and highlights when they remain consistent with the detailed timeline.
+- If series_part_plan is present, this is one independently watchable episode in an automatically split series. Stay inside that episode's purpose and assigned evidence. Preserve its must_preserve points, give it enough opening context to stand alone, and land on its own ending_payoff. Do not summarize material assigned to another episode and do not tease an unsupported cliffhanger.
 {json.dumps(compact, ensure_ascii=False)}
 """.strip()
 

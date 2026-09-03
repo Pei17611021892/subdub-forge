@@ -36,6 +36,16 @@ from .story_service import (
 from .duration_revision_service import propose_duration_revision
 from .content_review_service import review_story_content
 from .layered_analysis_service import analyze_layered_structure
+from .series_service import (
+    build_part_events_payload,
+    collapse_story_series,
+    evaluate_story_preservation,
+    filter_layered_structure,
+    materialize_story_series,
+    series_source_events_file,
+    series_source_layered_file,
+    story_series_evaluation_reasons,
+)
 from .matching_service import (
     apply_voice_timing,
     adjust_shot_boundary,
@@ -162,6 +172,8 @@ class AppController(QObject):
         self._story: dict[str, object] = {}
         self._story_outline: list[dict[str, object]] = []
         self._story_narration: list[dict[str, object]] = []
+        self._series_parts: list[dict[str, object]] = []
+        self._series_summary = ""
         self._fact_review_job_id = 0
         self._fact_review_busy = False
         self._fact_review_status = "可选功能，尚未进行事实审查"
@@ -205,9 +217,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.2.6"))
+            self._app_version = str(read_version().get("version", "0.2.7"))
         except Exception:
-            self._app_version = "0.2.6"
+            self._app_version = "0.2.7"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -259,6 +271,14 @@ class AppController(QObject):
     @Property("QVariantList", notify=recentProjectsChanged)
     def recentProjects(self) -> list[dict[str, str]]:
         return self._recent_projects
+
+    @Property("QVariantList", notify=projectChanged)
+    def seriesParts(self) -> list[dict[str, object]]:
+        return self._series_parts
+
+    @Property(str, notify=projectChanged)
+    def seriesSummary(self) -> str:
+        return self._series_summary
 
     @Property(str, notify=mediaChanged)
     def coverUrl(self) -> str:
@@ -1287,6 +1307,7 @@ class AppController(QObject):
         project_file.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        self._load_series(payload, project_file)
         self._notice = "视频已导入。下一步将接入语音识别和场景分析。"
         self._media = dict(payload.get("media") or {})
         cover_path = project_dir / "cache" / "cover.jpg"
@@ -1311,6 +1332,18 @@ class AppController(QObject):
     def renameProject(self, value: str) -> None:
         if not self._current_project_file:
             return
+        try:
+            current_payload = json.loads(
+                self._current_project_file.read_text(encoding="utf-8")
+            )
+            current_series = current_payload.get("series", {})
+            if int(current_series.get("part_index", 1) or 1) > 1:
+                self._notice = "系列名称请在第 1 集修改，其他分集会自动保持关联。"
+                self.noticeChanged.emit()
+                self.projectChanged.emit()
+                return
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
         if any(
             (
                 self._media_busy,
@@ -1356,9 +1389,44 @@ class AppController(QObject):
             payload = json.loads(renamed_file.read_text(encoding="utf-8"))
             payload["name"] = new_name
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            series = payload.get("series", {})
+            series = series if isinstance(series, dict) else {}
+            if int(series.get("part_index", 0) or 0) == 1:
+                series["root_directory"] = new_name
+                members = [
+                    dict(item)
+                    for item in series.get("members", [])
+                    if isinstance(item, dict)
+                ]
+                for member in members:
+                    if int(member.get("part_index", 0) or 0) == 1:
+                        member["directory"] = new_name
+                series["members"] = members
+                payload["series"] = series
             renamed_file.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            if series:
+                for member in series.get("members", []):
+                    member_file = (
+                        self._projects_dir / str(member.get("directory", "")) / "project.json"
+                    )
+                    if not member_file.exists() or member_file.resolve() == renamed_file.resolve():
+                        continue
+                    try:
+                        member_payload = json.loads(member_file.read_text(encoding="utf-8"))
+                        member_series = member_payload.get("series", {})
+                        if str(member_series.get("id", "")) != str(series.get("id", "")):
+                            continue
+                        member_series["root_directory"] = new_name
+                        member_series["members"] = series.get("members", [])
+                        member_payload["series"] = member_series
+                        member_file.write_text(
+                            json.dumps(member_payload, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                    except (OSError, ValueError, TypeError):
+                        continue
             self._current_project_file = renamed_file
             self._project_name = new_name
             cover_path = target_dir / "cache" / "cover.jpg"
@@ -1453,6 +1521,7 @@ class AppController(QObject):
             self._layered_analysis_enabled = bool(
                 self._config.get("layered_analysis", {}).get("enabled", True)
             )
+            self._load_series(payload, project_file)
             cover_path = project_file.parent / "cache" / "cover.jpg"
             self._cover_url = cover_path.as_uri() if cover_path.exists() else ""
             self._preview_url = ""
@@ -1484,6 +1553,19 @@ class AppController(QObject):
         except Exception as exc:
             self._notice = f"无法打开项目：{exc}"
             self.noticeChanged.emit()
+
+    @Slot(int)
+    def openSeriesPart(self, part_index: int) -> None:
+        for item in self._series_parts:
+            if int(item.get("partIndex", 0) or 0) != int(part_index):
+                continue
+            project_file = Path(str(item.get("projectFile", "")))
+            if project_file.exists():
+                self.openProject(project_file.as_uri())
+            else:
+                self._notice = "该分集项目文件不存在，请重新生成故事系列。"
+                self.noticeChanged.emit()
+            return
 
     @Slot(str)
     def deleteProject(self, url: str) -> None:
@@ -1518,11 +1600,38 @@ class AppController(QObject):
                 and self._current_project_file.resolve() == project_file
             )
             project_name = project_dir.name
-            shutil.rmtree(project_dir)
+            payload = json.loads(project_file.read_text(encoding="utf-8"))
+            series = payload.get("series", {})
+            series = series if isinstance(series, dict) else {}
+            series_id = str(series.get("id", "")).strip()
+            targets = [project_dir]
+            if series_id and int(series.get("part_count", 0) or 0) > 1:
+                for member in series.get("members", []):
+                    if not isinstance(member, dict):
+                        continue
+                    candidate = (projects_dir / str(member.get("directory", ""))).resolve()
+                    candidate_file = candidate / "project.json"
+                    if candidate.parent != projects_dir or not candidate_file.exists():
+                        continue
+                    try:
+                        candidate_payload = json.loads(
+                            candidate_file.read_text(encoding="utf-8")
+                        )
+                        candidate_series = candidate_payload.get("series", {})
+                        if str(candidate_series.get("id", "")) == series_id:
+                            targets.append(candidate)
+                    except (OSError, ValueError, TypeError):
+                        continue
+            unique_targets = {item.resolve() for item in targets}
+            if self._current_project_file is not None:
+                deleting_current = self._current_project_file.parent.resolve() in unique_targets
+            for target in sorted(unique_targets, key=lambda item: len(str(item)), reverse=True):
+                shutil.rmtree(target)
             if deleting_current:
                 self._clear_current_project()
             self._refresh_recent_projects()
-            self._notice = f"项目“{project_name}”及其缓存文件已删除，项目目录外的原始视频未删除。"
+            series_suffix = f"及其 {len(unique_targets)} 个分集" if len(unique_targets) > 1 else ""
+            self._notice = f"项目“{project_name}”{series_suffix}及缓存文件已删除，项目目录外的原始视频未删除。"
             self.noticeChanged.emit()
         except (OSError, ValueError) as exc:
             self._notice = f"删除项目失败：{exc}"
@@ -1560,6 +1669,15 @@ class AppController(QObject):
 
     @Slot()
     def startUnderstanding(self) -> None:
+        if self._current_project_file:
+            try:
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                if int(payload.get("series", {}).get("part_index", 1) or 1) > 1:
+                    self._notice = "原片理解由系列第 1 集共享；请切换到第 1 集后重新分析。"
+                    self.noticeChanged.emit()
+                    return
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         if bool(self._config.get("vision", {}).get("enabled", True)) and not self.apiConfigured:
             self._notice = (
                 "未配置 AI 接口：视觉描述不会生成，且第 2 步无法组织故事。"
@@ -1944,7 +2062,17 @@ class AppController(QObject):
             self.storyChanged.emit()
             self.noticeChanged.emit()
             return
-        events_file = self._current_project_file.parent / "analysis" / "events.json"
+        current_payload = json.loads(
+            self._current_project_file.read_text(encoding="utf-8")
+        )
+        current_series = current_payload.get("series", {})
+        current_series = current_series if isinstance(current_series, dict) else {}
+        is_series_child = int(current_series.get("part_index", 1) or 1) > 1
+        events_file = (
+            self._current_project_file.parent / "analysis" / "events.json"
+            if is_series_child
+            else series_source_events_file(self._current_project_file)
+        )
         if not events_file.exists():
             self._notice = "请先完成第 1 步：理解原片"
             self.noticeChanged.emit()
@@ -1962,7 +2090,31 @@ class AppController(QObject):
                     self.noticeChanged.emit()
                     return
         except (OSError, ValueError, TypeError):
-            pass
+            event_payload = {}
+        layered_source_file = (
+            self._current_project_file.parent / "analysis" / "layered_structure.json"
+            if is_series_child
+            else series_source_layered_file(self._current_project_file)
+        )
+        layered_payload: dict[str, object] = {}
+        if layered_source_file and layered_source_file.exists():
+            try:
+                value = json.loads(layered_source_file.read_text(encoding="utf-8"))
+                layered_payload = value if isinstance(value, dict) else {}
+            except (OSError, ValueError, TypeError):
+                layered_payload = {}
+        planning_words_per_second = self._planning_words_per_second()
+        initial_series_reasons = (
+            story_series_evaluation_reasons(
+                event_payload,
+                self._config,
+                layered=layered_payload,
+                planning_words_per_second=planning_words_per_second,
+            )
+            if not is_series_child
+            else []
+        )
+        series_candidate = bool(initial_series_reasons)
         self._story_job_id += 1
         self._duration_revision_job_id += 1
         self._duration_revision_proposal = {}
@@ -1982,22 +2134,227 @@ class AppController(QObject):
             self._storyProgressReady.emit(value, status, job_id)
 
         def worker() -> None:
+            part_context_dir: Path | None = None
             try:
+                previous_story_text = (
+                    story_file.read_text(encoding="utf-8")
+                    if current_series and story_file.exists()
+                    else ""
+                )
+                layered_file = layered_source_file
+                generation_events_file = events_file
+                generation_layered_file = layered_file
+                if is_series_child and isinstance(current_series.get("plan"), dict):
+                    part_context_dir = project_file.parent / "script" / ".part_context"
+                    if part_context_dir.exists():
+                        shutil.rmtree(part_context_dir)
+                    part_context_dir.mkdir(parents=True)
+                    source_payload = json.loads(events_file.read_text(encoding="utf-8"))
+                    plan = dict(current_series.get("plan", {}))
+                    focused = build_part_events_payload(
+                        source_payload, plan.get("event_ids", [])
+                    )
+                    generation_events_file = part_context_dir / "events.json"
+                    generation_events_file.write_text(
+                        json.dumps(focused, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    part_layered_payload: dict[str, object] = {}
+                    if layered_file and layered_file.exists():
+                        value = json.loads(layered_file.read_text(encoding="utf-8"))
+                        part_layered_payload = value if isinstance(value, dict) else {}
+                    scoped = filter_layered_structure(
+                        part_layered_payload,
+                        [
+                            int(item.get("id", 0) or 0)
+                            for item in focused.get("events", [])
+                            if isinstance(item, dict)
+                        ],
+                        plan,
+                    )
+                    generation_layered_file = part_context_dir / "layered_structure.json"
+                    generation_layered_file.write_text(
+                        json.dumps(scoped, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
                 story = generate_story_script(
-                    events_file,
+                    generation_events_file,
                     story_file,
                     max(15, int(target_duration_sec)),
                     self._config,
                     self._root,
-                    report,
+                    (
+                        (lambda value, status: report(value * 0.55, status))
+                        if series_candidate
+                        else report
+                    ),
                     narrative_strategy=self._narrative_strategy,
                     layered_structure_json=(
-                        project_file.parent / "analysis" / "layered_structure.json"
-                        if self._layered_analysis_enabled
-                        else None
+                        generation_layered_file if self._layered_analysis_enabled else None
                     ),
-                    planning_words_per_second=self._planning_words_per_second(),
+                    planning_words_per_second=planning_words_per_second,
+                    allow_incomplete_for_series_evaluation=series_candidate,
                 )
+                if part_context_dir:
+                    shutil.rmtree(part_context_dir, ignore_errors=True)
+                completion_message = "故事与英文解说已生成"
+                events_payload = json.loads(events_file.read_text(encoding="utf-8"))
+                final_series_reasons = (
+                    story_series_evaluation_reasons(
+                        events_payload,
+                        self._config,
+                        story=story,
+                        layered=layered_payload,
+                        planning_words_per_second=planning_words_per_second,
+                    )
+                    if not is_series_child
+                    else []
+                )
+                reasons_by_code = {
+                    str(item.get("code", "")): item
+                    for item in initial_series_reasons + final_series_reasons
+                    if isinstance(item, dict) and str(item.get("code", ""))
+                }
+                series_reasons = list(reasons_by_code.values())
+                if series_reasons:
+                    reason_labels = [
+                        str(item.get("label_zh", "")).strip()
+                        for item in series_reasons
+                        if str(item.get("label_zh", "")).strip()
+                    ]
+                    reason_summary = "、".join(reason_labels[:3])
+                    report(
+                        0.58,
+                        (
+                            f"检测到{reason_summary}，正在核对单集完整性…"
+                            if reason_summary
+                            else "正在核对重要内容是否能在一条 Shorts 中讲完整…"
+                        ),
+                    )
+                    try:
+                        evaluation = evaluate_story_preservation(
+                            events_file,
+                            story_file,
+                            layered_file,
+                            self._config,
+                            self._root,
+                            trigger_reasons=series_reasons,
+                        )
+                        evaluation_file = project_file.parent / "script" / "series_evaluation.json"
+                        evaluation_file.write_text(
+                            json.dumps(evaluation, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        if bool(evaluation.get("single_part_acceptable", True)):
+                            if int(current_series.get("part_count", 0) or 0) > 1:
+                                archived_count = collapse_story_series(project_file)
+                                completion_message = (
+                                    "重新核对后单集已能完整保留重点；"
+                                    f"原有 {archived_count} 个其他分集已移入项目 archive"
+                                )
+                            else:
+                                completion_message = (
+                                    "故事与英文解说已生成；完整性检查确认一集即可保留核心内容"
+                                )
+                        else:
+                            plans = [
+                                dict(item)
+                                for item in evaluation.get("parts", [])
+                                if isinstance(item, dict)
+                            ]
+                            if len(plans) >= 2:
+                                shutil.copy2(
+                                    story_file,
+                                    project_file.parent / "script" / "single_story_draft.json",
+                                )
+                                staging = project_file.parent / "script" / ".series_staging"
+                                if staging.exists():
+                                    shutil.rmtree(staging)
+                                staging.mkdir(parents=True)
+                                full_layered: dict[str, object] = {}
+                                if layered_file and layered_file.exists():
+                                    value = json.loads(layered_file.read_text(encoding="utf-8"))
+                                    full_layered = value if isinstance(value, dict) else {}
+                                part_results: list[dict[str, object]] = []
+                                try:
+                                    count = len(plans)
+                                    part_target = int(
+                                        self._config.get("series", {}).get(
+                                            "target_part_duration_sec", 174
+                                        )
+                                        or 174
+                                    )
+                                    for part_number, plan in enumerate(plans, start=1):
+                                        report(
+                                            0.62 + (part_number - 1) * 0.32 / count,
+                                            f"单条无法完整保留重点，正在生成第 {part_number}/{count} 集…",
+                                        )
+                                        part_dir = staging / f"part-{part_number:02d}"
+                                        part_dir.mkdir(parents=True)
+                                        part_events = build_part_events_payload(
+                                            events_payload, plan.get("event_ids", [])
+                                        )
+                                        part_events_file = part_dir / "events.json"
+                                        part_events_file.write_text(
+                                            json.dumps(part_events, ensure_ascii=False, indent=2),
+                                            encoding="utf-8",
+                                        )
+                                        scoped_layered = filter_layered_structure(
+                                            full_layered,
+                                            [
+                                                int(item.get("id", 0) or 0)
+                                                for item in part_events.get("events", [])
+                                                if isinstance(item, dict)
+                                            ],
+                                            plan,
+                                        )
+                                        part_layered_file = part_dir / "layered_structure.json"
+                                        part_layered_file.write_text(
+                                            json.dumps(scoped_layered, ensure_ascii=False, indent=2),
+                                            encoding="utf-8",
+                                        )
+                                        part_story_file = part_dir / "story.json"
+                                        part_story = generate_story_script(
+                                            part_events_file,
+                                            part_story_file,
+                                            part_target,
+                                            self._config,
+                                            self._root,
+                                            lambda value, status, n=part_number, total=count: report(
+                                                0.62 + ((n - 1) + value) * 0.32 / total,
+                                                f"第 {n}/{total} 集：{status}",
+                                            ),
+                                            narrative_strategy=self._narrative_strategy,
+                                            layered_structure_json=part_layered_file,
+                                            planning_words_per_second=planning_words_per_second,
+                                        )
+                                        part_results.append(
+                                            {
+                                                "plan": plan,
+                                                "story": part_story,
+                                                "story_plan_file": part_dir / "story_plan.json",
+                                            }
+                                        )
+                                    series_result = materialize_story_series(
+                                        project_file, evaluation, part_results
+                                    )
+                                    story = dict(series_result["current_story"])
+                                    completion_message = (
+                                        f"重要内容较多，已自动拆分为 {series_result['part_count']} 集；"
+                                        "当前显示第 1 集"
+                                    )
+                                finally:
+                                    shutil.rmtree(staging, ignore_errors=True)
+                    except Exception as split_exc:
+                        if current_series and previous_story_text:
+                            story_file.write_text(previous_story_text, encoding="utf-8")
+                            story = json.loads(previous_story_text)
+                            completion_message = (
+                                "自动完整性判断未完成，已保留原有分集：" + str(split_exc)
+                            )
+                        else:
+                            completion_message = (
+                                "故事与英文解说已生成；自动完整性判断未完成，已保留可用单集："
+                                + str(split_exc)
+                            )
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
                 payload["stage"] = "scripted"
                 payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
@@ -2008,6 +2365,20 @@ class AppController(QObject):
                     artifacts["story_plan"] = "script/story_plan.json"
                 else:
                     artifacts.pop("story_plan", None)
+                series_evaluation_file = (
+                    project_file.parent / "script" / "series_evaluation.json"
+                )
+                if series_evaluation_file.exists():
+                    artifacts["series_evaluation"] = "script/series_evaluation.json"
+                else:
+                    artifacts.pop("series_evaluation", None)
+                single_story_draft = (
+                    project_file.parent / "script" / "single_story_draft.json"
+                )
+                if single_story_draft.exists():
+                    artifacts["single_story_draft"] = "script/single_story_draft.json"
+                else:
+                    artifacts.pop("single_story_draft", None)
                 artifacts.pop("matches", None)
                 artifacts.pop("rough_cut", None)
                 artifacts.pop("rough_preview", None)
@@ -2026,8 +2397,10 @@ class AppController(QObject):
                 (project_file.parent / "timeline" / "matches.json").unlink(missing_ok=True)
                 (project_file.parent / "timeline" / "rough_cut.json").unlink(missing_ok=True)
                 project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                self._storyFinished.emit(True, "故事与英文解说已生成", story, job_id)
+                self._storyFinished.emit(True, completion_message, story, job_id)
             except Exception as exc:
+                if part_context_dir:
+                    shutil.rmtree(part_context_dir, ignore_errors=True)
                 (project_file.parent / "script").mkdir(parents=True, exist_ok=True)
                 (project_file.parent / "script" / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
                 self._storyFinished.emit(False, str(exc), {}, job_id)
@@ -3783,6 +4156,10 @@ class AppController(QObject):
         for project_file in self._projects_dir.glob("*/project.json"):
             try:
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
+                series = payload.get("series", {})
+                series = series if isinstance(series, dict) else {}
+                if int(series.get("part_index", 1) or 1) > 1:
+                    continue
                 stage = str(payload.get("stage") or "imported")
                 updated = str(payload.get("updated_at") or payload.get("created_at") or "")
                 projects.append(
@@ -3794,6 +4171,11 @@ class AppController(QObject):
                         "updated": updated,
                         "updatedText": updated.replace("T", " ")[:16],
                         "projectFile": project_file.as_uri(),
+                        "seriesText": (
+                            f"{int(series.get('part_count', 0) or 0)} 集系列"
+                            if int(series.get("part_count", 0) or 0) > 1
+                            else ""
+                        ),
                     }
                 )
             except (OSError, ValueError, TypeError):
@@ -3814,6 +4196,8 @@ class AppController(QObject):
         self._quality_job_id += 1
         self._subtitle_effect_preview_job_id += 1
         self._current_project_file = None
+        self._series_parts = []
+        self._series_summary = ""
         self._project_name = "尚未创建项目"
         self._video_path = ""
         self._media = {}
@@ -4026,6 +4410,21 @@ class AppController(QObject):
         if success:
             self._refresh_recent_projects()
             if self._current_project_file:
+                try:
+                    payload = json.loads(
+                        self._current_project_file.read_text(encoding="utf-8")
+                    )
+                    series = payload.get("series", {})
+                    if int(series.get("part_index", 0) or 0) == 1:
+                        analysis = self._current_project_file.parent / "analysis"
+                        events = analysis / "events.json"
+                        layered = analysis / "layered_structure.json"
+                        if events.exists():
+                            shutil.copy2(events, analysis / "events_full.json")
+                        if layered.exists():
+                            shutil.copy2(layered, analysis / "layered_structure_full.json")
+                except (OSError, ValueError, TypeError, AttributeError):
+                    pass
                 self._load_events(self._current_project_file)
         self.analysisChanged.emit()
         self.noticeChanged.emit()
@@ -4048,6 +4447,15 @@ class AppController(QObject):
         self._notice = self._story_status
         if success and isinstance(story, dict):
             self._set_story(story)
+            if self._current_project_file and self._current_project_file.exists():
+                try:
+                    payload = json.loads(
+                        self._current_project_file.read_text(encoding="utf-8")
+                    )
+                    self._load_series(payload, self._current_project_file)
+                    self.projectChanged.emit()
+                except (OSError, ValueError, TypeError):
+                    pass
             self._set_fact_review({})
             self._set_terminology_review({})
             self._matches = []
@@ -4214,6 +4622,33 @@ class AppController(QObject):
                 loaded = []
         self._events = loaded
         self.eventsChanged.emit()
+
+    def _load_series(self, payload: dict[str, object], project_file: Path) -> None:
+        series = payload.get("series", {})
+        series = series if isinstance(series, dict) else {}
+        members = series.get("members", [])
+        parts: list[dict[str, object]] = []
+        for raw in members if isinstance(members, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            target = self._projects_dir / str(raw.get("directory", "")) / "project.json"
+            parts.append(
+                {
+                    "partIndex": int(raw.get("part_index", 0) or 0),
+                    "title": str(raw.get("title_zh", "")) or f"第 {raw.get('part_index', '')} 集",
+                    "projectFile": str(target),
+                    "current": target.resolve() == project_file.resolve(),
+                }
+            )
+        self._series_parts = parts
+        count = int(series.get("part_count", len(parts)) or len(parts))
+        index = int(series.get("part_index", 0) or 0)
+        reason = str(series.get("reason_zh", "")).strip()
+        self._series_summary = (
+            f"本素材已自动拆分为 {count} 集，当前第 {index} 集。{reason}"
+            if count > 1
+            else ""
+        )
 
     def _load_story(self, project_file: Path) -> None:
         story_file = project_file.parent / "script" / "story.json"

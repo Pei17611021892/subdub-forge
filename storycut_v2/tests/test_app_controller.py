@@ -90,6 +90,121 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertTrue(controller.layeredAnalysisEnabled)
             self.assertIn("自动管理", controller.notice)
 
+    def test_recent_projects_groups_series_and_parts_can_be_opened(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            projects = root / "projects"
+            members = [
+                {"part_index": 1, "directory": "series", "title_zh": "起因"},
+                {"part_index": 2, "directory": "series-part-02", "title_zh": "结果"},
+            ]
+            for index, directory in enumerate(("series", "series-part-02"), start=1):
+                project = projects / directory
+                project.mkdir(parents=True)
+                (project / "project.json").write_text(
+                    json.dumps(
+                        {
+                            "name": directory,
+                            "stage": "scripted",
+                            "series": {
+                                "id": "same-series",
+                                "part_index": index,
+                                "part_count": 2,
+                                "members": members,
+                                "reason_zh": "一条视频装不下两个完整机制",
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            controller = self._controller(root)
+
+            self.assertEqual(len(controller.recentProjects), 1)
+            self.assertEqual(controller.recentProjects[0]["seriesText"], "2 集系列")
+            controller.openProject(str(projects / "series" / "project.json"))
+            self.assertEqual(len(controller.seriesParts), 2, controller.storyStatus)
+            controller.openSeriesPart(2)
+            self.assertEqual(controller.projectName, "series-part-02")
+            self.assertTrue(controller.seriesParts[1]["current"])
+
+    def test_long_story_generation_materializes_automatic_series(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "long-demo"
+            for folder in ("analysis/keyframes", "script", "timeline", "audio", "cache"):
+                (project / folder).mkdir(parents=True, exist_ok=True)
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "long-demo",
+                        "stage": "understood",
+                        "source_video": "D:/source.mp4",
+                        "settings": {"content_mode": "speech"},
+                        "artifacts": {"events": "analysis/events.json"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            events = {
+                "duration_sec": 360,
+                "content_mode": "speech",
+                "events": [
+                    {"id": index, "start": index * 10, "end": index * 10 + 8, "transcript": f"fact {index}"}
+                    for index in range(1, 13)
+                ],
+            }
+            (project / "analysis" / "events.json").write_text(
+                json.dumps(events), encoding="utf-8"
+            )
+            (project / "analysis" / "layered_structure.json").write_text(
+                json.dumps({"recommended_highlight_event_ids": [2, 8]}),
+                encoding="utf-8",
+            )
+
+            def fake_story(events_file, story_file, *_args, **_kwargs):
+                payload = json.loads(Path(events_file).read_text(encoding="utf-8"))
+                event_id = int(payload["events"][0]["id"])
+                story = {
+                    "word_count": 8,
+                    "estimated_duration_sec": 6,
+                    "narration": [
+                        {"id": 1, "event_ids": [event_id], "text_en": "This is one complete episode line."}
+                    ],
+                    "outline": [],
+                }
+                Path(story_file).parent.mkdir(parents=True, exist_ok=True)
+                Path(story_file).write_text(json.dumps(story), encoding="utf-8")
+                return story
+
+            evaluation = {
+                "single_part_acceptable": False,
+                "coverage_score": 0.6,
+                "reason_zh": "两个机制都需要完整解释",
+                "parts": [
+                    {"part_index": 1, "title_zh": "机制一", "event_ids": [2, 3]},
+                    {"part_index": 2, "title_zh": "机制二", "event_ids": [8, 9]},
+                ],
+            }
+            with patch.dict("os.environ", {"OPENAI_API_KEY": "test"}), patch(
+                "src.app_controller.generate_story_script", side_effect=fake_story
+            ), patch(
+                "src.app_controller.evaluate_story_preservation", return_value=evaluation
+            ):
+                controller = self._controller(root)
+                controller.openProject(str(project_file))
+                controller.generateStory(180)
+                deadline = time.monotonic() + 3
+                while controller.storyBusy and time.monotonic() < deadline:
+                    self.qt_app.processEvents()
+                    time.sleep(0.01)
+                self.qt_app.processEvents()
+
+            self.assertFalse(controller.storyBusy)
+            self.assertEqual(len(controller.seriesParts), 2, controller.storyStatus)
+            self.assertIn("自动拆分为 2 集", controller.storyStatus)
+            self.assertTrue((root / "projects" / "long-demo-part-02" / "project.json").exists())
+
     def test_story_planning_rate_inherits_median_measured_voice_rate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

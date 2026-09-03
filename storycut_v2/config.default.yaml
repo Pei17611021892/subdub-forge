@@ -39,6 +39,27 @@ layered_analysis:
   max_events_per_chunk: 45
   max_chunks: 10
 
+series:
+  auto_split: true
+  candidate_min_source_duration_sec: 300
+  candidate_min_event_count: 80
+  candidate_min_transcript_units: 500
+  chinese_to_english_word_ratio: 0.62
+  candidate_max_compression_ratio: 2.8
+  candidate_min_dense_duration_sec: 60
+  candidate_min_speech_coverage: 0.65
+  candidate_min_dense_words_per_minute: 200
+  candidate_min_substantive_event_count: 42
+  candidate_min_technical_event_count: 8
+  candidate_min_layered_critical_count: 10
+  candidate_min_layered_key_fact_count: 18
+  candidate_story_near_limit_ratio: 0.9
+  candidate_max_draft_event_coverage: 0.4
+  max_parts: 6
+  target_part_duration_sec: 174
+  evaluation_model: ''
+  max_evaluation_events: 320
+
 analysis:
   content_mode: speech
   asr_model: large-v3

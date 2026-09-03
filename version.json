@@ -1,7 +1,7 @@
 {
   "name": "StoryCut",
-  "version": "2.0.6",
+  "version": "2.0.7",
   "repository": "Pei17611021892/subdub-forge",
   "update_channel": "stable",
-  "notes": "StoryCut 分层理解改为自动默认并优化短视频请求；故事按真实配音语速规划，新增关键事件、镜头绑定与 GPT-SoVITS 断句验收，文案审查支持持久化已应用状态。"
+  "notes": "长且信息密集的素材会自动核对单集完整性；一条 Shorts 无法保留重点时，自动拆分为最少数量的独立分集，并沿用完整镜头、配音、字幕与导出流程。"
 }

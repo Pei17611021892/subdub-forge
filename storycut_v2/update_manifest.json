@@ -1,8 +1,7 @@
 {
   "format": 1,
-  "version": "0.2.6",
+  "version": "0.2.7",
   "files": [
-    "README.md",
     "config.default.yaml",
     "main.py",
     "requirements.txt",
@@ -17,6 +16,7 @@
     "src/matching_service.py",
     "src/media_service.py",
     "src/quality_service.py",
+    "src/series_service.py",
     "src/story_service.py",
     "src/content_review_service.py",
     "src/update_manager.py",
@@ -29,6 +29,7 @@
     "tests/test_layered_analysis_service.py",
     "tests/test_quality_service.py",
     "tests/test_repository_updater.py",
+    "tests/test_series_service.py",
     "tests/test_story_service.py",
     "tests/test_content_review_service.py",
     "tests/test_vision_service.py",
