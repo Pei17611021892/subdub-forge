@@ -75,6 +75,29 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertEqual(reopened.sourceManuscriptText, "新的完整文稿。")
             self.assertIn("纯文稿", reopened.recentProjects[0]["video"])
 
+    def test_recent_projects_finds_a_project_copied_with_an_extra_folder_level(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            nested = root / "projects" / "v2-0908" / "v2-0908"
+            nested.mkdir(parents=True)
+            (nested / "project.json").write_text(
+                json.dumps(
+                    {
+                        "name": "v2-0908",
+                        "stage": "understood",
+                        "source_video": "D:/missing-source.mp4",
+                        "updated_at": "2026-09-08T00:22:35",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            controller = self._controller(root)
+
+            self.assertEqual(len(controller.recentProjects), 1)
+            self.assertEqual(controller.recentProjects[0]["name"], "v2-0908")
+            self.assertIn("v2-0908/v2-0908/project.json", controller.recentProjects[0]["projectFile"])
+
     def test_import_manuscript_reads_file_and_empty_text_does_not_create_project(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

@@ -13,6 +13,7 @@ from src.story_service import (
     _chat_json,
     _normalize_story,
     _problematic_tts_unit_ids,
+    _repair_problematic_tts_units,
     _trim_narration_to_duration,
     calibrate_story_timing_from_voice,
     generate_story_script,
@@ -197,6 +198,55 @@ class StoryServiceTests(unittest.TestCase):
 
         self.assertEqual(_problematic_tts_unit_ids(story), [2, 3, 4, 6, 7])
 
+    def test_local_fragment_repair_merges_dependent_units_and_drops_fillers(self) -> None:
+        story = {
+            "narration": [
+                {
+                    "id": 1,
+                    "event_ids": [1],
+                    "text_en": "All right.",
+                    "visual_query": "开场",
+                    "estimated_duration_sec": 1.0,
+                    "word_count": 2,
+                },
+                {
+                    "id": 2,
+                    "event_ids": [2],
+                    "text_en": "After the brake loses force,",
+                    "visual_query": "制动器",
+                    "estimated_duration_sec": 2.0,
+                    "word_count": 5,
+                },
+                {
+                    "id": 3,
+                    "event_ids": [3],
+                    "text_en": "the loaded escalator begins accelerating downhill.",
+                    "visual_query": "扶梯下冲",
+                    "estimated_duration_sec": 3.5,
+                    "word_count": 7,
+                },
+                {
+                    "id": 4,
+                    "event_ids": [4],
+                    "text_en": "Investigators later traced the failure to poor maintenance.",
+                    "visual_query": "调查报告",
+                    "estimated_duration_sec": 4.0,
+                    "word_count": 8,
+                },
+            ]
+        }
+
+        repaired = _repair_problematic_tts_units(story)
+
+        self.assertEqual(_problematic_tts_unit_ids(repaired), [])
+        self.assertEqual(len(repaired["narration"]), 2)
+        self.assertNotIn("All right", " ".join(item["text_en"] for item in repaired["narration"]))
+        self.assertIn(
+            "After the brake loses force the loaded escalator begins accelerating downhill.",
+            repaired["narration"][0]["text_en"],
+        )
+        self.assertEqual(repaired["tts_fragments_repaired"], 2)
+
     def test_speech_mode_rewrites_an_overlong_draft_before_failing(self) -> None:
         events = [
             {
@@ -338,6 +388,61 @@ class StoryServiceTests(unittest.TestCase):
         self.assertEqual(len(prompts), 2)
         self.assertIn("broken GPT-SoVITS units", prompts[1])
         self.assertEqual(_problematic_tts_unit_ids(result), [])
+
+    def test_single_short_succeeds_when_two_ai_rewrites_keep_the_same_fragment(self) -> None:
+        events = [
+            {
+                "id": 1,
+                "start": 0,
+                "end": 30,
+                "transcript": "制动力下降后，满载扶梯开始加速下冲。",
+            }
+        ]
+        stubborn = {
+            "title": "Escalator Safety",
+            "outline": [{"event_ids": [1], "purpose": "explain", "summary": "事故链"}],
+            "narration": [
+                {
+                    "event_ids": [1],
+                    "text_en": "After the brake loses force, the loaded escalator begins accelerating downhill.",
+                    "visual_query": "满载扶梯开始下冲",
+                },
+                {
+                    "event_ids": [1],
+                    "text_en": "Investigators later traced the failure to poor maintenance.",
+                    "visual_query": "调查报告",
+                },
+            ],
+        }
+
+        class FakeCompletions:
+            def create(self, **_kwargs):  # type: ignore[no-untyped-def]
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(stubborn)))]
+                )
+
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            events_path = root / "analysis" / "events.json"
+            story_path = root / "script" / "story.json"
+            events_path.parent.mkdir(parents=True)
+            events_path.write_text(
+                json.dumps({"content_mode": "speech", "events": events}), encoding="utf-8"
+            )
+            config = {"shared": {"env_file": ".env"}, "story": {"model": "model"}}
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "openai.OpenAI", return_value=fake_client
+            ):
+                result = generate_story_script(
+                    events_path, story_path, 180, config, root, lambda *_args: None
+                )
+            story_saved = story_path.exists()
+
+        self.assertTrue(story_saved)
+        self.assertLess(result["estimated_duration_sec"], 179)
+        self.assertEqual(_problematic_tts_unit_ids(result), [])
+        self.assertGreaterEqual(result.get("tts_fragments_repaired", 0), 1)
 
     def test_visual_mode_plans_then_runs_final_editor(self) -> None:
         events = [

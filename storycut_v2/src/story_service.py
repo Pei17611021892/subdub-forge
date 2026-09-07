@@ -494,6 +494,11 @@ def generate_story_script(
             SHORTS_MAX_DURATION_SEC - 5.0,
         )
 
+    broken_before_local_repair = _problematic_tts_unit_ids(normalized)
+    if broken_before_local_repair:
+        progress(0.87, "AI 重编仍有零碎语音单元，正在本地合并并修复断句…")
+        normalized = _repair_problematic_tts_units(normalized)
+
     progress(0.88, "正在整理解说断句与镜头绑定…")
     final_duration = float(normalized.get("estimated_duration_sec", 0))
     final_broad_bindings = _overbroad_narration_bindings(normalized)
@@ -533,7 +538,15 @@ def generate_story_script(
                 + ", ".join(str(item) for item in final_broken_tts_units[:8])
                 + " 仍是过短或依赖下句的片段"
             )
-        raise RuntimeError("故事重编后仍未达到可用标准：" + "；".join(details) + "。请重试。")
+        if allow_overlong_for_series_evaluation:
+            raise RuntimeError(
+                "故事重编后仍未达到可用标准：" + "；".join(details) + "。请重试。"
+            )
+        # 单集模式的最终原则是必须交付一条可编辑的 Shorts 草稿。AI 已经
+        # 重编两次、本地也已完成限时和断句修复，此处把剩余的覆盖提醒降级
+        # 为非阻断警告，避免因为一两个次要事件或边界句让整个流程失败。
+        normalized["single_short_fallback"] = True
+        normalized["delivery_warnings_zh"] = details
     normalized["content_mode"] = content_mode
     resolved_strategy = _resolved_narrative_strategy(
         plan if content_mode == "visual" else result,
@@ -1514,6 +1527,122 @@ def _problematic_tts_unit_ids(story: dict[str, Any]) -> list[int]:
         if is_problematic:
             problematic.append(unit_id)
     return problematic
+
+
+_DISCARDABLE_TTS_FILLER = re.compile(
+    r"^(?:all right|alright|of course|okay|ok|so|now|next|finally|"
+    r"meanwhile|however|therefore|instead|yes|no)[\s,.!?;:]*$",
+    flags=re.IGNORECASE,
+)
+
+
+def _repair_problematic_tts_units(story: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically merge or remove broken GPT-SoVITS fragments.
+
+    The AI is still responsible for prose quality. This is the non-failing final
+    guard: punctuation that GPT-SoVITS treats as a boundary is removed while the
+    fragment is joined to the adjacent factual sentence. Empty discourse fillers
+    such as ``All right.`` are removed instead of occupying their own audio cue.
+    """
+    items = [
+        dict(item) for item in story.get("narration", []) if isinstance(item, dict)
+    ]
+    if not items:
+        return dict(story)
+    repaired_count = 0
+    dropped_event_ids: set[int] = set()
+
+    def renumber() -> None:
+        for item_index, narration_item in enumerate(items, start=1):
+            narration_item["id"] = item_index
+
+    renumber()
+    for _ in range(max(2, len(items) * 2)):
+        broken = _problematic_tts_unit_ids({"narration": items})
+        if not broken or not items:
+            break
+        index = max(0, min(len(items) - 1, broken[0] - 1))
+        current = items[index]
+        current_text = str(current.get("text_en", "")).strip()
+        if _DISCARDABLE_TTS_FILLER.fullmatch(current_text) and len(items) > 1:
+            dropped_event_ids.update(
+                int(value)
+                for value in current.get("event_ids", [])
+                if str(value).isdigit()
+            )
+            items.pop(index)
+            repaired_count += 1
+            renumber()
+            continue
+        if len(items) == 1:
+            break
+
+        prefer_next = (
+            index == 0
+            or bool(_DEPENDENT_TTS_OPENING.match(current_text))
+            or current_text.endswith((",", "，", ";", "；", ":", "："))
+        )
+        left_index = index if prefer_next and index + 1 < len(items) else index - 1
+        right_index = left_index + 1
+        left = items[left_index]
+        right = items[right_index]
+        left_text = str(left.get("text_en", "")).strip()
+        right_text = str(right.get("text_en", "")).strip()
+        dependent_left = bool(_DEPENDENT_TTS_OPENING.match(left_text)) or bool(
+            re.match(r"^(?:in|on|at|by|from|during|around|through)\b", left_text, re.I)
+        )
+        connector = " " if dependent_left or left_text.endswith((",", "，", ";", "；", ":", "：")) else " and "
+        left_stem = re.sub(r"[\s,.!?;:，。！？；：]+$", "", left_text)
+        right_stem = right_text[:1].lower() + right_text[1:] if connector.strip() else right_text
+        combined_text = (left_stem + connector + right_stem).strip()
+        event_ids: list[int] = []
+        for value in [*left.get("event_ids", []), *right.get("event_ids", [])]:
+            if str(value).isdigit() and int(value) not in event_ids:
+                event_ids.append(int(value))
+        merged = dict(right if prefer_next else left)
+        merged["text_en"] = combined_text
+        merged["event_ids"] = event_ids[:4]
+        merged["visual_query"] = str(
+            right.get("visual_query", "") or left.get("visual_query", "")
+        ).strip()
+        merged["word_count"] = max(
+            1, len(re.findall(r"\b[\w'-]+\b", combined_text))
+        )
+        merged["estimated_duration_sec"] = round(
+            max(0.05, float(left.get("estimated_duration_sec", 0) or 0))
+            + max(0.05, float(right.get("estimated_duration_sec", 0) or 0)),
+            2,
+        )
+        items[left_index : right_index + 1] = [merged]
+        repaired_count += 1
+        renumber()
+
+    selected_ids = {
+        int(value)
+        for item in items
+        for value in item.get("event_ids", [])
+        if str(value).isdigit()
+    }
+    repaired = dict(story)
+    repaired["narration"] = items
+    repaired["word_count"] = sum(int(item.get("word_count", 0) or 0) for item in items)
+    repaired["estimated_duration_sec"] = round(
+        sum(float(item.get("estimated_duration_sec", 0) or 0) for item in items), 2
+    )
+    repaired["selected_event_ids"] = sorted(selected_ids)
+    repaired["omitted_event_ids"] = sorted(
+        {
+            int(value)
+            for value in story.get("omitted_event_ids", [])
+            if str(value).isdigit()
+        }
+        | (dropped_event_ids - selected_ids)
+    )
+    repaired["tts_fragments_repaired"] = repaired_count
+    remaining = _problematic_tts_unit_ids(repaired)
+    if remaining:
+        repaired["tts_fragment_warnings"] = remaining
+    return repaired
 
 
 def _critical_layered_event_ids(layered_structure: dict[str, Any] | None) -> set[int]:

@@ -247,9 +247,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.2.8"))
+            self._app_version = str(read_version().get("version", "2.0.9"))
         except Exception:
-            self._app_version = "0.2.8"
+            self._app_version = "2.0.9"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -2590,11 +2590,14 @@ class AppController(QObject):
                 )
                 if part_context_dir:
                     shutil.rmtree(part_context_dir, ignore_errors=True)
-                completion_message = (
-                    "故事与英文解说已生成；内容过密时已优先保留核心并收束为一条三分钟内视频"
-                    if bool(story.get("forced_single_short_trim", False))
-                    else "故事与英文解说已生成"
-                )
+                if bool(story.get("forced_single_short_trim", False)):
+                    completion_message = "故事与英文解说已生成；已优先保留核心并收束为一条三分钟内视频"
+                elif int(story.get("tts_fragments_repaired", 0) or 0) > 0:
+                    completion_message = "故事与英文解说已生成；残留的零碎语音单元已自动合并"
+                elif bool(story.get("single_short_fallback", False)):
+                    completion_message = "故事与英文解说已生成；少量覆盖提醒已保留供最终编辑参考"
+                else:
+                    completion_message = "故事与英文解说已生成"
                 events_payload = json.loads(events_file.read_text(encoding="utf-8"))
                 final_series_reasons = (
                     story_series_evaluation_reasons(
@@ -5083,7 +5086,13 @@ class AppController(QObject):
             "storyboarded": "分镜规划完成",
             "assets_ready": "素材已准备",
         }
-        for project_file in self._projects_dir.glob("*/project.json"):
+        for project_file in self._projects_dir.rglob("project.json"):
+            try:
+                relative_parts = project_file.relative_to(self._projects_dir).parts
+            except ValueError:
+                relative_parts = project_file.parts
+            if "archive" in {part.casefold() for part in relative_parts}:
+                continue
             try:
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
                 series = payload.get("series", {})
