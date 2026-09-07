@@ -41,7 +41,7 @@ def story_series_evaluation_reasons(
     the finished one-part draft deserves a semantic preservation check.
     """
     settings = config.get("series", {})
-    if not bool(settings.get("auto_split", True)):
+    if not bool(settings.get("auto_split", False)):
         return []
     events = [item for item in events_payload.get("events", []) if isinstance(item, dict)]
     if not events:
@@ -215,6 +215,14 @@ def story_series_evaluation_reasons(
 
     if isinstance(story, dict) and story.get("narration"):
         story_duration = float(story.get("estimated_duration_sec", 0) or 0)
+        if story_duration >= 180.0 or bool(story.get("requires_series_evaluation", False)):
+            reasons.append(
+                _reason(
+                    "draft_over_shorts_limit",
+                    "单集保真压缩后仍超过 Shorts 三分钟限制",
+                    story_duration_sec=round(story_duration, 1),
+                )
+            )
         near_limit_ratio = max(
             0.75,
             min(
@@ -391,9 +399,22 @@ def evaluate_story_preservation(
         for value in layered.get(key, [])
         if str(value).isdigit()
     }
-    normalized = _normalize_evaluation(
-        raw, events, max_parts, required_event_ids=required_event_ids
+    story_duration = float(story.get("estimated_duration_sec", 0) or 0)
+    force_split = story_duration >= 180 or bool(
+        story.get("requires_series_evaluation", False)
     )
+    normalized = _normalize_evaluation(
+        raw,
+        events,
+        max_parts,
+        required_event_ids=required_event_ids,
+        force_split=force_split,
+    )
+    if force_split:
+        normalized["reason_zh"] = (
+            str(normalized.get("reason_zh", "")).strip()
+            or "当前旁白无法安全压缩到三分钟以内，已按最少集数拆分。"
+        )
     normalized.update(
         {
             "schema_version": 1,
@@ -401,9 +422,7 @@ def evaluate_story_preservation(
             "source_event_count": len(events),
             "evaluated_event_count": len(selected_events),
             "single_story_word_count": int(story.get("word_count", 0) or 0),
-            "single_story_duration_sec": float(
-                story.get("estimated_duration_sec", 0) or 0
-            ),
+            "single_story_duration_sec": story_duration,
             "trigger_reasons": trigger_reasons or [],
         }
     )
@@ -547,11 +566,16 @@ def materialize_story_series(
     archive_stamp = __import__("datetime").datetime.now().strftime("%Y%m%d-%H%M%S")
     for index, (directory, result) in enumerate(zip(member_dirs, part_results), start=1):
         directory.mkdir(parents=True, exist_ok=True)
-        for child in ("analysis", "script", "timeline", "audio", "cache"):
+        for child in ("source", "analysis", "storyboard", "script", "timeline", "audio", "cache"):
             (directory / child).mkdir(exist_ok=True)
         _archive_previous_part_outputs(directory, archive_stamp)
         part_plan = dict(result["plan"])
-        part_events = build_part_events_payload(full_events, part_plan.get("event_ids", []))
+        supplied_events = result.get("events")
+        part_events = (
+            dict(supplied_events)
+            if isinstance(supplied_events, dict)
+            else build_part_events_payload(full_events, part_plan.get("event_ids", []))
+        )
         _make_keyframes_portable_from_root(part_events, root_dir)
         (directory / "analysis" / "events.json").write_text(
             json.dumps(part_events, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -572,6 +596,16 @@ def materialize_story_series(
         (directory / "script" / "story.json").write_text(
             json.dumps(story, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        storyboard = result.get("storyboard")
+        if isinstance(storyboard, dict):
+            (directory / "storyboard" / "storyboard.json").write_text(
+                json.dumps(storyboard, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        source_manuscript = str(result.get("source_manuscript", "")).strip()
+        if index > 1 and source_manuscript:
+            (directory / "source" / "manuscript.txt").write_text(
+                source_manuscript + "\n", encoding="utf-8"
+            )
         plan_source = result.get("story_plan_file")
         if plan_source and Path(plan_source).exists():
             shutil.copy2(Path(plan_source), directory / "script" / "story_plan.json")
@@ -585,7 +619,9 @@ def materialize_story_series(
             if index == 1
             else f"{root_payload.get('name', root_dir.name)} · 第 {index} 集"
         )
-        project_payload["stage"] = "scripted"
+        project_payload["stage"] = (
+            "storyboarded" if str(root_payload.get("project_type", "video")) == "manuscript" else "scripted"
+        )
         project_payload["updated_at"] = now
         project_payload["series"] = {
             "id": series_id,
@@ -601,6 +637,10 @@ def materialize_story_series(
         artifacts["events"] = "analysis/events.json"
         artifacts["layered_structure"] = "analysis/layered_structure.json"
         artifacts["story"] = "script/story.json"
+        if isinstance(storyboard, dict):
+            artifacts["storyboard"] = "storyboard/storyboard.json"
+        if index > 1 and source_manuscript:
+            project_payload["source_manuscript"] = "source/manuscript.txt"
         if (directory / "script" / "story_plan.json").exists():
             artifacts["story_plan"] = "script/story_plan.json"
         for key in (
@@ -812,10 +852,16 @@ def _evaluation_prompt(
             if isinstance(item, dict)
         ],
     }
+    duration = float(story.get("estimated_duration_sec", 0) or 0)
+    draft_status = (
+        "The existing English story still exceeds three minutes after a final preservation-focused compression. It cannot be delivered as one Short, so determine the smallest coherent multi-part series."
+        if duration >= 180.0
+        else "The existing English story already fits below three minutes. Do NOT recommend a series merely because the source is long or contains many events."
+    )
     return f"""
 You are the senior retention editor deciding whether one YouTube Short truthfully preserves a source video.
 
-The existing English story already fits below three minutes. Do NOT recommend a series merely because the source is long or contains many events. One concise Short is preferred whenever it preserves the central causal chain, major mechanisms, indispensable contrasts, strongest evidence, key turning points, and complete conclusion.
+{draft_status} One concise Short is preferred whenever it preserves the central causal chain, major mechanisms, indispensable contrasts, strongest evidence, key turning points, and complete conclusion.
 
 Recommend multiple parts only when a single story of about {target_duration} seconds must omit or distort essential supported material. Routine repetition, secondary examples, decorative visuals, repeated demonstrations, and details that do not change understanding are not reasons to split.
 
@@ -867,9 +913,10 @@ def _normalize_evaluation(
     events: list[dict[str, Any]],
     max_parts: int,
     required_event_ids: set[int] | None = None,
+    force_split: bool = False,
 ) -> dict[str, Any]:
     valid_ids = {int(item.get("id", 0) or 0) for item in events}
-    acceptable = bool(value.get("single_part_acceptable", True))
+    acceptable = bool(value.get("single_part_acceptable", True)) and not force_split
     raw_parts = value.get("parts", [])
     raw_parts = raw_parts if isinstance(raw_parts, list) else []
     parts: list[dict[str, Any]] = []

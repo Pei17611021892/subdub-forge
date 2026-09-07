@@ -112,6 +112,58 @@ class SeriesServiceTests(unittest.TestCase):
             self.assertEqual(len(restored["events"]), 8)
             self.assertFalse(child.exists())
 
+    def test_manuscript_series_keeps_root_source_and_writes_child_storyboard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            projects = Path(temporary_dir) / "projects"
+            root = projects / "v3-0903"
+            for child in ("source", "analysis", "storyboard", "script"):
+                (root / child).mkdir(parents=True, exist_ok=True)
+            original = "完整原稿第一段。\n完整原稿第二段。"
+            (root / "source" / "manuscript.txt").write_text(original, encoding="utf-8")
+            (root / "analysis" / "events.json").write_text(
+                json.dumps({"content_mode": "manuscript", "events": [{"id": 1}]}),
+                encoding="utf-8",
+            )
+            project_file = root / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "v3-0903",
+                        "project_type": "manuscript",
+                        "source_manuscript": "source/manuscript.txt",
+                        "stage": "manuscript_ready",
+                        "artifacts": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parts = []
+            for index, label in enumerate(("第一部分原文。", "第二部分原文。"), start=1):
+                parts.append(
+                    {
+                        "plan": {"part_index": index, "title_zh": f"第{index}集", "event_ids": [1]},
+                        "story": {"narration": [{"id": 1, "text_en": f"Part {index}."}]},
+                        "storyboard": {"beats": [{"id": 1, "narration_id": 1}]},
+                        "events": {"content_mode": "manuscript", "events": [{"id": 1, "transcript": label}]},
+                        "source_manuscript": label,
+                    }
+                )
+
+            result = materialize_story_series(
+                project_file,
+                {"coverage_score": 1, "reason_zh": "旁白超时"},
+                parts,
+            )
+            child = projects / result["members"][1]["directory"]
+            child_project = json.loads((child / "project.json").read_text(encoding="utf-8"))
+
+            self.assertEqual((root / "source" / "manuscript.txt").read_text(encoding="utf-8"), original)
+            self.assertEqual((child / "source" / "manuscript.txt").read_text(encoding="utf-8").strip(), "第二部分原文。")
+            self.assertTrue((root / "storyboard" / "storyboard.json").exists())
+            self.assertTrue((child / "storyboard" / "storyboard.json").exists())
+            self.assertEqual(child_project["stage"], "storyboarded")
+            self.assertEqual(child_project["project_type"], "manuscript")
+
     def test_only_long_or_dense_sources_need_preservation_evaluation(self) -> None:
         short = {"events": [{"id": 1, "start": 0, "end": 120}]}
         long_source = {"events": [{"id": 1, "start": 0, "end": 360}]}
@@ -267,6 +319,59 @@ class SeriesServiceTests(unittest.TestCase):
             self.assertEqual(result["parts"][0]["event_ids"], [1, 2, 3])
             self.assertEqual(result["parts"][1]["event_ids"], [6, 7, 8, 12])
             self.assertEqual(result["model"], "model")
+
+    def test_overlong_story_cannot_be_accepted_as_one_part(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            events_file = root / "events.json"
+            story_file = root / "story.json"
+            events = [
+                {
+                    "id": index,
+                    "start": index * 10,
+                    "end": index * 10 + 8,
+                    "transcript": f"关键事实 {index}",
+                }
+                for index in range(1, 9)
+            ]
+            events_file.write_text(json.dumps({"events": events}), encoding="utf-8")
+            story_file.write_text(
+                json.dumps(
+                    {
+                        "word_count": 320,
+                        "estimated_duration_sec": 205,
+                        "requires_series_evaluation": True,
+                        "narration": [
+                            {"id": 1, "event_ids": [1], "text_en": "An overlong draft."}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mistaken_acceptance = {
+                "single_part_acceptable": True,
+                "coverage_score": 0.9,
+                "reason_zh": "模型误判为单集可用",
+                "recommended_part_count": 1,
+                "parts": [],
+            }
+            with patch.dict(
+                "sys.modules", {"openai": SimpleNamespace(OpenAI=lambda **_kwargs: object())}
+            ), patch(
+                "src.series_service.api_configuration",
+                return_value={"api_key": "test", "base_url": ""},
+            ), patch("src.series_service._chat_json", return_value=mistaken_acceptance):
+                result = evaluate_story_preservation(
+                    events_file,
+                    story_file,
+                    None,
+                    {"story": {"model": "model"}, "series": {"max_parts": 4}},
+                    root,
+                )
+
+            self.assertFalse(result["single_part_acceptable"])
+            self.assertGreaterEqual(result["recommended_part_count"], 2)
+            self.assertGreaterEqual(len(result["parts"]), 2)
 
 
 if __name__ == "__main__":

@@ -61,7 +61,31 @@ def render_rough_preview(
         if end - start < 0.05:
             continue
         source_cleanup = f"crop=iw:ih*{source_crop_ratio:.3f}:0:0," if cleanup_original_subtitles else ""
-        if fit_mode == "crop":
+        if fit_mode == "vertical_blur":
+            blur_radius = max(
+                4,
+                min(60, int(export_config.get("vertical_background_blur_radius", 24) or 24)),
+            )
+            filters.extend(
+                [
+                    f"[0:v]trim=start={start:.3f}:end={end:.3f},"
+                    f"setpts=PTS-STARTPTS,fps={fps},{source_cleanup}split=2[vbg{index}][vfg{index}]",
+                    f"[vbg{index}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                    f"crop={width}:{height},gblur=sigma={blur_radius}[vbgfit{index}]",
+                    f"[vfg{index}]scale={width}:{height}:force_original_aspect_ratio=decrease[vfgfit{index}]",
+                    f"[vbgfit{index}][vfgfit{index}]overlay=(W-w)/2:(H-h)/2,"
+                    f"setsar=1,format=yuv420p[v{index}]",
+                ]
+            )
+            concat_inputs.append(f"[v{index}]")
+            if preserve_original_audio:
+                filters.append(
+                    f"[0:a]atrim=start={start:.3f}:end={end:.3f},"
+                    f"asetpts=PTS-STARTPTS,aresample=48000[aorig{index}]"
+                )
+                original_audio_inputs.append(f"[aorig{index}]")
+            continue
+        if fit_mode in {"crop", "vertical_crop"}:
             fit_filter = (
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
                 f"crop={width}:{height}"
@@ -87,7 +111,7 @@ def render_rough_preview(
             )
             original_audio_inputs.append(f"[aorig{index}]")
 
-    valid_count = len([value for value in filters if value.startswith("[0:v]")])
+    valid_count = len(concat_inputs)
     if valid_count == 0:
         raise ValueError("粗剪时间线中的镜头时长无效")
     has_subtitles = bool(subtitle_srt and subtitle_srt.exists())

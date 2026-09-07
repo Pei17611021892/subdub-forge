@@ -127,6 +127,7 @@ def generate_story_script(
     layered_structure_json: Path | None = None,
     planning_words_per_second: float | None = None,
     allow_incomplete_for_series_evaluation: bool = False,
+    allow_overlong_for_series_evaluation: bool = False,
 ) -> dict[str, Any]:
     from openai import OpenAI
 
@@ -210,6 +211,10 @@ def generate_story_script(
     client = OpenAI(api_key=api_key, base_url=base_url)
     model = str(story_config.get("model", "gpt-4o-mini"))
     editor_model = str(story_config.get("editor_model", "")).strip() or model
+    reasoning_effort = str(story_config.get("reasoning_effort", "") or "").strip()
+    editor_reasoning_effort = str(
+        story_config.get("editor_reasoning_effort", "") or ""
+    ).strip() or reasoning_effort
     temperature = max(0.0, min(1.2, float(story_config.get("temperature", 0.55))))
     requested_strategy = normalize_narrative_strategy(narrative_strategy)
     plan: dict[str, Any] = {}
@@ -224,7 +229,10 @@ def generate_story_script(
             requested_strategy,
             layered_structure,
         )
-        plan = _chat_json(client, model, plan_prompt, temperature, base_url, "全片故事规划")
+        plan = _chat_json(
+            client, model, plan_prompt, temperature, base_url, "全片故事规划",
+            reasoning_effort=reasoning_effort,
+        )
         plan = _normalize_visual_plan(plan, events)
         plan_path = story_json.with_name("story_plan.json")
         plan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -255,7 +263,10 @@ def generate_story_script(
             requested_strategy,
             layered_structure,
         )
-        result = _chat_json(client, editor_model, prompt, temperature, base_url, "最终故事编辑")
+        result = _chat_json(
+            client, editor_model, prompt, temperature, base_url, "最终故事编辑",
+            reasoning_effort=editor_reasoning_effort,
+        )
         normalized = _normalize_story(
             result,
             events,
@@ -276,7 +287,10 @@ def generate_story_script(
             requested_strategy,
             layered_structure,
         )
-        result = _chat_json(client, model, prompt, temperature, base_url, "故事生成")
+        result = _chat_json(
+            client, model, prompt, temperature, base_url, "故事生成",
+            reasoning_effort=reasoning_effort,
+        )
         normalized = _normalize_story(
             result,
             events,
@@ -343,6 +357,7 @@ def generate_story_script(
                 max(0.1, temperature - 0.1),
                 base_url,
                 "语音故事整篇重编",
+                reasoning_effort=editor_reasoning_effort,
             )
             normalized = _normalize_story(
                 result,
@@ -353,6 +368,52 @@ def generate_story_script(
             )
             normalized["editor_model"] = editor_model
             normalized["workflow"] = "speech_story_editor_v2"
+
+        if float(normalized.get("estimated_duration_sec", 0) or 0) >= SHORTS_MAX_DURATION_SEC:
+            progress(
+                0.87,
+                "常规重编后仍超过三分钟，正在执行最后一次保真压缩…",
+            )
+            forced_max_words = max(
+                30, int((SHORTS_MAX_DURATION_SEC - 5.0) * effective_wps * 0.95)
+            )
+            forced_min_words = max(
+                30, min(forced_max_words, int(150.0 * effective_wps))
+            )
+            forced_prompt = _build_speech_forced_compress_prompt(
+                compact_events,
+                result,
+                forced_min_words,
+                forced_max_words,
+                layered_structure,
+                allow_series=allow_overlong_for_series_evaluation,
+            )
+            try:
+                forced_raw = _chat_json(
+                    client,
+                    editor_model,
+                    forced_prompt,
+                    max(0.0, temperature - 0.2),
+                    base_url,
+                    "故事保真压缩",
+                    reasoning_effort=editor_reasoning_effort,
+                )
+                forced = _normalize_story(
+                    forced_raw,
+                    events,
+                    target_duration_sec,
+                    editor_model,
+                    planning_words_per_second=effective_wps,
+                )
+                if forced_raw.get("narration") and int(forced.get("word_count", 0) or 0) >= round(forced_min_words * 0.8):
+                    result = forced_raw
+                    normalized = forced
+                    normalized["editor_model"] = editor_model
+                    normalized["workflow"] = "speech_story_preserving_compress_v1"
+                    normalized["forced_compression"] = True
+            except Exception:
+                # The existing draft can still be evaluated and split safely below.
+                pass
 
     progress(0.68, "正在校验事件覆盖率、故事阶段和解说长度…")
     bound_event_count = len(_narration_event_ids(normalized))
@@ -383,7 +444,10 @@ def generate_story_script(
             outline_target,
             layered_structure,
         )
-        result = _chat_json(client, editor_model, retry_prompt, temperature, base_url, "最终故事重编")
+        result = _chat_json(
+            client, editor_model, retry_prompt, temperature, base_url, "最终故事重编",
+            reasoning_effort=editor_reasoning_effort,
+        )
         normalized = _normalize_story(
             result,
             events,
@@ -404,10 +468,7 @@ def generate_story_script(
             or len(normalized.get("outline", [])) < minimum_acceptable_outline
             or not _covers_timeline_sections(normalized, events)
         )
-        delivery_invalid = (
-            float(normalized.get("estimated_duration_sec", 0)) >= SHORTS_MAX_DURATION_SEC
-            or bool(_problematic_tts_unit_ids(normalized))
-        )
+        delivery_invalid = bool(_problematic_tts_unit_ids(normalized))
         if delivery_invalid or (
             coverage_invalid and not allow_incomplete_for_series_evaluation
         ):
@@ -421,21 +482,43 @@ def generate_story_script(
                 f"同时预计成片必须低于 {SHORTS_MAX_DURATION_SEC:.0f} 秒。"
                 "请在 API 设置中选择能力更强的故事生成或最终编辑模型后重试。"
             )
+    if (
+        float(normalized.get("estimated_duration_sec", 0) or 0)
+        >= SHORTS_MAX_DURATION_SEC
+        and not allow_overlong_for_series_evaluation
+    ):
+        progress(0.86, "最终编辑仍超时，正在按重要度收束为一条完整 Shorts…")
+        normalized = _trim_narration_to_duration(
+            normalized,
+            layered_structure,
+            SHORTS_MAX_DURATION_SEC - 5.0,
+        )
+
     progress(0.88, "正在整理解说断句与镜头绑定…")
     final_duration = float(normalized.get("estimated_duration_sec", 0))
     final_broad_bindings = _overbroad_narration_bindings(normalized)
     final_missing_critical = _missing_critical_event_ids(normalized, layered_structure)
     final_broken_tts_units = _problematic_tts_unit_ids(normalized)
-    if final_duration >= SHORTS_MAX_DURATION_SEC:
+    if final_duration >= SHORTS_MAX_DURATION_SEC and not allow_overlong_for_series_evaluation:
         raise RuntimeError(
             f"预计旁白约 {normalized.get('estimated_duration_sec', 0)} 秒，超过 Shorts 三分钟限制。"
             "请缩短故事后重试。"
         )
+    if final_duration >= SHORTS_MAX_DURATION_SEC:
+        normalized["requires_series_evaluation"] = True
     blocking_missing_critical = (
-        final_missing_critical if not allow_incomplete_for_series_evaluation else []
+        final_missing_critical
+        if not allow_incomplete_for_series_evaluation
+        and not bool(normalized.get("forced_single_short_trim", False))
+        else []
     )
     if content_mode == "speech" and (
-        final_broad_bindings or blocking_missing_critical or final_broken_tts_units
+        (
+            final_broad_bindings
+            and not bool(normalized.get("forced_single_short_trim", False))
+        )
+        or blocking_missing_critical
+        or final_broken_tts_units
     ):
         details = []
         if final_broad_bindings:
@@ -475,6 +558,9 @@ def generate_story_script(
     return normalized
 
 
+_REASONING_EFFORT_LADDER: tuple[str, ...] = ("xhigh", "high", "medium", "low")
+
+
 def _chat_json(
     client: Any,
     model: str,
@@ -482,23 +568,46 @@ def _chat_json(
     temperature: float,
     base_url: str | None,
     operation: str,
+    reasoning_effort: str = "",
 ) -> dict[str, Any]:
+    effort = str(reasoning_effort or "").strip().lower()
+    if effort not in _REASONING_EFFORT_LADDER:
+        effort = ""
+    request_kwargs: dict[str, Any] = {"temperature": temperature}
+    if effort:
+        request_kwargs["reasoning_effort"] = effort
     try:
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-            )
-        except Exception as exc:
-            message = str(exc).lower()
-            status_code = getattr(exc, "status_code", None)
-            if status_code == 400 and "temperature" in message:
+        attempted: set[tuple[tuple[str, str], ...]] = set()
+        while True:
+            signature = tuple(sorted((key, str(value)) for key, value in request_kwargs.items()))
+            if signature in attempted:
+                raise RuntimeError("API compatibility fallback repeated the same request")
+            attempted.add(signature)
+            try:
                 response = client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
+                    **request_kwargs,
                 )
-            else:
+                break
+            except Exception as exc:
+                message = str(exc).lower()
+                status_code = getattr(exc, "status_code", None)
+                compatibility_error = status_code in {400, 422} or status_code is None
+                if compatibility_error and "temperature" in message and "temperature" in request_kwargs:
+                    request_kwargs.pop("temperature", None)
+                    continue
+                if compatibility_error and "reasoning_effort" in request_kwargs and any(
+                    token in message
+                    for token in ("reasoning", "unsupported", "unrecognized", "unknown", "invalid")
+                ):
+                    current = str(request_kwargs["reasoning_effort"])
+                    index = _REASONING_EFFORT_LADDER.index(current)
+                    if index + 1 < len(_REASONING_EFFORT_LADDER):
+                        request_kwargs["reasoning_effort"] = _REASONING_EFFORT_LADDER[index + 1]
+                    else:
+                        request_kwargs.pop("reasoning_effort", None)
+                    continue
                 raise
     except Exception as exc:
         raise friendly_api_error(exc, base_url, operation) from exc
@@ -832,6 +941,140 @@ SOURCE EVENTS:
 """.strip()
 
 
+def _build_speech_forced_compress_prompt(
+    events: list[dict[str, Any]],
+    draft: dict[str, Any],
+    minimum_words: int,
+    maximum_words: int,
+    layered_structure: dict[str, Any] | None = None,
+    allow_series: bool = False,
+) -> str:
+    layered_guidance = _layered_structure_prompt(layered_structure)
+    delivery_rule = (
+        "If honest compression cannot fit the word budget, retain the essential material; StoryCut may split it into multiple Shorts."
+        if allow_series
+        else "This project must remain one Short. Stay inside the word budget by removing secondary facts and examples, never by corrupting the core explanation or deleting the ending."
+    )
+    return f"""
+You are the final native-English editor for a science YouTube Short.
+Two normal rewrites could not fit this draft below three minutes. Rebuild it once, preserving the story rather than mechanically cutting its ending.
+
+NON-NEGOTIABLE RULES
+- Return {minimum_words}-{maximum_words} English words.
+- Preserve the hook, central question, causal mechanism, strongest evidence or turning point, and a complete ending.
+- Remove repeated explanations, secondary examples, decorative transitions, long setup, and routine events first.
+- Never invent facts, numbers, causes, motives, identities, dialogue, or unseen actions.
+- Preserve chronology and valid event_ids; bind each narration item to only 1-4 directly relevant events.
+- Every comma, semicolon, colon, period, question mark, and exclamation mark creates a GPT-SoVITS unit. Every unit must be complete and independently speakable.
+- {delivery_rule}
+{layered_guidance}
+
+Return exactly one JSON object in the same schema as the draft. Return no Markdown.
+
+OVERLONG DRAFT:
+{json.dumps(draft, ensure_ascii=False)}
+
+SOURCE EVENTS:
+{json.dumps(events, ensure_ascii=False)}
+""".strip()
+
+
+def _trim_narration_to_duration(
+    story: dict[str, Any],
+    layered_structure: dict[str, Any] | None,
+    limit_sec: float,
+) -> dict[str, Any]:
+    """Last-resort one-Short fit that preserves both ends and ranked key beats."""
+    narration = [
+        dict(item) for item in story.get("narration", []) if isinstance(item, dict)
+    ]
+    if not narration:
+        return dict(story)
+    critical_ids = {
+        int(value)
+        for key in ("global_turning_point_event_ids", "recommended_highlight_event_ids")
+        for value in (layered_structure or {}).get(key, [])
+        if str(value).isdigit()
+    }
+    routine_ids = {
+        int(value)
+        for value in (layered_structure or {}).get("routine_or_repetitive_event_ids", [])
+        if str(value).isdigit()
+    }
+
+    def duration_total() -> float:
+        return sum(
+            max(0.05, float(item.get("estimated_duration_sec", 0) or 0))
+            for item in narration
+        )
+
+    def keep_rank(index: int) -> tuple[int, float]:
+        item = narration[index]
+        event_ids = {
+            int(value) for value in item.get("event_ids", []) if str(value).isdigit()
+        }
+        if index in {0, len(narration) - 1}:
+            priority = 4
+        elif event_ids & critical_ids:
+            priority = 3
+        elif event_ids & routine_ids:
+            priority = 0
+        else:
+            priority = 2
+        # Within the same rank, removing one longer beat reaches the limit with
+        # fewer continuity cuts than deleting several short adjacent sentences.
+        return priority, -float(item.get("estimated_duration_sec", 0) or 0)
+
+    removed_event_ids: set[int] = set()
+    while len(narration) > 2 and duration_total() >= limit_sec:
+        candidates = list(range(1, len(narration) - 1))
+        remove_index = min(candidates, key=keep_rank)
+        removed = narration.pop(remove_index)
+        removed_event_ids.update(
+            int(value) for value in removed.get("event_ids", []) if str(value).isdigit()
+        )
+
+    for index, item in enumerate(narration, start=1):
+        item["id"] = index
+    selected_ids = {
+        int(value)
+        for item in narration
+        for value in item.get("event_ids", [])
+        if str(value).isdigit()
+    }
+    outline = [
+        dict(item)
+        for item in story.get("outline", [])
+        if isinstance(item, dict)
+        and selected_ids
+        & {
+            int(value) for value in item.get("event_ids", []) if str(value).isdigit()
+        }
+    ]
+    for index, item in enumerate(outline, start=1):
+        item["order"] = index
+
+    trimmed = dict(story)
+    trimmed["narration"] = narration
+    trimmed["outline"] = outline
+    trimmed["word_count"] = sum(
+        int(item.get("word_count", 0) or 0) for item in narration
+    )
+    trimmed["estimated_duration_sec"] = round(duration_total(), 2)
+    trimmed["selected_event_ids"] = sorted(selected_ids)
+    trimmed["omitted_event_ids"] = sorted(
+        {
+            int(value)
+            for value in story.get("omitted_event_ids", [])
+            if str(value).isdigit()
+        }
+        | removed_event_ids
+    )
+    trimmed["forced_single_short_trim"] = True
+    trimmed["workflow"] = str(story.get("workflow", "story")) + "_single_short_fit"
+    return trimmed
+
+
 def _layered_structure_prompt(layered_structure: dict[str, Any] | None) -> str:
     if not layered_structure:
         return ""
@@ -1064,6 +1307,65 @@ def refresh_story_timing(story: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         2,
     )
     return refreshed, True
+
+
+def calibrate_story_timing_from_voice(
+    story: dict[str, Any],
+    actual_duration_sec: float,
+    synced_segments: list[dict[str, Any]] | None = None,
+    timing_source: str = "audio",
+) -> dict[str, Any]:
+    """Replace planning estimates with the current project's measured voice timing."""
+    duration = max(0.0, float(actual_duration_sec or 0))
+    items = [
+        dict(item) for item in story.get("narration", []) if isinstance(item, dict)
+    ]
+    if not items or duration <= 0:
+        return dict(story)
+
+    segments = [
+        dict(item) for item in (synced_segments or []) if isinstance(item, dict)
+    ]
+    if len(segments) == len(items):
+        starts = [max(0.0, float(item.get("start", 0) or 0)) for item in segments]
+        boundaries = [0.0, *starts[1:], duration]
+        item_durations = [
+            max(0.05, boundaries[index + 1] - boundaries[index])
+            for index in range(len(items))
+        ]
+        resolved_source = "synced_srt"
+    else:
+        weights = [
+            max(0.05, float(item.get("estimated_duration_sec", 0) or 0))
+            for item in items
+        ]
+        total_weight = sum(weights)
+        item_durations = [duration * weight / total_weight for weight in weights]
+        resolved_source = str(timing_source or "audio")
+
+    rounded = [round(value, 3) for value in item_durations]
+    if rounded:
+        rounded[-1] = round(max(0.05, duration - sum(rounded[:-1])), 3)
+    for item, measured_duration in zip(items, rounded):
+        item["estimated_duration_sec"] = measured_duration
+
+    calibrated = dict(story)
+    if not str(story.get("timing_model", "")).startswith("measured_voice"):
+        calibrated["estimated_duration_before_voice_sec"] = round(
+            float(story.get("estimated_duration_sec", 0) or 0), 3
+        )
+    word_count = sum(
+        int(item.get("word_count", 0) or 0)
+        or len(re.findall(r"\b[\w'-]+\b", str(item.get("text_en", ""))))
+        for item in items
+    )
+    calibrated["narration"] = items
+    calibrated["word_count"] = word_count
+    calibrated["estimated_duration_sec"] = round(duration, 3)
+    calibrated["timing_model"] = "measured_voice_projection_v1"
+    calibrated["voice_timing_source"] = resolved_source
+    calibrated["measured_voice_words_per_second"] = round(word_count / duration, 3)
+    return calibrated
 
 
 def normalize_story_after_text_edit(

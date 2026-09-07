@@ -21,8 +21,12 @@ ApplicationWindow {
     property color textMuted: "#9ca3af"
     property int currentStep: 0
     property int storyTargetDuration: 180
-    property bool understandingDone: appController.events.length > 0
+    property bool manuscriptProject: appController.projectType === "manuscript"
+    property bool understandingDone: manuscriptProject
+                                            ? appController.sourceManuscriptText.trim().length > 0
+                                            : appController.events.length > 0
     property bool storyDone: appController.storyNarration.length > 0
+                             && (!manuscriptProject || !appController.storyboardStale)
     property bool matchingDone: appController.matches.length > 0
     property bool exportDone: appController.previewVideoReady
     property bool matchingAdvancedVisible: false
@@ -231,6 +235,352 @@ ApplicationWindow {
         title: "选择原始视频"
         nameFilters: ["视频文件 (*.mp4 *.mkv *.mov *.avi *.webm *.m4v)", "所有文件 (*)"]
         onAccepted: appController.importVideo(selectedFile.toString())
+    }
+
+    FileDialog {
+        id: manuscriptFileDialog
+        title: "选择中文文稿"
+        nameFilters: ["文稿文件 (*.txt *.md *.markdown)", "所有文件 (*)"]
+        onAccepted: {
+            appController.importManuscript(selectedFile.toString())
+            manuscriptCreateDialog.close()
+        }
+    }
+
+    FileDialog {
+        id: manuscriptAssetsDialog
+        title: "选择用于匹配分镜的本地素材"
+        fileMode: FileDialog.OpenFiles
+        nameFilters: [
+            "视频和图片 (*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.jpg *.jpeg *.png *.webp *.bmp)",
+            "视频文件 (*.mp4 *.mkv *.mov *.avi *.webm *.m4v)",
+            "图片文件 (*.jpg *.jpeg *.png *.webp *.bmp)"
+        ]
+        onAccepted: appController.importManuscriptAssets(selectedFiles)
+    }
+
+    Dialog {
+        id: stockMediaSettingsDialog
+        width: 560
+        anchors.centerIn: parent
+        modal: true
+        padding: 22
+        closePolicy: Popup.CloseOnEscape
+        background: Rectangle { radius: 16; color: "#12141b"; border.color: "#3a3f4c" }
+        contentItem: ColumnLayout {
+            spacing: 12
+            Text { text: "免费素材网站设置"; color: textMain; font.pixelSize: 19; font.bold: true }
+            Text {
+                Layout.fillWidth: true
+                text: "至少配置一个免费 API Key。搜索使用分镜已有关键词，不会增加 OpenAI 请求。"
+                color: textMuted; font.pixelSize: 11; wrapMode: Text.WordWrap
+            }
+            Text { text: "Pexels API Key"; color: "#d4d4d8"; font.pixelSize: 11 }
+            TextField {
+                id: pexelsKeyInput
+                Layout.fillWidth: true
+                echoMode: stockKeysVisible.checked ? TextInput.Normal : TextInput.Password
+                color: textMain; placeholderText: "可留空"
+                background: Rectangle { implicitHeight: 40; radius: 9; color: "#1d2028"; border.color: pexelsKeyInput.activeFocus ? accent : "#3a3f4c" }
+            }
+            Text { text: "Pixabay API Key"; color: "#d4d4d8"; font.pixelSize: 11 }
+            TextField {
+                id: pixabayKeyInput
+                Layout.fillWidth: true
+                echoMode: stockKeysVisible.checked ? TextInput.Normal : TextInput.Password
+                color: textMain; placeholderText: "可留空"
+                background: Rectangle { implicitHeight: 40; radius: 9; color: "#1d2028"; border.color: pixabayKeyInput.activeFocus ? accent : "#3a3f4c" }
+            }
+            CheckBox {
+                id: stockKeysVisible
+                text: "显示 API Key"
+                contentItem: Text { leftPadding: stockKeysVisible.indicator.width + stockKeysVisible.spacing; text: stockKeysVisible.text; color: textMuted; font.pixelSize: 11 }
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "密钥保存在仓库根目录 .env，仅用于调用对应素材站官方搜索接口。"
+                color: "#858b98"; font.pixelSize: 10; wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                GhostButton { text: "取消"; onClicked: stockMediaSettingsDialog.close() }
+                FlatButton {
+                    text: "保存配置"
+                    enabled: pexelsKeyInput.text.trim() !== "" || pixabayKeyInput.text.trim() !== ""
+                    onClicked: {
+                        if (appController.saveStockMediaConfiguration(pexelsKeyInput.text, pixabayKeyInput.text))
+                            stockMediaSettingsDialog.close()
+                    }
+                }
+            }
+        }
+        onOpened: {
+            pexelsKeyInput.text = appController.pexelsApiKey
+            pixabayKeyInput.text = appController.pixabayApiKey
+            stockKeysVisible.checked = false
+        }
+        onClosed: {
+            pexelsKeyInput.text = ""
+            pixabayKeyInput.text = ""
+        }
+    }
+
+    Dialog {
+        id: stockResultsDialog
+        width: Math.min(window.width - 70, 920)
+        height: Math.min(window.height - 60, 680)
+        anchors.centerIn: parent
+        modal: true
+        padding: 20
+        closePolicy: Popup.CloseOnEscape
+        background: Rectangle { radius: 16; color: "#12141b"; border.color: "#3a3f4c" }
+        contentItem: ColumnLayout {
+            spacing: 12
+            RowLayout {
+                Layout.fillWidth: true
+                ColumnLayout {
+                    Layout.fillWidth: true; spacing: 3
+                    Text { text: "免费素材候选"; color: textMain; font.pixelSize: 19; font.bold: true }
+                    Text { text: "每个分镜默认选择综合评分最高的结果；下载前可打开来源页面核对。"; color: textMuted; font.pixelSize: 10 }
+                }
+                GhostButton { text: "关闭"; onClicked: stockResultsDialog.close() }
+            }
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: 8
+                model: appController.stockSearchResults
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                delegate: Rectangle {
+                    id: stockResultItem
+                    required property var modelData
+                    property var candidate: modelData.candidates && modelData.candidates.length > 0 ? modelData.candidates[0] : ({})
+                    width: ListView.view.width
+                    height: 104
+                    radius: 10
+                    color: "#191c23"
+                    border.color: modelData.status === "found" ? "#315d46" : "#70404a"
+                    RowLayout {
+                        anchors.fill: parent; anchors.margins: 9; spacing: 11
+                        Rectangle {
+                            Layout.preferredWidth: 132; Layout.fillHeight: true
+                            radius: 7; color: "#0b0c10"; clip: true
+                            Image { anchors.fill: parent; source: stockResultItem.candidate.preview_url || ""; fillMode: Image.PreserveAspectCrop; asynchronous: true }
+                            Text { anchors.centerIn: parent; visible: !stockResultItem.candidate.preview_url; text: "未找到素材"; color: textMuted; font.pixelSize: 10 }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true; Layout.fillHeight: true; spacing: 4
+                            Text { text: "分镜 " + modelData.narration_id + " · " + modelData.ideal_shot_zh; color: textMain; font.pixelSize: 11; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
+                            Text { text: "搜索词：" + modelData.query; color: textMuted; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                            Text {
+                                text: stockResultItem.candidate.provider
+                                      ? stockResultItem.candidate.provider + " · " + (stockResultItem.candidate.author || "未知作者") + " · " + (stockResultItem.candidate.duration_sec || 0) + " 秒 · " + (stockResultItem.candidate.width || 0) + "×" + (stockResultItem.candidate.height || 0)
+                                      : "没有匹配结果，后续可导入本地素材补充"
+                                color: stockResultItem.candidate.provider ? "#8ee3b4" : "#ff9ba6"; font.pixelSize: 10
+                            }
+                            Text { visible: modelData.local_path; text: "✓ 已下载到项目素材目录"; color: "#8ee3b4"; font.pixelSize: 10 }
+                        }
+                        GhostButton {
+                            visible: stockResultItem.candidate.page_url
+                            text: "查看来源"
+                            onClicked: appController.openWebUrl(stockResultItem.candidate.page_url)
+                        }
+                    }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Text { text: "素材来自 Pexels / Pixabay；请保留项目记录中的作者和来源链接。"; color: "#858b98"; font.pixelSize: 9; Layout.fillWidth: true }
+                FlatButton {
+                    text: appController.stockSearchBusy ? "正在下载…" : "下载自动选择的素材"
+                    enabled: appController.stockSearchResults.length > 0 && !appController.stockSearchBusy
+                    onClicked: appController.downloadStockSelections()
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: projectTypeDialog
+        width: Math.min(window.width - 80, 760)
+        anchors.centerIn: parent
+        modal: true
+        padding: 24
+        closePolicy: Popup.CloseOnEscape
+
+        background: Rectangle {
+            radius: 18
+            color: "#12141b"
+            border.color: "#393346"
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 18
+            Text { text: "创建 StoryCut 项目"; color: textMain; font.pixelSize: 22; font.bold: true }
+            Text {
+                Layout.fillWidth: true
+                text: "选择你的起始素材。两种模式使用相同的配音、字幕、检查与导出流程。"
+                color: textMuted
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 14
+                Repeater {
+                    model: [
+                        {
+                            icon: "▶",
+                            title: "从视频开始",
+                            detail: "导入已有长视频，理解语音和画面，再压缩为三分钟内的英文解说。",
+                            action: "video"
+                        },
+                        {
+                            icon: "文",
+                            title: "从文稿开始",
+                            detail: "粘贴或导入纯文稿，先规划所需分镜，再准备素材并自动匹配。",
+                            action: "manuscript"
+                        }
+                    ]
+                    delegate: Rectangle {
+                        id: projectModeCard
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 178
+                        radius: 15
+                        color: projectModeMouse.containsMouse ? "#201b2b" : panel
+                        border.width: 1
+                        border.color: projectModeMouse.containsMouse ? accent : "#30333d"
+                        ColumnLayout {
+                            anchors.fill: parent
+                            anchors.margins: 18
+                            spacing: 9
+                            Rectangle {
+                                Layout.preferredWidth: 44
+                                Layout.preferredHeight: 44
+                                radius: 12
+                                color: "#34234f"
+                                Text { anchors.centerIn: parent; text: projectModeCard.modelData.icon; color: accentLight; font.pixelSize: 19; font.bold: true }
+                            }
+                            Text { text: projectModeCard.modelData.title; color: textMain; font.pixelSize: 17; font.bold: true }
+                            Text {
+                                Layout.fillWidth: true
+                                text: projectModeCard.modelData.detail
+                                color: textMuted
+                                font.pixelSize: 11
+                                wrapMode: Text.WordWrap
+                            }
+                            Item { Layout.fillHeight: true }
+                            Text { text: "开始  →"; color: accentLight; font.pixelSize: 12; font.bold: true }
+                        }
+                        MouseArea {
+                            id: projectModeMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                projectTypeDialog.close()
+                                if (projectModeCard.modelData.action === "video")
+                                    videoDialog.open()
+                                else
+                                    manuscriptCreateDialog.open()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: manuscriptCreateDialog
+        width: Math.min(window.width - 80, 820)
+        height: Math.min(window.height - 70, 650)
+        anchors.centerIn: parent
+        modal: true
+        padding: 0
+        closePolicy: Popup.CloseOnEscape
+        onOpened: manuscriptDraft.text = ""
+
+        background: Rectangle {
+            radius: 18
+            color: "#12141b"
+            border.color: "#44365b"
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 24
+            spacing: 14
+            RowLayout {
+                Layout.fillWidth: true
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Text { text: "从文稿开始"; color: textMain; font.pixelSize: 22; font.bold: true }
+                    Text { text: "粘贴完整中文文稿，或导入 UTF-8、UTF-16、GB18030 编码的 TXT / Markdown。"; color: textMuted; font.pixelSize: 11 }
+                }
+                GhostButton { text: "选择文稿文件"; onClicked: manuscriptFileDialog.open() }
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 13
+                color: "#0d0f14"
+                border.color: manuscriptDraft.activeFocus ? accent : "#30333d"
+                ScrollView {
+                    anchors.fill: parent
+                    anchors.margins: 3
+                    TextArea {
+                        id: manuscriptDraft
+                        placeholderText: "在这里粘贴文稿，例如：大象之间是否拥有真正的语言？……"
+                        color: textMain
+                        placeholderTextColor: "#616673"
+                        font.pixelSize: 14
+                        wrapMode: TextEdit.Wrap
+                        selectByMouse: true
+                        padding: 16
+                        background: null
+                    }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Text { text: manuscriptDraft.text.trim().length + " 字符"; color: textMuted; font.pixelSize: 11 }
+                Item { Layout.fillWidth: true }
+                GhostButton { text: "取消"; onClicked: manuscriptCreateDialog.close() }
+                FlatButton {
+                    text: "创建文稿项目  →"
+                    enabled: manuscriptDraft.text.trim().length > 0
+                    onClicked: {
+                        appController.createManuscriptProject(manuscriptDraft.text)
+                        manuscriptCreateDialog.close()
+                        scrollToSection(understandingSection, 1)
+                    }
+                }
+            }
+        }
+    }
+
+    Timer {
+        id: manuscriptAutosaveTimer
+        interval: 700
+        repeat: false
+        onTriggered: {
+            if (manuscriptProject && sourceManuscriptArea.text.trim().length > 0)
+                appController.updateSourceManuscript(sourceManuscriptArea.text)
+        }
+    }
+
+    Connections {
+        target: appController
+        function onProjectChanged() {
+            if (!sourceManuscriptArea.activeFocus
+                    && sourceManuscriptArea.text !== appController.sourceManuscriptText)
+                sourceManuscriptArea.text = appController.sourceManuscriptText
+        }
     }
 
     FileDialog {
@@ -706,11 +1056,12 @@ ApplicationWindow {
 
     FileDialog {
         id: saveTtsSrtDialog
-        title: "导出 SRT 到 GPT-SoVITS · 选择保存位置"
+        property string exportFormat: "srt"
+        title: exportFormat === "txt" ? "导出配音纯文本 · 选择保存位置" : "导出 GPT-SoVITS SRT · 选择保存位置"
         fileMode: FileDialog.SaveFile
-        defaultSuffix: "srt"
-        nameFilters: ["SRT 字幕 (*.srt)"]
-        onAccepted: appController.saveTtsSrt(selectedFile.toString())
+        defaultSuffix: exportFormat
+        nameFilters: exportFormat === "txt" ? ["纯文本 (*.txt)"] : ["SRT 字幕 (*.srt)"]
+        onAccepted: appController.saveTtsSrt(selectedFile.toString(), exportFormat)
     }
 
     Dialog {
@@ -1275,13 +1626,31 @@ ApplicationWindow {
                     apiBaseUrlInput.text,
                     storyModelInput.text,
                     visionModelInput.text,
-                    editorModelInput.text))
+                    editorModelInput.text,
+                    reasoningValue(storyReasoningCombo.currentIndex),
+                    reasoningValue(editorReasoningCombo.currentIndex)))
                 return
             close()
             if (requestedAction === "understanding")
                 appController.startUnderstanding()
             else if (requestedAction === "story")
                 appController.generateStory(storyTargetDuration)
+        }
+
+        function reasoningValue(index) {
+            if (index === 1) return "low"
+            if (index === 2) return "medium"
+            if (index === 3) return "high"
+            if (index === 4) return "xhigh"
+            return ""
+        }
+
+        function reasoningIndex(value) {
+            if (value === "low") return 1
+            if (value === "medium") return 2
+            if (value === "high") return 3
+            if (value === "xhigh") return 4
+            return 0
         }
 
         background: Rectangle {
@@ -1449,6 +1818,53 @@ ApplicationWindow {
                 font.pixelSize: 10
                 wrapMode: Text.WordWrap
             }
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: reasoningSettingsContent.implicitHeight + 28
+                radius: 12
+                color: "#181b23"
+                border.color: "#343946"
+                ColumnLayout {
+                    id: reasoningSettingsContent
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 14
+                    spacing: 10
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 9
+                        Rectangle {
+                            Layout.preferredWidth: 28; Layout.preferredHeight: 28
+                            radius: 8; color: "#30234a"
+                            Text { anchors.centerIn: parent; text: "✦"; color: accentLight; font.pixelSize: 13 }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true; spacing: 1
+                            Text { text: "模型思考强度"; color: textMain; font.pixelSize: 13; font.bold: true }
+                            Text { text: "模型不支持所选档位时会自动降级，不会阻断任务。"; color: textMuted; font.pixelSize: 10 }
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 12
+                        Text { text: "故事生成"; color: "#cfd2da"; font.pixelSize: 11; Layout.preferredWidth: 86 }
+                        DarkComboBox {
+                            id: storyReasoningCombo
+                            Layout.fillWidth: true
+                            model: ["标准（推荐）", "低 · 轻量推理", "中 · 平衡推理", "高 · 深度推理", "极高 · 极限推理"]
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 12
+                        Text { text: "最终编辑"; color: "#cfd2da"; font.pixelSize: 11; Layout.preferredWidth: 86 }
+                        DarkComboBox {
+                            id: editorReasoningCombo
+                            Layout.fillWidth: true
+                            model: ["跟随故事生成", "低 · 轻量推理", "中 · 平衡推理", "高 · 深度推理", "极高 · 极限推理"]
+                        }
+                    }
+                }
+            }
             Text { text: "视觉理解模型"; color: "#d4d4d8"; font.pixelSize: 12 }
             RowLayout {
                 Layout.fillWidth: true
@@ -1505,6 +1921,8 @@ ApplicationWindow {
             storyModelInput.text = appController.storyApiModel
             editorModelInput.text = appController.storyEditorApiModel
             visionModelInput.text = appController.visionApiModel
+            storyReasoningCombo.currentIndex = reasoningIndex(appController.storyReasoningEffort)
+            editorReasoningCombo.currentIndex = reasoningIndex(appController.editorReasoningEffort)
             showApiKey.checked = false
             apiKeyInput.forceActiveFocus()
         }
@@ -1830,15 +2248,15 @@ ApplicationWindow {
                     Rectangle {
                         id: subtitlePreviewFrame
                         Layout.fillWidth: true
-                        Layout.preferredHeight: width * 9 / 16
+                        Layout.preferredHeight: 430
                         Layout.alignment: Qt.AlignTop
                         radius: 13
                         color: "#05060a"
                         clip: true
                         Item {
                             id: subtitleVideoViewport
-                            property real sourceAspect: Math.max(1, appController.sourceVideoWidth)
-                                                        / Math.max(1, appController.sourceVideoHeight)
+                            property real sourceAspect: Math.max(1, appController.subtitleCanvasWidth)
+                                                        / Math.max(1, appController.subtitleCanvasHeight)
                             property real frameAspect: subtitlePreviewFrame.width
                                                        / Math.max(1, subtitlePreviewFrame.height)
                             width: sourceAspect >= frameAspect
@@ -1851,10 +2269,25 @@ ApplicationWindow {
                             clip: true
 
                             Image {
+                                anchors.fill: parent
+                                source: appController.subtitleEffectPreviewUrl
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true
+                                visible: appController.exportFitMode === "vertical_blur"
+                                         && !appController.subtitleEffectPreviewReady
+                                opacity: 0.38
+                            }
+                            Image {
                                 id: subtitleEffectImage
                                 anchors.fill: parent
                                 source: appController.subtitleEffectPreviewUrl
-                                fillMode: Image.Stretch
+                                fillMode: appController.subtitleEffectPreviewReady
+                                          ? Image.Stretch
+                                          : appController.exportFitMode === "vertical_blur"
+                                            ? Image.PreserveAspectFit
+                                            : appController.exportFitMode === "vertical_crop"
+                                              ? Image.PreserveAspectCrop
+                                              : Image.Stretch
                                 asynchronous: true
                             }
                             Rectangle {
@@ -1930,12 +2363,12 @@ ApplicationWindow {
                                 width: parent.width * Math.max(
                                            0.2,
                                            1 - appController.subtitleStyle.horizontalMargin * 2
-                                               / Math.max(1, appController.sourceVideoWidth))
+                                               / Math.max(1, appController.subtitleCanvasWidth))
                                 height: subtitlePreviewLabel.implicitHeight + 18
                                 x: (parent.width - width) / 2
                                 y: Math.max(8, parent.height - height
                                             - appController.subtitleStyle.bottomMargin
-                                              / Math.max(1, appController.sourceVideoHeight) * parent.height)
+                                              / Math.max(1, appController.subtitleCanvasHeight) * parent.height)
                                 radius: appController.subtitleStyle.backgroundEnabled ? 7 : 0
                                 color: appController.subtitleStyle.backgroundEnabled
                                        ? Qt.rgba(0, 0, 0, appController.subtitleStyle.backgroundOpacity)
@@ -1950,7 +2383,7 @@ ApplicationWindow {
                                     font.pixelSize: Math.max(
                                                         6,
                                                         appController.subtitleStyle.fontSize
-                                                        / Math.max(1, appController.sourceVideoHeight)
+                                                        / Math.max(1, appController.subtitleCanvasHeight)
                                                         * subtitleVideoViewport.height)
                                     font.bold: appController.subtitleStyle.bold
                                     font.italic: appController.subtitleStyle.italic
@@ -1986,7 +2419,7 @@ ApplicationWindow {
                             Text { text: "提示"; color: accentLight; font.pixelSize: 11; font.bold: true }
                             Text {
                                 Layout.fillWidth: true
-                                text: "字幕位置以原视频高度计算。当前默认不缩放、不补边、不裁切画面。"
+                                text: "预览按最终成片画布计算。竖屏完整画面模式不会裁切主体；可拖动底板调整字幕安全位置。"
                                 color: textMuted
                                 font.pixelSize: 10
                                 wrapMode: Text.WordWrap
@@ -2070,12 +2503,12 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 Text { text: "底部距离"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
                                 Slider {
-                                    Layout.fillWidth: true; from: 20; to: Math.max(120, appController.sourceVideoHeight * 0.42); stepSize: 2
+                                    Layout.fillWidth: true; from: 20; to: Math.max(120, appController.subtitleCanvasHeight * 0.55); stepSize: 2
                                     value: appController.subtitleStyle.bottomMargin
                                     onMoved: appController.updateSubtitleStyle("bottomMargin", Math.round(value))
                                 }
                                 PreciseSpinBox {
-                                    from: 20; to: Math.max(120, appController.sourceVideoHeight * 0.42)
+                                    from: 20; to: Math.max(120, appController.subtitleCanvasHeight * 0.55)
                                     value: appController.subtitleStyle.bottomMargin; suffix: " px"
                                     onValueModified: appController.updateSubtitleStyle("bottomMargin", value)
                                 }
@@ -2115,13 +2548,13 @@ ApplicationWindow {
                             RowLayout {
                                 Layout.fillWidth: true
                                 Text { text: "粗体"; color: textMain; font.pixelSize: 11 }
-                                Switch {
+                                ModernSwitch {
                                     checked: appController.subtitleStyle.bold
                                     onToggled: appController.updateSubtitleStyle("bold", checked)
                                 }
                                 Item { Layout.preferredWidth: 18 }
                                 Text { text: "斜体"; color: textMain; font.pixelSize: 11 }
-                                Switch {
+                                ModernSwitch {
                                     checked: appController.subtitleStyle.italic
                                     onToggled: appController.updateSubtitleStyle("italic", checked)
                                 }
@@ -2378,6 +2811,102 @@ ApplicationWindow {
         }
     }
 
+    component ModernSwitch: Switch {
+        id: toggleControl
+        implicitWidth: 46
+        implicitHeight: 26
+        padding: 0
+        spacing: 0
+
+        indicator: Rectangle {
+            anchors.fill: parent
+            radius: height / 2
+            color: toggleControl.checked ? "#7046d8" : "#2b2f39"
+            border.width: 1
+            border.color: toggleControl.checked
+                          ? (toggleControl.hovered ? "#bda4ff" : "#9368f2")
+                          : (toggleControl.hovered ? "#5a6070" : "#414653")
+            opacity: toggleControl.enabled ? 1 : 0.48
+            Behavior on color { ColorAnimation { duration: 140 } }
+
+            Rectangle {
+                width: 20
+                height: 20
+                radius: 10
+                y: 3
+                x: toggleControl.checked ? parent.width - width - 3 : 3
+                color: toggleControl.enabled ? "#ffffff" : "#a5a8b0"
+                Behavior on x {
+                    NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                }
+            }
+        }
+        contentItem: Item { }
+        background: Item { }
+    }
+
+    component DarkComboBox: ComboBox {
+        id: comboControl
+        implicitHeight: 40
+        leftPadding: 13
+        rightPadding: 36
+        font.pixelSize: 12
+
+        contentItem: Text {
+            text: comboControl.displayText
+            color: comboControl.enabled ? textMain : "#6f7480"
+            font: comboControl.font
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+        }
+        indicator: Text {
+            x: comboControl.width - width - 13
+            anchors.verticalCenter: parent.verticalCenter
+            text: "▾"
+            color: comboControl.popup.visible ? accentLight : textMuted
+            font.pixelSize: 12
+        }
+        background: Rectangle {
+            radius: 9
+            color: comboControl.down ? "#25212f" : comboControl.hovered ? "#232631" : "#1b1e26"
+            border.width: 1
+            border.color: comboControl.activeFocus || comboControl.popup.visible ? accent : "#383d49"
+        }
+        delegate: ItemDelegate {
+            width: comboControl.width
+            implicitHeight: 38
+            highlighted: comboControl.highlightedIndex === index
+            contentItem: Text {
+                text: modelData
+                color: highlighted ? "#ffffff" : "#d2d5dd"
+                font.pixelSize: 11
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle {
+                radius: 7
+                color: highlighted ? "#38275a" : hovered ? "#242832" : "transparent"
+            }
+        }
+        popup: Popup {
+            y: comboControl.height + 5
+            width: comboControl.width
+            implicitHeight: Math.min(contentItem.implicitHeight + 12, 230)
+            padding: 6
+            contentItem: ListView {
+                clip: true
+                implicitHeight: contentHeight
+                model: comboControl.popup.visible ? comboControl.delegateModel : null
+                currentIndex: comboControl.highlightedIndex
+                ScrollIndicator.vertical: ScrollIndicator { }
+            }
+            background: Rectangle {
+                radius: 10
+                color: "#151820"
+                border.color: "#444957"
+            }
+        }
+    }
+
     RowLayout {
         anchors.fill: parent
         spacing: 0
@@ -2414,10 +2943,10 @@ ApplicationWindow {
                 Repeater {
                     model: [
                         { icon: "⌂", label: "项目首页" },
-                        { icon: "✦", label: "理解原片" },
-                        { icon: "☷", label: "组织故事" },
-                        { icon: "◫", label: "镜头匹配" },
-                        { icon: "⇧", label: "导出成片" }
+                        { icon: manuscriptProject ? "文" : "✦", label: manuscriptProject ? "整理文稿" : "理解原片" },
+                        { icon: "☷", label: manuscriptProject ? "规划分镜" : "组织故事" },
+                        { icon: "◫", label: manuscriptProject ? "素材匹配" : "镜头匹配" },
+                        { icon: "⇧", label: manuscriptProject ? "配音导出" : "导出成片" }
                     ]
                     delegate: Rectangle {
                         required property var modelData
@@ -2428,7 +2957,7 @@ ApplicationWindow {
                                                    : index === 4 ? exportDone
                                                    : false
                         property bool unlocked: index === 0
-                                                || (index === 1 && appController.videoPath !== "")
+                                                || (index === 1 && appController.hasProject)
                                                 || (index === 2 && understandingDone)
                                                 || (index === 3 && storyDone)
                                                 || (index === 4 && matchingDone)
@@ -2541,10 +3070,10 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         ColumnLayout {
                             spacing: 5
-                            Text { text: "下午好，开始一个新故事"; color: textMain; font.pixelSize: 27; font.weight: Font.DemiBold }
+                            Text { text: manuscriptProject ? "把一篇文稿，变成一个完整画面故事" : "下午好，开始一个新故事"; color: textMain; font.pixelSize: 27; font.weight: Font.DemiBold }
                             Text { text: appController.notice; color: textMuted; font.pixelSize: 14 }
                             RowLayout {
-                                visible: appController.videoPath !== ""
+                                visible: appController.hasProject
                                 spacing: 7
                                 Text { text: "项目名"; color: textMuted; font.pixelSize: 11 }
                                 TextField {
@@ -2595,7 +3124,7 @@ ApplicationWindow {
                             text: "最近项目"
                             onClicked: recentProjectsDialog.open()
                         }
-                        FlatButton { text: "+  创建项目"; onClicked: videoDialog.open() }
+                        FlatButton { text: "+  创建项目"; onClicked: projectTypeDialog.open() }
                     }
 
                     Rectangle {
@@ -2636,13 +3165,20 @@ ApplicationWindow {
                                 Column {
                                     anchors.centerIn: parent
                                     spacing: 10
-                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: appController.mediaBusy ? "◌" : appController.videoPath ? "▶" : "＋"; color: accentLight; font.pixelSize: 34 }
-                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: appController.mediaBusy ? "正在生成封面…" : appController.videoPath ? "视频已导入" : "拖入或选择一个长视频"; color: textMain; font.pixelSize: 14; font.bold: true }
-                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: appController.videoPath ? appController.durationText + "  ·  " + appController.resolutionText : "MP4 · MKV · MOV · WEBM"; color: "#d1d5db"; font.pixelSize: 11 }
+                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: manuscriptProject ? "文" : appController.mediaBusy ? "◌" : appController.videoPath ? "▶" : "＋"; color: accentLight; font.pixelSize: manuscriptProject ? 30 : 34; font.bold: manuscriptProject }
+                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: manuscriptProject ? "纯文稿项目" : appController.mediaBusy ? "正在生成封面…" : appController.videoPath ? "视频已导入" : "选择视频或文稿开始"; color: textMain; font.pixelSize: 14; font.bold: true }
+                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: manuscriptProject ? appController.sourceManuscriptCharCount + " 字符 · 原稿已保存" : appController.videoPath ? appController.durationText + "  ·  " + appController.resolutionText : "MP4 · MKV · TXT · Markdown"; color: "#d1d5db"; font.pixelSize: 11 }
                                 }
                                 MouseArea {
                                     anchors.fill: parent
-                                    onClicked: appController.videoPath ? previewDialog.open() : videoDialog.open()
+                                    onClicked: {
+                                        if (manuscriptProject)
+                                            scrollToSection(understandingSection, 1)
+                                        else if (appController.videoPath)
+                                            previewDialog.open()
+                                        else
+                                            projectTypeDialog.open()
+                                    }
                                     cursorShape: Qt.PointingHandCursor
                                 }
                             }
@@ -2667,7 +3203,9 @@ ApplicationWindow {
                                 }
                                 Text {
                                     Layout.fillWidth: true
-                                    text: appController.videoPath || "导入后，程序会识别语音、检测场景，并把长视频整理成可用于解说的事件列表。"
+                                    text: manuscriptProject
+                                          ? appController.sourceManuscriptText
+                                          : appController.videoPath || "从已有视频开始，或直接用一篇文稿规划分镜和素材。"
                                     color: textMuted
                                     font.pixelSize: 13
                                     wrapMode: Text.WrapAnywhere
@@ -2677,14 +3215,14 @@ ApplicationWindow {
                                 Item { Layout.fillHeight: true }
                                 RowLayout {
                                     spacing: 10
-                                    Rectangle { width: 82; height: 27; radius: 7; color: "#20242c"; Text { anchors.centerIn: parent; text: appController.durationText; color: "#c7cad2"; font.pixelSize: 11 } }
-                                    Rectangle { width: 96; height: 27; radius: 7; color: "#20242c"; Text { anchors.centerIn: parent; text: appController.resolutionText; color: "#c7cad2"; font.pixelSize: 11 } }
-                                    Rectangle { width: 116; height: 27; radius: 7; color: "#20242c"; visible: appController.codecText !== ""; Text { anchors.centerIn: parent; text: appController.codecText; color: "#c7cad2"; font.pixelSize: 10 } }
+                                    Rectangle { width: manuscriptProject ? 102 : 82; height: 27; radius: 7; color: "#20242c"; Text { anchors.centerIn: parent; text: manuscriptProject ? "纯文稿模式" : appController.durationText; color: "#c7cad2"; font.pixelSize: 11 } }
+                                    Rectangle { width: 96; height: 27; radius: 7; color: "#20242c"; visible: !manuscriptProject; Text { anchors.centerIn: parent; text: appController.resolutionText; color: "#c7cad2"; font.pixelSize: 11 } }
+                                    Rectangle { width: 116; height: 27; radius: 7; color: "#20242c"; visible: !manuscriptProject && appController.codecText !== ""; Text { anchors.centerIn: parent; text: appController.codecText; color: "#c7cad2"; font.pixelSize: 10 } }
                                     Item { Layout.fillWidth: true }
                                     FlatButton {
-                                        text: appController.mediaBusy ? "正在读取…" : appController.videoPath ? "更换视频" : "选择视频  →"
+                                        text: manuscriptProject ? "编辑文稿  →" : appController.mediaBusy ? "正在读取…" : appController.videoPath ? "更换视频" : "创建项目  →"
                                         enabled: !appController.mediaBusy
-                                        onClicked: videoDialog.open()
+                                        onClicked: manuscriptProject ? scrollToSection(understandingSection, 1) : appController.videoPath ? videoDialog.open() : projectTypeDialog.open()
                                     }
                                 }
                             }
@@ -2699,10 +3237,10 @@ ApplicationWindow {
 
                         Repeater {
                             model: [
-                                { n: "01", title: "理解原片", desc: "语音识别、场景检测与画面理解", state: appController.events.length > 0 ? "已完成" : appController.videoPath ? "可开始" : "等待视频" },
-                                { n: "02", title: "组织故事", desc: "挑选关键事件，生成精简叙事", state: appController.storyNarration.length > 0 ? "已完成" : appController.events.length > 0 ? "可开始" : "等待理解原片" },
-                                { n: "03", title: "匹配镜头", desc: "为每句解说寻找最佳原片段", state: appController.matches.length > 0 ? "已完成" : appController.storyNarration.length > 0 ? "可开始" : "等待组织故事" },
-                                { n: "04", title: "预览导出", desc: "确认配音、字幕与镜头并输出成片", state: appController.previewVideoReady ? "预览已生成" : appController.matches.length > 0 ? "可开始" : "等待镜头匹配" }
+                                { n: "01", title: manuscriptProject ? "整理文稿" : "理解原片", desc: manuscriptProject ? "保存原稿，确认内容与目标" : "语音识别、场景检测与画面理解", state: understandingDone ? "已完成" : appController.hasProject ? "可开始" : "等待创建项目" },
+                                { n: "02", title: manuscriptProject ? "规划分镜" : "组织故事", desc: manuscriptProject ? "拆分旁白，明确每段需要的画面" : "挑选关键事件，生成精简叙事", state: storyDone ? "已完成" : understandingDone ? "可开始" : manuscriptProject ? "等待整理文稿" : "等待理解原片" },
+                                { n: "03", title: manuscriptProject ? "匹配素材" : "匹配镜头", desc: manuscriptProject ? "导入素材，自动寻找最佳候选片段" : "为每句解说寻找最佳原片段", state: matchingDone ? "已完成" : storyDone ? "可开始" : manuscriptProject ? "等待规划分镜" : "等待组织故事" },
+                                { n: "04", title: manuscriptProject ? "配音导出" : "预览导出", desc: manuscriptProject ? "确认配音、字幕与素材并输出成片" : "确认配音、字幕与镜头并输出成片", state: exportDone ? "预览已生成" : matchingDone ? "可开始" : manuscriptProject ? "等待素材匹配" : "等待镜头匹配" }
                             ]
                             delegate: Rectangle {
                                 id: overviewCard
@@ -2769,13 +3307,15 @@ ApplicationWindow {
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     spacing: 4
-                                    Text { text: "理解原片"; color: textMain; font.pixelSize: 18; font.bold: true }
+                                    Text { text: manuscriptProject ? "整理文稿" : "理解原片"; color: textMain; font.pixelSize: 18; font.bold: true }
                                     Text {
-                                        text: understandingDone
-                                              ? appController.analysisStatus
-                                              : appController.videoPath
-                                                ? "识别语音、检测场景并理解关键画面。"
-                                                : "请先在上方选择视频，随后即可开始原片理解。"
+                                        text: manuscriptProject
+                                              ? "原稿保存在当前项目中；编辑停止约 0.7 秒后自动保存。"
+                                              : understandingDone
+                                                ? appController.analysisStatus
+                                                : appController.videoPath
+                                                  ? "识别语音、检测场景并理解关键画面。"
+                                                  : "请先创建视频项目，随后即可开始原片理解。"
                                         color: understandingDone ? "#8ee3b4" : textMuted
                                         font.pixelSize: 12
                                     }
@@ -2785,7 +3325,23 @@ ApplicationWindow {
                                     text: understandingSection.expanded ? "收起  ▴" : "展开  ▾"
                                     onClicked: understandingSection.expanded = !understandingSection.expanded
                                 }
+                                Rectangle {
+                                    visible: manuscriptProject
+                                    Layout.preferredWidth: 82
+                                    Layout.preferredHeight: 30
+                                    radius: 9
+                                    color: "#183729"
+                                    border.color: "#347456"
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "✓ 自动保存"
+                                        color: "#8ee3b4"
+                                        font.pixelSize: 10
+                                        font.bold: true
+                                    }
+                                }
                                 FlatButton {
+                                    visible: !manuscriptProject
                                     text: appController.analysisBusy ? "正在理解原片…" : understandingDone ? "重新理解原片" : appController.videoPath ? "开始理解原片  →" : "请先选择视频"
                                     enabled: appController.videoPath !== "" && !appController.analysisBusy
                                     onClicked: {
@@ -2801,7 +3357,7 @@ ApplicationWindow {
 
                             RowLayout {
                                 Layout.fillWidth: true
-                                visible: understandingSection.expanded
+                                visible: understandingSection.expanded && !manuscriptProject
                                 spacing: 9
                                 Text { text: "内容类型"; color: textMuted; font.pixelSize: 11; Layout.rightMargin: 4 }
                                 Repeater {
@@ -2834,9 +3390,124 @@ ApplicationWindow {
                                 }
                             }
 
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: visible ? 76 : 0
+                                visible: understandingSection.expanded && appController.hasProject
+                                radius: 11
+                                color: appController.seriesSplitEnabled ? "#18251f" : "#171a21"
+                                border.color: appController.seriesSplitEnabled
+                                              ? "#397456"
+                                              : appController.seriesSplitSuggested ? "#72582f" : "#303540"
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 14
+                                    anchors.rightMargin: 14
+                                    spacing: 12
+                                    Rectangle {
+                                        Layout.preferredWidth: 38
+                                        Layout.preferredHeight: 38
+                                        radius: 10
+                                        color: appController.seriesSplitEnabled ? "#204330" : "#292631"
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: appController.seriesSplitEnabled ? "Ⅱ" : "1"
+                                            color: appController.seriesSplitEnabled ? "#8ee3b4" : accentLight
+                                            font.pixelSize: 14
+                                            font.bold: true
+                                        }
+                                    }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 3
+                                        RowLayout {
+                                            spacing: 8
+                                            Text { text: "允许自动拆分多集"; color: textMain; font.pixelSize: 12; font.bold: true }
+                                            Rectangle {
+                                                visible: appController.seriesSplitSuggested && !appController.seriesSplitEnabled
+                                                Layout.preferredWidth: splitSuggestionText.implicitWidth + 14
+                                                Layout.preferredHeight: 22
+                                                radius: 7
+                                                color: "#3b2d1b"
+                                                Text {
+                                                    id: splitSuggestionText
+                                                    anchors.centerIn: parent
+                                                    text: "建议考虑"
+                                                    color: "#e9bd73"
+                                                    font.pixelSize: 9
+                                                    font.bold: true
+                                                }
+                                            }
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: appController.seriesSplitHint
+                                            color: textMuted
+                                            font.pixelSize: 10
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+                                    ModernSwitch {
+                                        checked: appController.seriesSplitEnabled
+                                        onToggled: appController.setSeriesSplitEnabled(checked)
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 280
+                                visible: understandingSection.expanded && manuscriptProject
+                                radius: 12
+                                color: "#0d0f14"
+                                border.color: sourceManuscriptArea.activeFocus ? accent : "#30333d"
+                                ScrollView {
+                                    anchors.fill: parent
+                                    anchors.margins: 3
+                                    TextArea {
+                                        id: sourceManuscriptArea
+                                        text: appController.sourceManuscriptText
+                                        color: textMain
+                                        font.pixelSize: 14
+                                        wrapMode: TextEdit.Wrap
+                                        selectByMouse: true
+                                        padding: 15
+                                        background: null
+                                        onTextChanged: {
+                                            if (activeFocus && manuscriptProject)
+                                                manuscriptAutosaveTimer.restart()
+                                        }
+                                        onActiveFocusChanged: {
+                                            if (!activeFocus && manuscriptProject
+                                                    && text.trim().length > 0
+                                                    && text !== appController.sourceManuscriptText) {
+                                                manuscriptAutosaveTimer.stop()
+                                                appController.updateSourceManuscript(text)
+                                            }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    anchors.margins: 10
+                                    width: manuscriptCountText.implicitWidth + 18
+                                    height: 26
+                                    radius: 8
+                                    color: "#dd1b1e27"
+                                    Text {
+                                        id: manuscriptCountText
+                                        anchors.centerIn: parent
+                                        text: sourceManuscriptArea.text.trim().length + " 字符 · 自动保存"
+                                        color: "#9da3af"
+                                        font.pixelSize: 10
+                                    }
+                                }
+                            }
+
                             ColumnLayout {
                                 Layout.fillWidth: true
-                                visible: understandingSection.expanded && (appController.analysisBusy || appController.analysisProgress > 0)
+                                visible: understandingSection.expanded && !manuscriptProject && (appController.analysisBusy || appController.analysisProgress > 0)
                                 spacing: 8
                                 RowLayout {
                                     Layout.fillWidth: true
@@ -2933,13 +3604,17 @@ ApplicationWindow {
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     spacing: 4
-                                    Text { text: "组织故事"; color: textMain; font.pixelSize: 18; font.bold: true }
+                                    Text { text: manuscriptProject ? "规划分镜" : "组织故事"; color: textMain; font.pixelSize: 18; font.bold: true }
                                     Text {
                                         text: storyDone
                                               ? appController.storyStatus
-                                              : understandingDone
-                                                ? "选择期望时长，生成自然英文解说与故事结构；最终严格控制在三分钟内。"
-                                                : "完成第 1 步理解原片后，才能生成故事与英文解说。"
+                                              : manuscriptProject
+                                                ? appController.storyboardStale
+                                                  ? appController.storyStatus
+                                                  : "文稿已经就绪；在这里生成英文解说和逐段镜头需求。"
+                                                : understandingDone
+                                                  ? "选择期望时长，生成自然英文解说与故事结构；最终严格控制在三分钟内。"
+                                                  : "完成第 1 步理解原片后，才能生成故事与英文解说。"
                                         color: storyDone ? "#8ee3b4" : textMuted
                                         font.pixelSize: 12
                                     }
@@ -2950,7 +3625,9 @@ ApplicationWindow {
                                     onClicked: storySection.expanded = !storySection.expanded
                                 }
                                 FlatButton {
-                                    text: appController.storyBusy ? "正在组织故事…" : storyDone ? "重新生成故事" : understandingDone ? "生成故事与英文解说  →" : "等待理解原片"
+                                    text: manuscriptProject
+                                          ? appController.storyBusy ? "正在规划分镜…" : storyDone ? "重新规划英文解说与分镜" : "生成英文解说与分镜  →"
+                                          : appController.storyBusy ? "正在组织故事…" : storyDone ? "重新生成故事" : understandingDone ? "生成故事与英文解说  →" : "等待理解原片"
                                     enabled: understandingDone && !appController.storyBusy && !appController.factReviewBusy && !appController.terminologyReviewBusy
                                     onClicked: {
                                         if (appController.refreshApiConfiguration()) {
@@ -3026,7 +3703,7 @@ ApplicationWindow {
                                 enabled: understandingDone && !appController.storyBusy
                                 opacity: enabled ? 1 : 0.45
                                 Text {
-                                    text: appController.analysisContentMode === "visual" ? "期望时长" : "目标上限"
+                                    text: manuscriptProject || appController.analysisContentMode === "visual" ? "期望时长" : "目标上限"
                                     color: textMuted
                                     font.pixelSize: 11
                                     Layout.rightMargin: 4
@@ -3050,7 +3727,9 @@ ApplicationWindow {
                                     }
                                 }
                                 Text {
-                                    text: appController.analysisContentMode === "visual"
+                                    text: manuscriptProject
+                                          ? "一次文本请求同时生成英文解说和镜头需求；真实配音后再按同步 SRT 校准镜头。"
+                                          : appController.analysisContentMode === "visual"
                                           ? "长片会优先保证故事完整，允许超过期望值，但绝不会超过 Shorts 三分钟上限。"
                                           : "原片信息不足时会自动缩短，不会强行填满。"
                                     color: "#737986"
@@ -3168,27 +3847,76 @@ ApplicationWindow {
 
                             Rectangle {
                                 Layout.fillWidth: true
-                                visible: storySection.expanded && (appController.storyBusy || appController.storyStatus.indexOf("故事生成失败") === 0)
-                                Layout.preferredHeight: visible ? 62 : 0
+                                visible: storySection.expanded && (appController.storyBusy || appController.storyStatus.indexOf("故事生成失败") === 0 || appController.storyStatus.indexOf("分镜规划失败") === 0)
+                                Layout.preferredHeight: visible ? 76 : 0
                                 radius: 10
                                 color: "#15171e"
-                                border.color: appController.storyStatus.indexOf("故事生成失败") === 0 ? "#7f3d46" : "#292c36"
+                                border.color: appController.storyStatus.indexOf("失败") >= 0 ? "#7f3d46" : "#292c36"
                                 RowLayout {
                                     anchors.fill: parent
                                     anchors.margins: 13
                                     ColumnLayout {
                                         Layout.fillWidth: true
                                         spacing: 7
-                                        Text { text: appController.storyStatus; color: textMain; font.pixelSize: 12 }
+                                        Text {
+                                            text: appController.storyStatus
+                                            color: textMain
+                                            font.pixelSize: 12
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.WordWrap
+                                        }
+                                        Text {
+                                            visible: appController.storyBusy
+                                            text: appController.storyElapsedText + " · 正在等待模型返回，请勿重复点击"
+                                            color: textMuted
+                                            font.pixelSize: 10
+                                        }
                                         Rectangle {
+                                            id: storyProgressTrack
                                             Layout.fillWidth: true
                                             Layout.preferredHeight: 5
                                             radius: 3
                                             color: "#30333d"
-                                            Rectangle { width: parent.width * appController.storyProgress; height: parent.height; radius: 3; color: accent }
+                                            clip: true
+                                            Rectangle {
+                                                visible: !appController.storyBusy
+                                                width: parent.width * appController.storyProgress
+                                                height: parent.height
+                                                radius: 3
+                                                color: accent
+                                            }
+                                            Rectangle {
+                                                id: storyProgressPulse
+                                                visible: appController.storyBusy
+                                                width: Math.max(48, parent.width * 0.24)
+                                                height: parent.height
+                                                radius: 3
+                                                color: accent
+                                                x: -width
+                                                NumberAnimation on x {
+                                                    from: -storyProgressPulse.width
+                                                    to: storyProgressTrack.width
+                                                    duration: 1250
+                                                    loops: Animation.Infinite
+                                                    running: appController.storyBusy
+                                                }
+                                            }
                                         }
                                     }
-                                    Text { text: Math.round(appController.storyProgress * 100) + "%"; color: accentLight; font.pixelSize: 12; font.bold: true }
+                                    LoadingRing {
+                                        visible: appController.storyBusy
+                                        running: visible
+                                        ringColor: accentLight
+                                        Layout.preferredWidth: 24
+                                        Layout.preferredHeight: 24
+                                    }
+                                    Text {
+                                        visible: !appController.storyBusy
+                                        text: Math.round(appController.storyProgress * 100) + "%"
+                                        color: accentLight
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                    }
                                 }
                             }
 
@@ -3619,22 +4347,82 @@ ApplicationWindow {
                                     }
                                 }
 
-                                Text { text: "故事大纲"; color: textMain; font.pixelSize: 15; font.bold: true }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 52
+                                    visible: manuscriptProject
+                                    radius: 10
+                                    color: "#171a22"
+                                    border.color: "#3d3155"
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 12
+                                        Text { text: "分镜概览"; color: accentLight; font.pixelSize: 12; font.bold: true }
+                                        Text { text: appController.storyboardSummary; color: "#d4d0df"; font.pixelSize: 11; Layout.fillWidth: true }
+                                        Text { text: "绿色准确 · 黄色替代 · 红色缺失"; color: "#858b98"; font.pixelSize: 10 }
+                                    }
+                                }
+
+                                Text { text: manuscriptProject ? "分镜需求列表" : "故事大纲"; color: textMain; font.pixelSize: 15; font.bold: true }
                                 Repeater {
-                                    model: appController.storyOutline
+                                    model: manuscriptProject ? appController.storyboardBeats : appController.storyOutline
                                     delegate: Rectangle {
                                         required property var modelData
                                         Layout.fillWidth: true
-                                        Layout.preferredHeight: 52
+                                        Layout.preferredHeight: manuscriptProject ? 166 : 52
                                         radius: 10
                                         color: "#15171e"
-                                        border.color: "#292c36"
+                                        border.color: manuscriptProject ? "#5a3038" : "#292c36"
                                         RowLayout {
                                             anchors.fill: parent; anchors.margins: 12; spacing: 12
+                                            visible: !manuscriptProject
                                             Text { text: modelData.order; color: accentLight; font.pixelSize: 13; font.bold: true }
                                             Text { text: modelData.purpose; color: "#a1a6b2"; font.pixelSize: 11; Layout.preferredWidth: 70 }
                                             Text { text: modelData.summary; color: textMain; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
                                             Text { text: "事件 " + modelData.event_ids.join(", "); color: textMuted; font.pixelSize: 10 }
+                                        }
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.margins: 13
+                                            spacing: 13
+                                            visible: manuscriptProject
+                                            Rectangle {
+                                                Layout.preferredWidth: 48
+                                                Layout.preferredHeight: 48
+                                                radius: 12
+                                                color: "#34202a"
+                                                border.color: "#70404b"
+                                                Column {
+                                                    anchors.centerIn: parent
+                                                    spacing: 1
+                                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: "镜头"; color: "#c7a5ad"; font.pixelSize: 9 }
+                                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.id; color: "#fecdd3"; font.pixelSize: 16; font.bold: true }
+                                                }
+                                            }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                Layout.fillHeight: true
+                                                spacing: 5
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    Text { text: modelData.text_en; color: textMain; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                    Rectangle {
+                                                        Layout.preferredWidth: 66
+                                                        Layout.preferredHeight: 24
+                                                        radius: 7
+                                                        color: "#40242c"
+                                                        Text { anchors.centerIn: parent; text: "待补素材"; color: "#fda4af"; font.pixelSize: 9; font.bold: true }
+                                                    }
+                                                }
+                                                Text { text: "理想画面：" + modelData.ideal_shot_zh; color: "#d7d9e0"; font.pixelSize: 11; Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+                                                Text { text: "必须包含：" + (modelData.must_show_zh ? modelData.must_show_zh.join("、") : "未指定"); color: "#a9afbb"; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                Text { text: "可接受替代：" + (modelData.acceptable_fallbacks_zh ? modelData.acceptable_fallbacks_zh.join("、") : "无"); color: "#a9afbb"; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    Text { text: modelData.shot_role + " · " + modelData.media_kind + " · 约 " + modelData.estimated_duration_sec + " 秒"; color: accentLight; font.pixelSize: 10 }
+                                                    Text { text: "搜索：" + (modelData.search_queries_en ? modelData.search_queries_en.join(" / ") : ""); color: "#777d89"; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -3699,12 +4487,16 @@ ApplicationWindow {
                                 StepBadge { stepNumber: "03"; completed: matchingDone }
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    Text { text: "匹配镜头"; color: textMain; font.pixelSize: 18; font.bold: true }
+                                    Text { text: manuscriptProject ? "匹配素材" : "匹配镜头"; color: textMain; font.pixelSize: 18; font.bold: true }
                                     Text {
                                         text: appController.matches.length > 0
                                               ? appController.matchingStatus
+                                              : manuscriptProject && appController.manuscriptAssetCount > 0
+                                                ? appController.matchingStatus
                                               : appController.storyNarration.length > 0
-                                                ? "自动从全部场景中选取镜头；需要时可展开高级调整人工纠错。"
+                                                ? manuscriptProject
+                                                  ? "分镜已经就绪；请选择你准备好的视频或图片素材。"
+                                                  : "自动从全部场景中选取镜头；需要时可展开高级调整人工纠错。"
                                                 : "完成故事与英文解说后，才能开始镜头匹配。"
                                         color: textMuted; font.pixelSize: 12
                                     }
@@ -3714,10 +4506,78 @@ ApplicationWindow {
                                     text: matchingSection.expanded ? "收起  ▴" : "展开  ▾"
                                     onClicked: matchingSection.expanded = !matchingSection.expanded
                                 }
+                                GhostButton {
+                                    visible: manuscriptProject
+                                    text: "素材设置"
+                                    onClicked: stockMediaSettingsDialog.open()
+                                }
+                                GhostButton {
+                                    visible: manuscriptProject
+                                    text: appController.manuscriptAssetCount > 0 ? "本地素材 " + appController.manuscriptAssetCount : "导入本地素材"
+                                    enabled: storyDone && !appController.stockSearchBusy
+                                    onClicked: manuscriptAssetsDialog.open()
+                                }
                                 FlatButton {
-                                    text: appController.matchingBusy ? "正在自动匹配…" : appController.matches.length > 0 ? "重新自动匹配" : "自动匹配镜头  →"
-                                    enabled: appController.storyNarration.length > 0 && !appController.matchingBusy
-                                    onClicked: appController.generateMatches()
+                                    text: appController.stockSearchBusy
+                                          ? "正在寻找素材…"
+                                          : appController.matchingBusy
+                                          ? "正在自动匹配…"
+                                          : appController.matches.length > 0
+                                            ? "重新自动匹配"
+                                            : manuscriptProject
+                                              ? appController.stockSearchResults.length > 0 ? "重新寻找素材" : "自动寻找素材  →"
+                                              : "自动匹配镜头  →"
+                                    enabled: appController.storyNarration.length > 0 && !appController.matchingBusy && !appController.stockSearchBusy
+                                    onClicked: {
+                                        if (manuscriptProject) {
+                                            if (appController.stockMediaConfigured)
+                                                appController.searchStockMedia()
+                                            else
+                                                stockMediaSettingsDialog.open()
+                                        } else {
+                                            appController.generateMatches()
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                visible: matchingSection.expanded && manuscriptProject
+                                Layout.preferredHeight: 58
+                                radius: 10
+                                color: "#11141a"
+                                border.color: appController.stockSearchResults.length > 0 ? "#326b4d" : "#303440"
+                                RowLayout {
+                                    anchors.fill: parent; anchors.margins: 12; spacing: 10
+                                    LoadingRing {
+                                        visible: appController.stockSearchBusy
+                                        running: visible
+                                        ringColor: accentLight
+                                        Layout.preferredWidth: 24; Layout.preferredHeight: 24
+                                    }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true; spacing: 5
+                                        Text {
+                                            text: appController.stockSearchStatus
+                                            color: appController.stockSearchResults.length > 0 ? "#8ee3b4" : textMuted
+                                            font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight
+                                        }
+                                        Rectangle {
+                                            visible: appController.stockSearchBusy
+                                            Layout.fillWidth: true; Layout.preferredHeight: 4; radius: 2; color: "#30333d"
+                                            Rectangle { width: parent.width * appController.stockSearchProgress; height: parent.height; radius: 2; color: accent }
+                                        }
+                                    }
+                                    GhostButton {
+                                        visible: appController.stockSearchResults.length > 0 && !appController.stockSearchBusy
+                                        text: "查看候选"
+                                        onClicked: stockResultsDialog.open()
+                                    }
+                                    Text {
+                                        visible: appController.stockSearchBusy
+                                        text: Math.round(appController.stockSearchProgress * 100) + "%"
+                                        color: accentLight; font.pixelSize: 11; font.bold: true
+                                    }
                                 }
                             }
                             RowLayout {
@@ -3833,7 +4693,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.preferredHeight: expanded
                                                 ? (appController.matches.length > 0
-                                                   ? (appController.narrationAudioReady && !appController.syncedSrtReady ? 456 : 402)
+                                                   ? (appController.narrationAudioReady && !appController.syncedSrtReady ? 566 : 512)
                                                    : 116)
                                                 : 90
                         radius: 14
@@ -3849,10 +4709,10 @@ ApplicationWindow {
                                 StepBadge { stepNumber: "04"; completed: exportDone }
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    Text { text: "预览导出"; color: textMain; font.pixelSize: 18; font.bold: true }
+                                    Text { text: manuscriptProject ? "配音导出" : "预览导出"; color: textMain; font.pixelSize: 18; font.bold: true }
                                     Text {
                                         text: appController.matches.length > 0
-                                              ? "使用 GPT-SoVITS 英文解说；保持原视频分辨率和画面，不缩放、不补边、不裁切。"
+                                              ? appController.exportLayoutHint
                                               : "完成镜头匹配后，才能生成粗剪预览。"
                                         color: textMuted; font.pixelSize: 12
                                     }
@@ -3861,6 +4721,52 @@ ApplicationWindow {
                                 GhostButton {
                                     text: exportSection.expanded ? "收起  ▴" : "展开  ▾"
                                     onClicked: exportSection.expanded = !exportSection.expanded
+                                }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                visible: exportSection.expanded && appController.matches.length > 0
+                                Layout.preferredHeight: visible ? 96 : 0
+                                radius: 11
+                                color: "#151820"
+                                border.color: "#303440"
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.margins: 13
+                                    spacing: 12
+                                    ColumnLayout {
+                                        Layout.preferredWidth: 128
+                                        spacing: 3
+                                        Text { text: "成片画布"; color: textMain; font.pixelSize: 12; font.bold: true }
+                                        Text { text: "输出 " + appController.subtitleCanvasWidth + "×" + appController.subtitleCanvasHeight; color: textMuted; font.pixelSize: 9 }
+                                    }
+                                    Repeater {
+                                        model: [
+                                            { key: "vertical_blur", title: "竖屏完整画面", note: "推荐 · 不裁主体" },
+                                            { key: "vertical_crop", title: "竖屏铺满裁切", note: "主体居中时使用" },
+                                            { key: "original", title: "保持原始比例", note: "横版通常非 Shorts" }
+                                        ]
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 58
+                                            radius: 10
+                                            color: appController.exportFitMode === modelData.key ? "#332253" : "#1c2029"
+                                            border.width: appController.exportFitMode === modelData.key ? 2 : 1
+                                            border.color: appController.exportFitMode === modelData.key ? accent : "#343946"
+                                            Column {
+                                                anchors.centerIn: parent
+                                                spacing: 3
+                                                Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.title; color: textMain; font.pixelSize: 11; font.bold: true }
+                                                Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.note; color: appController.exportFitMode === modelData.key ? accentLight : textMuted; font.pixelSize: 9 }
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: appController.setExportFitMode(modelData.key)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             RowLayout {
@@ -3899,11 +4805,18 @@ ApplicationWindow {
                                 visible: exportSection.expanded && appController.matches.length > 0
                                 spacing: 9
                                 GhostButton {
-                                    text: "1  导出 SRT 到 GPT-SoVITS"
+                                    text: "1  导出配音文稿"
                                     onClicked: {
-                                        saveTtsSrtDialog.currentFile = appController.prepareTtsSrtExportUrl()
+                                        saveTtsSrtDialog.exportFormat = subtitleFormatCombo.currentIndex === 0 ? "txt" : "srt"
+                                        saveTtsSrtDialog.currentFile = appController.prepareTtsSrtExportUrl(saveTtsSrtDialog.exportFormat)
                                         saveTtsSrtDialog.open()
                                     }
+                                }
+                                DarkComboBox {
+                                    id: subtitleFormatCombo
+                                    Layout.preferredWidth: 142
+                                    model: ["TXT · 一句一行", "SRT · 含时间轴"]
+                                    currentIndex: 0
                                 }
                                 GhostButton {
                                     text: appController.narrationAudioReady ? "重新导入英文配音" : "2  导入英文配音"
@@ -3928,6 +4841,44 @@ ApplicationWindow {
                                     color: accentLight
                                     font.pixelSize: 10
                                     font.bold: true
+                                }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                visible: exportSection.expanded && appController.matches.length > 0
+                                Layout.preferredHeight: visible ? 66 : 0
+                                radius: 11
+                                color: "#171a21"
+                                border.color: appController.burnSubtitles ? "#4d3b72" : "#303540"
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 14
+                                    anchors.rightMargin: 14
+                                    spacing: 12
+                                    Rectangle {
+                                        Layout.preferredWidth: 34; Layout.preferredHeight: 34
+                                        radius: 9
+                                        color: appController.burnSubtitles ? "#332450" : "#23262e"
+                                        Text { anchors.centerIn: parent; text: "CC"; color: appController.burnSubtitles ? accentLight : textMuted; font.pixelSize: 10; font.bold: true }
+                                    }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true; spacing: 2
+                                        Text { text: "烧录英文字幕"; color: textMain; font.pixelSize: 12; font.bold: true }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: appController.burnSubtitles
+                                                  ? "生成成片时把同步 SRT 压入画面"
+                                                  : "只输出画面与配音，字幕可在剪映等软件中添加"
+                                            color: textMuted; font.pixelSize: 10
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+                                    ModernSwitch {
+                                        Layout.preferredWidth: 46
+                                        Layout.preferredHeight: 26
+                                        checked: appController.burnSubtitles
+                                        onToggled: appController.setBurnSubtitles(checked)
+                                    }
                                 }
                             }
                             RowLayout {
@@ -4005,7 +4956,7 @@ ApplicationWindow {
                                     font.pixelSize: 11
                                     font.bold: true
                                 }
-                                Switch {
+                                ModernSwitch {
                                     checked: appController.preserveOriginalAudio
                                     onToggled: appController.setPreserveOriginalAudio(checked)
                                 }

@@ -26,6 +26,7 @@ from .analysis_service import (
 from .media_service import analyze_media, extract_preview_frame, render_subtitle_effect_preview
 from .vision_service import api_configuration, describe_event_keyframes
 from .story_service import (
+    calibrate_story_timing_from_voice,
     generate_story_script,
     narrative_strategy_label,
     narrative_strategy_options,
@@ -36,6 +37,11 @@ from .story_service import (
 from .duration_revision_service import propose_duration_revision
 from .content_review_service import review_story_content
 from .layered_analysis_service import analyze_layered_structure
+from .manuscript_service import (
+    generate_manuscript_storyboard,
+    split_overlong_manuscript_result,
+)
+from .stock_media_service import download_selected_stock_media, search_stock_media
 from .series_service import (
     build_part_events_payload,
     collapse_story_series,
@@ -68,6 +74,7 @@ from .voice_service import (
     process_narration_speed,
     prepare_tts_srt,
     probe_audio_duration,
+    srt_to_plain_text,
     recommended_shorts_speed,
     scale_srt_timeline,
     split_gpt_sovits_units,
@@ -83,6 +90,7 @@ class AppController(QObject):
     mediaChanged = Signal()
     previewChanged = Signal()
     analysisChanged = Signal()
+    seriesSplitChanged = Signal()
     eventsChanged = Signal()
     storyChanged = Signal()
     factReviewChanged = Signal()
@@ -108,6 +116,8 @@ class AppController(QObject):
     _analysisFinished = Signal(bool, str, int)
     _storyProgressReady = Signal(float, str, int)
     _storyFinished = Signal(bool, str, object, int)
+    _stockSearchProgressReady = Signal(float, str, int)
+    _stockSearchFinished = Signal(bool, str, object, int)
     _factReviewFinished = Signal(bool, str, object, int)
     _exportProgressReady = Signal(float, str, int)
     _exportFinished = Signal(bool, str, object, int)
@@ -127,7 +137,9 @@ class AppController(QObject):
         self._root = root
         self._config = load_config(root)
         self._project_name = "尚未创建项目"
+        self._project_type = "video"
         self._video_path = ""
+        self._source_manuscript_text = ""
         self._notice = "导入一个长视频，开始生成精简解说。"
         self._projects_dir = (root / self._config.get("projects_dir", "projects")).resolve()
         self._projects_dir.mkdir(parents=True, exist_ok=True)
@@ -149,6 +161,9 @@ class AppController(QObject):
         self._layered_analysis_enabled = bool(
             self._config.get("layered_analysis", {}).get("enabled", True)
         )
+        self._series_split_enabled = bool(
+            self._config.get("series", {}).get("auto_split", False)
+        )
         self._analysis_busy = False
         self._analysis_progress = 0.0
         self._analysis_status = "等待开始"
@@ -166,12 +181,15 @@ class AppController(QObject):
         self._story_busy = False
         self._story_progress = 0.0
         self._story_status = "等待组织故事"
+        self._story_started_at = 0.0
         self._narrative_strategy = normalize_narrative_strategy(
             self._config.get("story", {}).get("narrative_strategy", "auto")
         )
         self._story: dict[str, object] = {}
         self._story_outline: list[dict[str, object]] = []
         self._story_narration: list[dict[str, object]] = []
+        self._storyboard: dict[str, object] = {}
+        self._storyboard_beats: list[dict[str, object]] = []
         self._series_parts: list[dict[str, object]] = []
         self._series_summary = ""
         self._fact_review_job_id = 0
@@ -190,6 +208,12 @@ class AppController(QObject):
         self._matching_busy = False
         self._matching_status = "等待匹配镜头"
         self._matches: list[dict[str, object]] = []
+        self._manuscript_assets: list[dict[str, object]] = []
+        self._stock_search_job_id = 0
+        self._stock_search_busy = False
+        self._stock_search_status = "等待自动寻找免费素材"
+        self._stock_search_progress = 0.0
+        self._stock_search_results: list[dict[str, object]] = []
         self._export_job_id = 0
         self._export_busy = False
         self._export_progress = 0.0
@@ -197,6 +221,12 @@ class AppController(QObject):
         self._export_path = ""
         self._preserve_original_audio = bool(
             self._config.get("export", {}).get("preserve_original_audio", False)
+        )
+        self._burn_subtitles = bool(
+            self._config.get("export", {}).get("burn_subtitles", True)
+        )
+        self._export_fit_mode = self._normalize_export_fit_mode(
+            self._config.get("export", {}).get("fit_mode", "vertical_blur")
         )
         self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
         self._voice_busy = False
@@ -217,9 +247,9 @@ class AppController(QObject):
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
         try:
-            self._app_version = str(read_version().get("version", "0.2.7"))
+            self._app_version = str(read_version().get("version", "0.2.8"))
         except Exception:
-            self._app_version = "0.2.7"
+            self._app_version = "0.2.8"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -237,6 +267,8 @@ class AppController(QObject):
         self._analysisFinished.connect(self._apply_analysis_finished)
         self._storyProgressReady.connect(self._apply_story_progress)
         self._storyFinished.connect(self._apply_story_finished)
+        self._stockSearchProgressReady.connect(self._apply_stock_search_progress)
+        self._stockSearchFinished.connect(self._apply_stock_search_finished)
         self._factReviewFinished.connect(self._apply_fact_review_finished)
         self._exportProgressReady.connect(self._apply_export_progress)
         self._exportFinished.connect(self._apply_export_finished)
@@ -253,6 +285,9 @@ class AppController(QObject):
         self._analysis_clock = QTimer(self)
         self._analysis_clock.setInterval(1000)
         self._analysis_clock.timeout.connect(self._tick_analysis_clock)
+        self._story_clock = QTimer(self)
+        self._story_clock.setInterval(1000)
+        self._story_clock.timeout.connect(self._tick_story_clock)
         self._refresh_recent_projects()
         QTimer.singleShot(1200, self.checkForUpdatesSilently)
 
@@ -260,9 +295,29 @@ class AppController(QObject):
     def projectName(self) -> str:
         return self._project_name
 
+    @Property(bool, notify=projectChanged)
+    def hasProject(self) -> bool:
+        return self._current_project_file is not None
+
+    @Property(str, notify=projectChanged)
+    def projectType(self) -> str:
+        return self._project_type
+
+    @Property(bool, notify=projectChanged)
+    def manuscriptProject(self) -> bool:
+        return self._project_type == "manuscript"
+
     @Property(str, notify=projectChanged)
     def videoPath(self) -> str:
         return self._video_path
+
+    @Property(str, notify=projectChanged)
+    def sourceManuscriptText(self) -> str:
+        return self._source_manuscript_text
+
+    @Property(int, notify=projectChanged)
+    def sourceManuscriptCharCount(self) -> int:
+        return len(self._source_manuscript_text)
 
     @Property(str, notify=noticeChanged)
     def notice(self) -> str:
@@ -399,6 +454,32 @@ class AppController(QObject):
             )
         return "可选增强，默认关闭；不开启时完全沿用当前理解与故事生成流程。"
 
+    @Property(bool, notify=seriesSplitChanged)
+    def seriesSplitEnabled(self) -> bool:
+        return self._series_split_enabled
+
+    @Property(bool, notify=seriesSplitChanged)
+    def seriesSplitSuggested(self) -> bool:
+        return bool(self._series_split_reasons())
+
+    @Property(str, notify=seriesSplitChanged)
+    def seriesSplitHint(self) -> str:
+        reasons = self._series_split_reasons()
+        labels = [
+            str(item.get("label_zh", "")).strip()
+            for item in reasons
+            if str(item.get("label_zh", "")).strip()
+        ]
+        summary = "、".join(labels[:3])
+        if self._series_split_enabled:
+            return (
+                "已允许拆分；生成故事时只有确认单集无法合理讲清，才会拆成最少集数。"
+                + (f" 当前检测到：{summary}。" if summary else "")
+            )
+        if reasons:
+            return f"检测到{summary}，内容可能适合分集；当前仍会优先生成一条三分钟内视频。"
+        return "默认不拆分，生成一条三分钟内视频；内容明显过密时这里会给出提示。"
+
     @Property(str, notify=analysisChanged)
     def analysisElapsedText(self) -> str:
         elapsed = time.monotonic() - self._analysis_started_at if self._analysis_started_at else 0.0
@@ -460,6 +541,12 @@ class AppController(QObject):
         return self._story_status
 
     @Property(str, notify=storyChanged)
+    def storyElapsedText(self) -> str:
+        if not self._story_busy or not self._story_started_at:
+            return ""
+        return f"已用 {self._format_time(time.monotonic() - self._story_started_at)}"
+
+    @Property(str, notify=storyChanged)
     def storyTitle(self) -> str:
         return str(self._story.get("title", ""))
 
@@ -471,7 +558,10 @@ class AppController(QObject):
     def storyStats(self) -> str:
         if not self._story:
             return ""
-        return f"{self._story.get('word_count', 0)} 词 · 约 {self._story.get('estimated_duration_sec', 0)} 秒"
+        duration = float(self._story.get("estimated_duration_sec", 0) or 0)
+        if str(self._story.get("timing_model", "")).startswith("measured_voice"):
+            return f"{self._story.get('word_count', 0)} 词 · 实际配音 {self._format_time(duration)}"
+        return f"{self._story.get('word_count', 0)} 词 · 约 {duration:g} 秒"
 
     @Property("QVariantList", notify=storyChanged)
     def storyOutline(self) -> list[dict[str, object]]:
@@ -480,6 +570,24 @@ class AppController(QObject):
     @Property("QVariantList", notify=storyChanged)
     def storyNarration(self) -> list[dict[str, object]]:
         return self._story_narration
+
+    @Property("QVariantList", notify=storyChanged)
+    def storyboardBeats(self) -> list[dict[str, object]]:
+        return self._storyboard_beats
+
+    @Property(str, notify=storyChanged)
+    def storyboardSummary(self) -> str:
+        if not self._storyboard:
+            return ""
+        return (
+            f"{self._storyboard.get('shot_segment_count', 0)} 个镜头段 · "
+            f"建议至少 {self._storyboard.get('recommended_asset_count', 0)} 个素材文件 · "
+            f"当前覆盖 {self._storyboard.get('coverage_percent', 0)}%"
+        )
+
+    @Property(bool, notify=storyChanged)
+    def storyboardStale(self) -> bool:
+        return bool(self._storyboard.get("stale", False))
 
     @Property(str, notify=storyChanged)
     def narrativeStrategy(self) -> str:
@@ -679,6 +787,38 @@ class AppController(QObject):
     def matchingStatus(self) -> str:
         return self._matching_status
 
+    @Property(int, notify=matchingChanged)
+    def manuscriptAssetCount(self) -> int:
+        return len(self._manuscript_assets)
+
+    @Property(bool, notify=matchingChanged)
+    def stockMediaConfigured(self) -> bool:
+        return bool(self._stock_api_key("PEXELS_API_KEY") or self._stock_api_key("PIXABAY_API_KEY"))
+
+    @Property(str, notify=matchingChanged)
+    def pexelsApiKey(self) -> str:
+        return self._stock_api_key("PEXELS_API_KEY")
+
+    @Property(str, notify=matchingChanged)
+    def pixabayApiKey(self) -> str:
+        return self._stock_api_key("PIXABAY_API_KEY")
+
+    @Property(bool, notify=matchingChanged)
+    def stockSearchBusy(self) -> bool:
+        return self._stock_search_busy
+
+    @Property(float, notify=matchingChanged)
+    def stockSearchProgress(self) -> float:
+        return self._stock_search_progress
+
+    @Property(str, notify=matchingChanged)
+    def stockSearchStatus(self) -> str:
+        return self._stock_search_status
+
+    @Property("QVariantList", notify=matchingChanged)
+    def stockSearchResults(self) -> list[dict[str, object]]:
+        return self._stock_search_results
+
     @Property("QVariantList", notify=matchingChanged)
     def matches(self) -> list[dict[str, object]]:
         return self._matches
@@ -713,11 +853,13 @@ class AppController(QObject):
         return self._export_path
 
     @Slot(result=str)
-    def prepareTtsSrtExportUrl(self) -> str:
+    @Slot(str, result=str)
+    def prepareTtsSrtExportUrl(self, export_format: str = "srt") -> str:
         if not self._current_project_file:
             return ""
         self._export_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{self._safe_name(self._project_name)}_gpt_sovits.srt"
+        suffix = "txt" if str(export_format or "").strip().lower() == "txt" else "srt"
+        filename = f"{self._safe_name(self._project_name)}_gpt_sovits.{suffix}"
         return QUrl.fromLocalFile(
             str(self._export_dir / filename)
         ).toString()
@@ -725,6 +867,34 @@ class AppController(QObject):
     @Property(bool, notify=exportChanged)
     def preserveOriginalAudio(self) -> bool:
         return self._preserve_original_audio
+
+    @Property(bool, notify=exportChanged)
+    def burnSubtitles(self) -> bool:
+        return self._burn_subtitles
+
+    @Property(str, notify=exportChanged)
+    def exportFitMode(self) -> str:
+        return self._export_fit_mode
+
+    @Property(int, notify=exportChanged)
+    def subtitleCanvasWidth(self) -> int:
+        if self._export_fit_mode == "original":
+            return max(1, int(self._media.get("width", 1920) or 1920))
+        return max(1, int(self._config.get("export", {}).get("width", 1080) or 1080))
+
+    @Property(int, notify=exportChanged)
+    def subtitleCanvasHeight(self) -> int:
+        if self._export_fit_mode == "original":
+            return max(1, int(self._media.get("height", 1080) or 1080))
+        return max(1, int(self._config.get("export", {}).get("height", 1920) or 1920))
+
+    @Property(str, notify=exportChanged)
+    def exportLayoutHint(self) -> str:
+        if self._export_fit_mode == "vertical_crop":
+            return "9:16 铺满画布，会从左右裁掉部分横版画面；适合主体始终居中的素材。"
+        if self._export_fit_mode == "original":
+            return "保持原视频比例；横版成片通常不会被 YouTube 识别为 Shorts。"
+        return "9:16 Shorts：完整保留主画面，使用模糊扩展背景填满，不裁切主体。"
 
     @Property(str, notify=voiceChanged)
     def voiceStatus(self) -> str:
@@ -1014,6 +1184,14 @@ class AppController(QObject):
         return str(self._config.get("story", {}).get("editor_model", ""))
 
     @Property(str, notify=noticeChanged)
+    def storyReasoningEffort(self) -> str:
+        return str(self._config.get("story", {}).get("reasoning_effort", "") or "")
+
+    @Property(str, notify=noticeChanged)
+    def editorReasoningEffort(self) -> str:
+        return str(self._config.get("story", {}).get("editor_reasoning_effort", "") or "")
+
+    @Property(str, notify=noticeChanged)
     def visionApiModel(self) -> str:
         return str(self._config.get("vision", {}).get("model", "gpt-4o-mini"))
 
@@ -1072,6 +1250,7 @@ class AppController(QObject):
     @Slot(str, str, result=bool)
     @Slot(str, str, str, str, result=bool)
     @Slot(str, str, str, str, str, result=bool)
+    @Slot(str, str, str, str, str, str, str, result=bool)
     def saveApiConfiguration(
         self,
         api_key: str,
@@ -1079,12 +1258,16 @@ class AppController(QObject):
         story_model: str = "",
         vision_model: str = "",
         editor_model: str = "",
+        story_reasoning: str = "",
+        editor_reasoning: str = "",
     ) -> bool:
         cleaned_key = api_key.strip()
         cleaned_url = base_url.strip()
         cleaned_story_model = story_model.strip() or self.storyApiModel
         cleaned_vision_model = vision_model.strip() or self.visionApiModel
         cleaned_editor_model = editor_model.strip()
+        cleaned_story_reasoning = self._sanitize_reasoning_effort(story_reasoning)
+        cleaned_editor_reasoning = self._sanitize_reasoning_effort(editor_reasoning)
         if not cleaned_key:
             self._notice = "API Key 不能为空"
             self.noticeChanged.emit()
@@ -1122,6 +1305,8 @@ class AppController(QObject):
                     "story": {
                         "model": cleaned_story_model,
                         "editor_model": cleaned_editor_model,
+                        "reasoning_effort": cleaned_story_reasoning,
+                        "editor_reasoning_effort": cleaned_editor_reasoning,
                     },
                     "vision": {"model": cleaned_vision_model},
                 },
@@ -1262,8 +1447,10 @@ class AppController(QObject):
         if not url:
             return
         path = Path(QUrlHelper.to_local_path(url))
+        self._project_type = "video"
+        self._source_manuscript_text = ""
         self._video_path = str(path)
-        self._project_name = self._next_project_name()
+        self._project_name = self._next_project_name("v2")
         project_dir = self._projects_dir / self._project_name
         project_dir.mkdir(parents=True, exist_ok=True)
         for child in ("source", "analysis", "script", "timeline", "cache"):
@@ -1283,6 +1470,7 @@ class AppController(QObject):
             {
                 "schema_version": 1,
                 "name": self._project_name,
+                "project_type": "video",
                 "source_video": str(path),
                 "created_at": created_at,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -1304,6 +1492,13 @@ class AppController(QObject):
                 self._config.get("layered_analysis", {}).get("enabled", True)
             )
             settings["layered_analysis_enabled"] = self._layered_analysis_enabled
+            self._series_split_enabled = bool(
+                settings.get(
+                    "series_split_enabled",
+                    self._config.get("series", {}).get("auto_split", False),
+                )
+            )
+            settings["series_split_enabled"] = self._series_split_enabled
         project_file.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -1316,17 +1511,152 @@ class AppController(QObject):
         self._preview_position = 0.0
         self._refresh_recent_projects()
         self.projectChanged.emit()
+        self.seriesSplitChanged.emit()
         self.noticeChanged.emit()
         self.mediaChanged.emit()
         self.previewChanged.emit()
         self._load_events(project_file)
         self._load_story(project_file)
+        self._load_manuscript_assets(project_file)
         self._load_matches(project_file)
         self._load_export(project_file)
         self._load_voice(project_file)
         self._load_subtitle_style(project_file)
         if not self._media:
             self._start_media_analysis(path, project_file)
+
+    @Slot(str)
+    def createManuscriptProject(self, text: str) -> None:
+        manuscript = self._normalize_manuscript(text)
+        if not manuscript:
+            self._notice = "文稿不能为空，请粘贴内容或选择文稿文件。"
+            self.noticeChanged.emit()
+            return
+        if self._has_active_project_task():
+            self._notice = "当前有任务正在运行，请等待完成后再创建文稿项目。"
+            self.noticeChanged.emit()
+            return
+
+        self._clear_current_project()
+        self._project_type = "manuscript"
+        self._source_manuscript_text = manuscript
+        self._project_name = self._next_project_name("v3")
+        project_dir = self._projects_dir / self._project_name
+        for child in (
+            "source",
+            "analysis",
+            "script",
+            "storyboard",
+            "assets",
+            "timeline",
+            "cache",
+        ):
+            (project_dir / child).mkdir(parents=True, exist_ok=True)
+        manuscript_file = project_dir / "source" / "manuscript.txt"
+        manuscript_file.write_text(manuscript + "\n", encoding="utf-8")
+        created_at = datetime.now().isoformat(timespec="seconds")
+        project_file = project_dir / "project.json"
+        payload = {
+            "schema_version": 2,
+            "name": self._project_name,
+            "project_type": "manuscript",
+            "source_video": "",
+            "source_manuscript": "source/manuscript.txt",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "stage": "manuscript_ready",
+            "settings": {
+                "fact_review_auto": self._fact_review_auto,
+                "narrative_strategy": self._narrative_strategy,
+                "target_duration_sec": 180,
+                "series_split_enabled": self._series_split_enabled,
+            },
+        }
+        project_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self._current_project_file = project_file
+        self._analysis_status = "文稿已整理"
+        self._story_status = "等待规划分镜"
+        self._matching_status = "等待导入并匹配素材"
+        self._export_status = "等待配音与导出"
+        self._notice = "文稿项目已创建。原稿会自动保存在项目中，下一步开始规划分镜。"
+        self._refresh_recent_projects()
+        self.projectChanged.emit()
+        self.seriesSplitChanged.emit()
+        self.noticeChanged.emit()
+        self.analysisChanged.emit()
+        self.storyChanged.emit()
+        self.matchingChanged.emit()
+        self.exportChanged.emit()
+
+    @Slot(str)
+    def importManuscript(self, url: str) -> None:
+        if not url:
+            return
+        path = Path(QUrlHelper.to_local_path(url))
+        try:
+            text = self._read_manuscript_file(path)
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._notice = f"无法读取文稿：{exc}"
+            self.noticeChanged.emit()
+            return
+        self.createManuscriptProject(text)
+
+    @Slot(str)
+    def updateSourceManuscript(self, text: str) -> None:
+        if self._project_type != "manuscript" or not self._current_project_file:
+            return
+        manuscript = self._normalize_manuscript(text)
+        if not manuscript:
+            self._notice = "文稿不能为空，已保留上一次保存的内容。"
+            self.noticeChanged.emit()
+            self.projectChanged.emit()
+            return
+        try:
+            source_changed = manuscript != self._source_manuscript_text
+            manuscript_file = self._current_project_file.parent / "source" / "manuscript.txt"
+            manuscript_file.parent.mkdir(parents=True, exist_ok=True)
+            manuscript_file.write_text(manuscript + "\n", encoding="utf-8")
+            payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+            payload["schema_version"] = max(2, int(payload.get("schema_version", 1) or 1))
+            payload["project_type"] = "manuscript"
+            payload["source_manuscript"] = "source/manuscript.txt"
+            payload["stage"] = "manuscript_ready"
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            self._current_project_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self._source_manuscript_text = manuscript
+            self._analysis_status = "文稿已整理"
+            if source_changed and self._story:
+                self._story["source_stale"] = True
+                story_file = self._current_project_file.parent / "script" / "story.json"
+                story_file.write_text(
+                    json.dumps(self._story, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                if self._storyboard:
+                    self._storyboard["stale"] = True
+                    storyboard_file = (
+                        self._current_project_file.parent / "storyboard" / "storyboard.json"
+                    )
+                    storyboard_file.write_text(
+                        json.dumps(self._storyboard, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                self._story_status = "文稿已修改，旧英文解说和分镜需要重新规划"
+                self._notice = self._story_status
+                self.storyChanged.emit()
+            else:
+                self._notice = f"文稿已保存，共 {len(manuscript)} 个字符。"
+            self._refresh_recent_projects()
+            self.projectChanged.emit()
+            self.analysisChanged.emit()
+            self.noticeChanged.emit()
+        except (OSError, ValueError, TypeError) as exc:
+            self._notice = f"保存文稿失败：{exc}"
+            self.noticeChanged.emit()
 
     @Slot(str)
     def renameProject(self, value: str) -> None:
@@ -1502,7 +1832,14 @@ class AppController(QObject):
             payload = json.loads(project_file.read_text(encoding="utf-8"))
             self._current_project_file = project_file
             self._project_name = str(payload.get("name") or project_file.parent.name)
+            project_type = str(payload.get("project_type") or "").strip().lower()
+            if project_type not in {"video", "manuscript"}:
+                project_type = "manuscript" if payload.get("source_manuscript") else "video"
+            self._project_type = project_type
             self._video_path = str(payload.get("source_video") or "")
+            self._source_manuscript_text = self._load_source_manuscript(
+                payload, project_file
+            )
             self._media = dict(payload.get("media") or {})
             saved_mode = str(payload.get("settings", {}).get("content_mode", "speech"))
             self._analysis_content_mode = saved_mode if saved_mode in {"speech", "visual"} else "speech"
@@ -1521,6 +1858,14 @@ class AppController(QObject):
             self._layered_analysis_enabled = bool(
                 self._config.get("layered_analysis", {}).get("enabled", True)
             )
+            series_payload = payload.get("series", {})
+            self._series_split_enabled = bool(
+                payload.get("settings", {}).get(
+                    "series_split_enabled",
+                    bool(series_payload)
+                    or self._config.get("series", {}).get("auto_split", False),
+                )
+            )
             self._load_series(payload, project_file)
             cover_path = project_file.parent / "cache" / "cover.jpg"
             self._cover_url = cover_path.as_uri() if cover_path.exists() else ""
@@ -1536,19 +1881,30 @@ class AppController(QObject):
                 "matched": "已完成镜头匹配",
                 "previewed": "已生成粗剪预览",
                 "exported": "已导出成片",
+                "manuscript_ready": "文稿已整理",
+                "storyboarded": "分镜规划完成",
+                "assets_ready": "素材已准备",
             }
             self._notice = f"项目已恢复：{stage_names.get(stage, stage)}。"
             self.projectChanged.emit()
+            self.seriesSplitChanged.emit()
             self.noticeChanged.emit()
             self.mediaChanged.emit()
             self.previewChanged.emit()
             self._load_events(project_file)
             self._load_story(project_file)
+            self._load_manuscript_assets(project_file)
+            self._load_stock_search(project_file)
             self._load_matches(project_file)
             self._load_export(project_file)
             self._load_voice(project_file)
             self._load_subtitle_style(project_file)
-            if not self._media and self._video_path and Path(self._video_path).exists():
+            if (
+                self._project_type == "video"
+                and not self._media
+                and self._video_path
+                and Path(self._video_path).exists()
+            ):
                 self._start_media_analysis(Path(self._video_path), project_file)
         except Exception as exc:
             self._notice = f"无法打开项目：{exc}"
@@ -1709,6 +2065,33 @@ class AppController(QObject):
             else "已切换为语音与画面模式，请重新理解原片"
         )
         self.analysisChanged.emit()
+        self.seriesSplitChanged.emit()
+        self.noticeChanged.emit()
+
+    @Slot(bool)
+    def setSeriesSplitEnabled(self, enabled: bool) -> None:
+        value = bool(enabled)
+        if value == self._series_split_enabled:
+            return
+        self._series_split_enabled = value
+        if self._current_project_file and self._current_project_file.exists():
+            try:
+                payload = json.loads(
+                    self._current_project_file.read_text(encoding="utf-8")
+                )
+                payload.setdefault("settings", {})["series_split_enabled"] = value
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        self._notice = (
+            "已允许自动拆分；需要重新生成故事后才会执行判断"
+            if value
+            else "已关闭自动拆分；后续优先生成一条三分钟内视频"
+        )
+        self.seriesSplitChanged.emit()
         self.noticeChanged.emit()
 
     @Slot(bool)
@@ -2055,6 +2438,9 @@ class AppController(QObject):
             or not self._current_project_file
         ):
             return
+        if self._project_type == "manuscript":
+            self._generate_manuscript_storyboard(target_duration_sec)
+            return
         if not self.apiConfigured:
             message = "未配置 OPENAI_API_KEY，无法生成故事。请在仓库根目录 .env 中配置后重试"
             self._story_status = f"故事生成失败：{message}"
@@ -2104,10 +2490,14 @@ class AppController(QObject):
             except (OSError, ValueError, TypeError):
                 layered_payload = {}
         planning_words_per_second = self._planning_words_per_second()
+        series_config = deepcopy(self._config)
+        series_config.setdefault("series", {})["auto_split"] = bool(
+            self._series_split_enabled and not is_series_child
+        )
         initial_series_reasons = (
             story_series_evaluation_reasons(
                 event_payload,
-                self._config,
+                series_config,
                 layered=layered_payload,
                 planning_words_per_second=planning_words_per_second,
             )
@@ -2126,6 +2516,8 @@ class AppController(QObject):
         self._story_busy = True
         self._story_progress = 0.02
         self._story_status = "正在准备原片事件…"
+        self._story_started_at = time.monotonic()
+        self._story_clock.start()
         self.storyChanged.emit()
         project_file = self._current_project_file
         story_file = project_file.parent / "script" / "story.json"
@@ -2192,15 +2584,22 @@ class AppController(QObject):
                     ),
                     planning_words_per_second=planning_words_per_second,
                     allow_incomplete_for_series_evaluation=series_candidate,
+                    allow_overlong_for_series_evaluation=(
+                        self._series_split_enabled and not is_series_child
+                    ),
                 )
                 if part_context_dir:
                     shutil.rmtree(part_context_dir, ignore_errors=True)
-                completion_message = "故事与英文解说已生成"
+                completion_message = (
+                    "故事与英文解说已生成；内容过密时已优先保留核心并收束为一条三分钟内视频"
+                    if bool(story.get("forced_single_short_trim", False))
+                    else "故事与英文解说已生成"
+                )
                 events_payload = json.loads(events_file.read_text(encoding="utf-8"))
                 final_series_reasons = (
                     story_series_evaluation_reasons(
                         events_payload,
-                        self._config,
+                        series_config,
                         story=story,
                         layered=layered_payload,
                         planning_words_per_second=planning_words_per_second,
@@ -2234,7 +2633,7 @@ class AppController(QObject):
                             events_file,
                             story_file,
                             layered_file,
-                            self._config,
+                            series_config,
                             self._root,
                             trigger_reasons=series_reasons,
                         )
@@ -2407,6 +2806,132 @@ class AppController(QObject):
 
         threading.Thread(target=worker, name="storycut-story-writer", daemon=True).start()
 
+    def _generate_manuscript_storyboard(self, target_duration_sec: int) -> None:
+        if not self._current_project_file:
+            return
+        if not self.apiConfigured:
+            message = "未配置 OPENAI_API_KEY，无法规划文稿分镜。请先打开 API 设置"
+            self._story_status = f"分镜规划失败：{message}"
+            self._notice = self._story_status
+            self.storyChanged.emit()
+            self.noticeChanged.emit()
+            return
+        manuscript_file = self._current_project_file.parent / "source" / "manuscript.txt"
+        if not manuscript_file.exists() or not self._source_manuscript_text.strip():
+            self._notice = "请先完成第 1 步：填写并保存文稿"
+            self.noticeChanged.emit()
+            return
+
+        self._story_job_id += 1
+        self._duration_revision_job_id += 1
+        self._fact_review_job_id += 1
+        self._terminology_review_job_id += 1
+        job_id = self._story_job_id
+        self._story_busy = True
+        self._story_progress = 0.02
+        self._story_status = "正在准备文稿与分镜规划…"
+        self._story_started_at = time.monotonic()
+        self._story_clock.start()
+        self.storyChanged.emit()
+        project_file = self._current_project_file
+        planning_words_per_second = self._planning_words_per_second()
+
+        def report(value: float, status: str) -> None:
+            self._storyProgressReady.emit(value, status, job_id)
+
+        def worker() -> None:
+            try:
+                result = generate_manuscript_storyboard(
+                    manuscript_file,
+                    project_file.parent / "script" / "story.json",
+                    project_file.parent / "storyboard" / "storyboard.json",
+                    project_file.parent / "analysis" / "events.json",
+                    target_duration_sec,
+                    self._config,
+                    self._root,
+                    report,
+                    narrative_strategy=self._narrative_strategy,
+                    planning_words_per_second=planning_words_per_second,
+                )
+                story = dict(result.get("story", {}))
+                duration = float(story.get("estimated_duration_sec", 0) or 0)
+                completion_prefix = ""
+                if duration >= SHORTS_MAX_DURATION_SEC and self._series_split_enabled:
+                    report(
+                        0.82,
+                        f"单集旁白预计 {duration:.0f} 秒，正在按叙事段落自动拆分…",
+                    )
+                    settings = self._config.get("series", {})
+                    part_results = split_overlong_manuscript_result(
+                        result,
+                        max_duration_sec=float(
+                            settings.get("target_part_duration_sec", 174) or 174
+                        ),
+                        max_parts=int(settings.get("max_parts", 6) or 6),
+                    )
+                    evaluation = {
+                        "single_part_acceptable": False,
+                        "coverage_score": 1.0,
+                        "reason_zh": (
+                            f"完整英文旁白预计 {duration:.0f} 秒，超过 Shorts 三分钟限制，"
+                            "已在完整句和叙事段落边界自动拆分。"
+                        ),
+                        "recommended_part_count": len(part_results),
+                        "parts": [dict(item["plan"]) for item in part_results],
+                    }
+                    series_result = materialize_story_series(
+                        project_file, evaluation, part_results
+                    )
+                    result = dict(part_results[0])
+                    story = dict(series_result["current_story"])
+                    result["story"] = story
+                    completion_prefix = f"旁白超出三分钟，已自动拆分为 {len(part_results)} 集；"
+                elif duration >= SHORTS_MAX_DURATION_SEC:
+                    completion_prefix = (
+                        "当前未开启分集，已保留单集稿；旁白预计超过三分钟，建议精简后再配音；"
+                    )
+                payload = json.loads(project_file.read_text(encoding="utf-8"))
+                payload["stage"] = "storyboarded"
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                payload.setdefault("settings", {})["target_duration_sec"] = int(
+                    target_duration_sec
+                )
+                artifacts = payload.setdefault("artifacts", {})
+                artifacts["story"] = "script/story.json"
+                artifacts["storyboard"] = "storyboard/storyboard.json"
+                artifacts["events"] = "analysis/events.json"
+                artifacts.pop("matches", None)
+                artifacts.pop("rough_cut", None)
+                artifacts.pop("rough_preview", None)
+                project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                storyboard = result.get("storyboard", {})
+                message = (
+                    completion_prefix
+                    + f"分镜规划完成：{storyboard.get('shot_segment_count', 0)} 个镜头段，"
+                    f"建议至少准备 {storyboard.get('recommended_asset_count', 0)} 个素材文件"
+                )
+                self._storyFinished.emit(
+                    True,
+                    message,
+                    story,
+                    job_id,
+                )
+            except Exception as exc:
+                error_dir = project_file.parent / "script"
+                error_dir.mkdir(parents=True, exist_ok=True)
+                (error_dir / "error.log").write_text(
+                    traceback.format_exc(), encoding="utf-8"
+                )
+                self._storyFinished.emit(False, str(exc), {}, job_id)
+
+        threading.Thread(
+            target=worker,
+            name="storycut-manuscript-storyboard",
+            daemon=True,
+        ).start()
+
     @Slot(int, str)
     def updateNarration(self, index: int, text: str) -> None:
         if index < 0 or index >= len(self._story_narration) or not self._current_project_file:
@@ -2452,6 +2977,8 @@ class AppController(QObject):
         ]
         story_file = self._current_project_file.parent / "script" / "story.json"
         story_file.write_text(json.dumps(self._story, ensure_ascii=False, indent=2), encoding="utf-8")
+        if self._project_type == "manuscript":
+            self._sync_storyboard_narration()
         try:
             prepare_tts_srt(
                 story_file, self._current_project_file.parent / "script" / "tts"
@@ -2849,6 +3376,194 @@ class AppController(QObject):
             self._matching_busy = False
             self.matchingChanged.emit()
 
+    @Slot("QVariantList")
+    def importManuscriptAssets(self, urls: list[object]) -> None:
+        if self._project_type != "manuscript" or not self._current_project_file:
+            return
+        if not self._storyboard_beats:
+            self._notice = "请先完成第 2 步：规划分镜"
+            self.noticeChanged.emit()
+            return
+        supported_video = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+        supported_image = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+        existing = {
+            str(item.get("source_path", "")).casefold(): dict(item)
+            for item in self._manuscript_assets
+            if str(item.get("source_path", "")).strip()
+        }
+        added = 0
+        for raw in urls:
+            source = Path(QUrlHelper.to_local_path(str(raw))).resolve()
+            suffix = source.suffix.lower()
+            if not source.is_file() or suffix not in supported_video | supported_image:
+                continue
+            key = str(source).casefold()
+            if key in existing:
+                continue
+            existing[key] = {
+                "id": f"asset-{len(existing) + 1:04d}",
+                "name": source.name,
+                "source_path": str(source),
+                "kind": "video" if suffix in supported_video else "image",
+                "size_bytes": source.stat().st_size,
+                "analysis_status": "pending",
+            }
+            added += 1
+        self._manuscript_assets = list(existing.values())
+        try:
+            manifest = {
+                "schema_version": 1,
+                "asset_count": len(self._manuscript_assets),
+                "assets": self._manuscript_assets,
+            }
+            manifest_file = self._current_project_file.parent / "assets" / "manifest.json"
+            manifest_file.parent.mkdir(parents=True, exist_ok=True)
+            manifest_file.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+            payload["stage"] = "assets_ready"
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            payload.setdefault("artifacts", {})["asset_manifest"] = "assets/manifest.json"
+            self._current_project_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self._matching_status = (
+                f"已选择 {len(self._manuscript_assets)} 个本地素材"
+                + (f"，本次新增 {added} 个" if added else "；没有新增文件")
+                + "；下一步进行场景分析和自动匹配"
+            )
+            self._notice = self._matching_status
+            self._refresh_recent_projects()
+        except (OSError, ValueError, TypeError) as exc:
+            self._matching_status = f"素材清单保存失败：{exc}"
+            self._notice = self._matching_status
+        self.matchingChanged.emit()
+        self.noticeChanged.emit()
+
+    @Slot(str, str, result=bool)
+    def saveStockMediaConfiguration(self, pexels_key: str, pixabay_key: str) -> bool:
+        cleaned_pexels = pexels_key.strip()
+        cleaned_pixabay = pixabay_key.strip()
+        if not cleaned_pexels and not cleaned_pixabay:
+            self._notice = "请至少填写一个免费素材站 API Key"
+            self.noticeChanged.emit()
+            return False
+        try:
+            self._update_env_file(
+                self._root.parent / ".env",
+                {
+                    "PEXELS_API_KEY": cleaned_pexels,
+                    "PIXABAY_API_KEY": cleaned_pixabay,
+                },
+            )
+            if cleaned_pexels:
+                os.environ["PEXELS_API_KEY"] = cleaned_pexels
+            else:
+                os.environ.pop("PEXELS_API_KEY", None)
+            if cleaned_pixabay:
+                os.environ["PIXABAY_API_KEY"] = cleaned_pixabay
+            else:
+                os.environ.pop("PIXABAY_API_KEY", None)
+            self._notice = "免费素材 API 配置已保存并立即生效"
+            self.matchingChanged.emit()
+            self.noticeChanged.emit()
+            return True
+        except OSError as exc:
+            self._notice = f"免费素材 API 配置保存失败：{exc}"
+            self.noticeChanged.emit()
+            return False
+
+    @Slot()
+    def searchStockMedia(self) -> None:
+        if self._stock_search_busy or not self._current_project_file:
+            return
+        if self._project_type != "manuscript" or not self._storyboard_beats:
+            self._notice = "请先完成纯文稿项目的分镜规划"
+            self.noticeChanged.emit()
+            return
+        pexels_key = self._stock_api_key("PEXELS_API_KEY")
+        pixabay_key = self._stock_api_key("PIXABAY_API_KEY")
+        if not pexels_key and not pixabay_key:
+            self._notice = "请先设置 Pexels 或 Pixabay API Key"
+            self.noticeChanged.emit()
+            return
+        self._stock_search_job_id += 1
+        job_id = self._stock_search_job_id
+        self._stock_search_busy = True
+        self._stock_search_progress = 0.0
+        self._stock_search_status = "正在准备免费素材搜索…"
+        self.matchingChanged.emit()
+        project_file = self._current_project_file
+
+        def report(value: float, status: str) -> None:
+            self._stockSearchProgressReady.emit(value, status, job_id)
+
+        def worker() -> None:
+            try:
+                result = search_stock_media(
+                    project_file.parent / "storyboard" / "storyboard.json",
+                    project_file.parent / "assets" / "online_search.json",
+                    pexels_key,
+                    pixabay_key,
+                    report,
+                )
+                payload = json.loads(project_file.read_text(encoding="utf-8"))
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                payload.setdefault("artifacts", {})["online_search"] = "assets/online_search.json"
+                project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                message = (
+                    f"免费素材搜索完成：{result.get('found_count', 0)}/{result.get('beat_count', 0)} "
+                    "个分镜找到候选；尚未下载"
+                )
+                self._stockSearchFinished.emit(True, message, result, job_id)
+            except Exception as exc:
+                self._stockSearchFinished.emit(False, str(exc), {}, job_id)
+
+        threading.Thread(target=worker, name="storycut-stock-search", daemon=True).start()
+
+    @Slot()
+    def downloadStockSelections(self) -> None:
+        if self._stock_search_busy or not self._current_project_file:
+            return
+        search_file = self._current_project_file.parent / "assets" / "online_search.json"
+        if not search_file.exists():
+            self._notice = "请先自动寻找免费素材"
+            self.noticeChanged.emit()
+            return
+        self._stock_search_job_id += 1
+        job_id = self._stock_search_job_id
+        self._stock_search_busy = True
+        self._stock_search_progress = 0.0
+        self._stock_search_status = "正在准备下载已选素材…"
+        self.matchingChanged.emit()
+        project_file = self._current_project_file
+
+        def report(value: float, status: str) -> None:
+            self._stockSearchProgressReady.emit(value, status, job_id)
+
+        def worker() -> None:
+            try:
+                result = download_selected_stock_media(
+                    search_file,
+                    project_file.parent / "assets" / "online",
+                    report,
+                )
+                message = f"已下载 {result.get('downloaded_count', 0)} 个去重后的免费素材；来源信息已保存"
+                self._stockSearchFinished.emit(True, message, result, job_id)
+            except Exception as exc:
+                self._stockSearchFinished.emit(False, str(exc), {}, job_id)
+
+        threading.Thread(target=worker, name="storycut-stock-download", daemon=True).start()
+
+    @Slot(str)
+    def openWebUrl(self, url: str) -> None:
+        cleaned = url.strip()
+        if cleaned.startswith("https://") or cleaned.startswith("http://"):
+            QDesktopServices.openUrl(QUrl(cleaned))
+
     @Slot(int, int)
     def selectMatch(self, narration_id: int, event_id: int) -> None:
         if not self._current_project_file:
@@ -2909,7 +3624,9 @@ class AppController(QObject):
             return
         self._start_rough_preview(
             Path(self._narration_audio_path),
-            Path(self._synced_srt_path) if self.syncedSrtReady else None,
+            Path(self._synced_srt_path)
+            if self.syncedSrtReady and self._burn_subtitles
+            else None,
             "成片预览已生成，可使用系统播放器查看",
             "storycut_final_preview.mp4",
         )
@@ -3129,6 +3846,51 @@ class AppController(QObject):
         )
         self.exportChanged.emit()
 
+    @Slot(bool)
+    def setBurnSubtitles(self, enabled: bool) -> None:
+        self._burn_subtitles = bool(enabled)
+        if self._current_project_file:
+            try:
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                payload.setdefault("settings", {}).setdefault("export", {})[
+                    "burn_subtitles"
+                ] = self._burn_subtitles
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        self._export_status = (
+            "将烧录同步英文字幕，请重新生成预览"
+            if self._burn_subtitles
+            else "已关闭英文字幕烧录，请重新生成预览"
+        )
+        self.exportChanged.emit()
+
+    @Slot(str)
+    def setExportFitMode(self, mode: str) -> None:
+        normalized = self._normalize_export_fit_mode(mode)
+        if normalized == self._export_fit_mode:
+            return
+        self._export_fit_mode = normalized
+        if self._current_project_file:
+            try:
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                payload.setdefault("settings", {}).setdefault("export", {})[
+                    "fit_mode"
+                ] = normalized
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        self._subtitle_effect_preview_url = ""
+        self._export_status = "成片画布已修改，请重新生成预览"
+        self.subtitleEffectPreviewChanged.emit()
+        self.exportChanged.emit()
+
     def _start_rough_preview(
         self,
         narration_audio: Path | None,
@@ -3203,7 +3965,8 @@ class AppController(QObject):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._export_path))
 
     @Slot(str)
-    def saveTtsSrt(self, url: str) -> None:
+    @Slot(str, str)
+    def saveTtsSrt(self, url: str, export_format: str = "srt") -> None:
         if not url or not self._current_project_file:
             return
         try:
@@ -3211,23 +3974,33 @@ class AppController(QObject):
             if not source.exists():
                 story_file = self._current_project_file.parent / "script" / "story.json"
                 prepare_tts_srt(story_file, source.parent)
+            fmt = "txt" if str(export_format or "").strip().lower() == "txt" else "srt"
             destination = Path(QUrlHelper.to_local_path(url))
-            if destination.suffix.lower() != ".srt":
-                destination = destination.with_suffix(".srt")
+            if destination.suffix.lower() != f".{fmt}":
+                destination = destination.with_suffix(f".{fmt}")
             destination.parent.mkdir(parents=True, exist_ok=True)
-            if source.resolve() != destination.resolve():
+            if fmt == "txt":
+                destination.write_text(
+                    srt_to_plain_text(source.read_text(encoding="utf-8-sig")),
+                    encoding="utf-8",
+                )
+            elif source.resolve() != destination.resolve():
                 shutil.copy2(source, destination)
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
             payload.setdefault("artifacts", {}).pop("tts_input", None)
             payload["artifacts"]["tts_reference_srt"] = "script/tts/gpt_sovits_reference.srt"
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            self._voice_status = f"GPT-SoVITS SRT 已导出：{destination}"
-            self._notice = "SRT 已导出，可在 GPT-SoVITS 中选择该文件生成配音"
+            if fmt == "txt":
+                self._voice_status = f"配音纯文本已导出：{destination}"
+                self._notice = "TXT 已导出：一句一行，不含序号和时间轴"
+            else:
+                self._voice_status = f"GPT-SoVITS SRT 已导出：{destination}"
+                self._notice = "SRT 已导出，可在 GPT-SoVITS 中生成配音"
             self.voiceChanged.emit()
             self.noticeChanged.emit()
         except Exception as exc:
-            self._notice = f"英文 SRT 另存失败：{exc}"
+            self._notice = f"配音文稿导出失败：{exc}"
             self.noticeChanged.emit()
 
     @Slot(str, str)
@@ -3324,7 +4097,14 @@ class AppController(QObject):
         def worker() -> None:
             try:
                 render_subtitle_effect_preview(
-                    video, output, timestamp, style, width, height, self._config, self._root
+                    video,
+                    output,
+                    timestamp,
+                    style,
+                    width,
+                    height,
+                    self._config_with_project_style(),
+                    self._root,
                 )
                 self._subtitleEffectPreviewReady.emit(output.as_uri() + f"?v={job_id}", job_id)
             except Exception:
@@ -3460,6 +4240,19 @@ class AppController(QObject):
                 scale_srt_timeline(original_srt, working_srt, 1.0)
             self._narration_audio_path = str(destination)
             self._narration_duration_sec = float(result["duration_sec"])
+            synced_segments = None
+            if working_srt.exists():
+                try:
+                    synced_segments = parse_srt_timings(
+                        working_srt.read_text(encoding="utf-8-sig")
+                    )
+                except (OSError, ValueError, TypeError):
+                    synced_segments = None
+            self._calibrate_story_with_voice(
+                self._narration_duration_sec,
+                synced_segments,
+                timing_source="audio",
+            )
             self._apply_voice_timing_to_matches()
             over_limit = self._narration_duration_sec >= SHORTS_MAX_DURATION_SEC
             self._voice_status = (
@@ -3469,14 +4262,16 @@ class AppController(QObject):
                     if over_limit
                     else "已使用同步 SRT 校准"
                     if self.syncedSrtReady
-                    else "未导入同步 SRT，暂按句子比例分配"
+                    else "未导入同步 SRT，已按句子比例校准"
                 )
+                + "；故事时长已更新为真实配音"
             )
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
             payload.setdefault("artifacts", {})["narration_audio"] = "audio/narration.wav"
             payload.setdefault("artifacts", {})["narration_audio_original"] = "audio/narration_original.wav"
             payload.setdefault("settings", {}).setdefault("voice", {})["speed"] = 1.0
             payload["settings"]["voice"]["duration_sec"] = self._narration_duration_sec
+            payload["settings"]["voice"]["original_duration_sec"] = self._narration_duration_sec
             payload["settings"]["voice"]["audio_size"] = destination.stat().st_size
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3504,6 +4299,11 @@ class AppController(QObject):
             }
             self._synced_srt_path = str(destination)
             if self.narrationAudioReady:
+                self._calibrate_story_with_voice(
+                    self._narration_duration_sec,
+                    list(result["segments"]),
+                    timing_source="synced_srt",
+                )
                 self._apply_voice_timing_to_matches(list(result["segments"]))
             self._voice_status = (
                 f"同步字幕已导入：{result['segment_count']} 段"
@@ -3944,6 +4744,11 @@ class AppController(QObject):
             return
         segments = result.get("segments", [])
         self._synced_srt_path = str(self._current_project_file.parent / "audio" / "narration.srt")
+        self._calibrate_story_with_voice(
+            self._narration_duration_sec,
+            segments if isinstance(segments, list) else None,
+            timing_source="synced_srt",
+        )
         self._apply_voice_timing_to_matches(segments if isinstance(segments, list) else None)
         try:
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
@@ -4057,6 +4862,11 @@ class AppController(QObject):
         self._narration_speed = float(result.get("speed", 1.0) or 1.0)
         self._narration_duration_sec = float(result.get("duration_sec", 0) or 0)
         segments = result.get("segments")
+        self._calibrate_story_with_voice(
+            self._narration_duration_sec,
+            segments if isinstance(segments, list) and segments else None,
+            timing_source="processed_audio",
+        )
         self._apply_voice_timing_to_matches(segments if isinstance(segments, list) and segments else None)
         if self._current_project_file:
             try:
@@ -4066,6 +4876,10 @@ class AppController(QObject):
                     "speed"
                 ] = self._narration_speed
                 payload["settings"]["voice"]["duration_sec"] = self._narration_duration_sec
+                payload["settings"]["voice"].setdefault(
+                    "original_duration_sec",
+                    self._narration_duration_sec * max(1.0, self._narration_speed),
+                )
                 payload["settings"]["voice"]["audio_size"] = working_audio.stat().st_size
                 artifacts = payload.setdefault("artifacts", {})
                 artifacts["narration_audio"] = "audio/narration.wav"
@@ -4096,18 +4910,88 @@ class AppController(QObject):
         cleaned = "".join("_" if char in forbidden else char for char in value).strip(" .")
         return cleaned or "未命名项目"
 
-    def _next_project_name(self) -> str:
-        return self._available_project_name(self._projects_dir)
+    def _next_project_name(self, prefix: str = "v2") -> str:
+        return self._available_project_name(self._projects_dir, prefix=prefix)
 
     @staticmethod
-    def _available_project_name(projects_dir: Path, now: datetime | None = None) -> str:
-        base = f"v2-{(now or datetime.now()).strftime('%m%d')}"
+    def _available_project_name(
+        projects_dir: Path,
+        now: datetime | None = None,
+        prefix: str = "v2",
+    ) -> str:
+        safe_prefix = re.sub(r"[^A-Za-z0-9_-]+", "", str(prefix)).strip("-_") or "v2"
+        base = f"{safe_prefix}-{(now or datetime.now()).strftime('%m%d')}"
         candidate = base
         suffix = 0
         while (projects_dir / candidate).exists():
             suffix += 1
             candidate = f"{base}-{suffix}"
         return candidate
+
+    @staticmethod
+    def _normalize_manuscript(text: str) -> str:
+        normalized = (
+            str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        )
+        lines = [line.rstrip() for line in normalized.split("\n")]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        return "\n".join(lines)
+
+    @staticmethod
+    def _read_manuscript_file(path: Path) -> str:
+        if not path.exists() or not path.is_file():
+            raise ValueError("所选文稿文件不存在")
+        if path.suffix.lower() not in {".txt", ".md", ".markdown"}:
+            raise ValueError("当前支持 TXT 和 Markdown 文稿")
+        data = path.read_bytes()
+        for encoding in ("utf-8-sig", "utf-16", "gb18030"):
+            try:
+                text = data.decode(encoding)
+                break
+            except UnicodeError:
+                continue
+        else:
+            raise UnicodeError("无法识别文稿编码，请另存为 UTF-8 后重试")
+        normalized = AppController._normalize_manuscript(text)
+        if not normalized:
+            raise ValueError("文稿文件中没有可用文字")
+        return normalized
+
+    @staticmethod
+    def _load_source_manuscript(payload: dict[str, object], project_file: Path) -> str:
+        relative = str(payload.get("source_manuscript") or "").strip()
+        if not relative:
+            return ""
+        try:
+            project_dir = project_file.parent.resolve()
+            source_file = (project_dir / relative).resolve()
+            if project_dir not in source_file.parents or not source_file.is_file():
+                return ""
+            return AppController._normalize_manuscript(
+                source_file.read_text(encoding="utf-8-sig")
+            )
+        except (OSError, UnicodeError):
+            return ""
+
+    def _has_active_project_task(self) -> bool:
+        return any(
+            (
+                self._media_busy,
+                self._preview_busy,
+                self._analysis_busy,
+                self._story_busy,
+                self._fact_review_busy,
+                self._terminology_review_busy,
+                self._quality_busy,
+                self._matching_busy,
+                self._export_busy,
+                self._voice_busy,
+                self._subtitle_effect_preview_busy,
+            )
+        )
 
     def _planning_words_per_second(self) -> float:
         """Use the user's completed GPT-SoVITS projects to plan future script length."""
@@ -4119,10 +5003,26 @@ class AppController(QObject):
         for story_file in self._projects_dir.glob("*/script/story.json"):
             try:
                 story = json.loads(story_file.read_text(encoding="utf-8"))
-                if not str(story.get("timing_model", "")).startswith("measured_voice"):
-                    continue
                 words = int(story.get("word_count", 0) or 0)
-                duration = float(story.get("estimated_duration_sec", 0) or 0)
+                project_file = story_file.parent.parent / "project.json"
+                voice_settings: dict[str, object] = {}
+                if project_file.exists():
+                    payload = json.loads(project_file.read_text(encoding="utf-8"))
+                    raw_voice = payload.get("settings", {}).get("voice", {})
+                    voice_settings = raw_voice if isinstance(raw_voice, dict) else {}
+                duration = max(
+                    0.0,
+                    float(
+                        voice_settings.get("original_duration_sec", 0)
+                        or float(voice_settings.get("duration_sec", 0) or 0)
+                        * max(1.0, float(voice_settings.get("speed", 1.0) or 1.0))
+                        or (
+                            story.get("estimated_duration_sec", 0)
+                            if str(story.get("timing_model", "")).startswith("measured_voice")
+                            else 0
+                        )
+                    ),
+                )
                 if words < 20 or duration < 10:
                     continue
                 rate = words / duration
@@ -4141,6 +5041,33 @@ class AppController(QObject):
         )
         return round(max(0.9, min(2.2, median)), 3)
 
+    def _series_split_reasons(
+        self, story: dict[str, object] | None = None
+    ) -> list[dict[str, object]]:
+        if not self._events:
+            return []
+        config = deepcopy(self._config)
+        config.setdefault("series", {})["auto_split"] = True
+        layered: dict[str, object] = {}
+        if self._current_project_file:
+            layered_file = self._current_project_file.parent / "analysis" / "layered_structure.json"
+            if layered_file.exists():
+                try:
+                    value = json.loads(layered_file.read_text(encoding="utf-8"))
+                    layered = value if isinstance(value, dict) else {}
+                except (OSError, ValueError, TypeError):
+                    layered = {}
+        return story_series_evaluation_reasons(
+            {
+                "duration_sec": float(self._media.get("duration_sec", 0) or 0),
+                "events": self._events,
+            },
+            config,
+            story=story,
+            layered=layered,
+            planning_words_per_second=self._planning_words_per_second(),
+        )
+
     def _refresh_recent_projects(self) -> None:
         projects: list[dict[str, str]] = []
         stage_names = {
@@ -4152,6 +5079,9 @@ class AppController(QObject):
             "matched": "镜头匹配完成",
             "previewed": "成片预览完成",
             "exported": "成片已导出",
+            "manuscript_ready": "文稿已整理",
+            "storyboarded": "分镜规划完成",
+            "assets_ready": "素材已准备",
         }
         for project_file in self._projects_dir.glob("*/project.json"):
             try:
@@ -4162,10 +5092,22 @@ class AppController(QObject):
                     continue
                 stage = str(payload.get("stage") or "imported")
                 updated = str(payload.get("updated_at") or payload.get("created_at") or "")
+                project_type = str(payload.get("project_type") or "").strip().lower()
+                if project_type not in {"video", "manuscript"}:
+                    project_type = "manuscript" if payload.get("source_manuscript") else "video"
+                source_label = str(payload.get("source_video") or "")
+                if project_type == "manuscript":
+                    manuscript = self._load_source_manuscript(payload, project_file)
+                    compact = " ".join(manuscript.split())
+                    source_label = (
+                        f"纯文稿 · {len(manuscript)} 字符"
+                        + (f" · {compact[:36]}{'…' if len(compact) > 36 else ''}" if compact else "")
+                    )
                 projects.append(
                     {
                         "name": str(payload.get("name") or project_file.parent.name),
-                        "video": str(payload.get("source_video") or ""),
+                        "video": source_label,
+                        "projectType": project_type,
                         "stage": stage,
                         "stageText": stage_names.get(stage, stage),
                         "updated": updated,
@@ -4199,7 +5141,9 @@ class AppController(QObject):
         self._series_parts = []
         self._series_summary = ""
         self._project_name = "尚未创建项目"
+        self._project_type = "video"
         self._video_path = ""
+        self._source_manuscript_text = ""
         self._media = {}
         self._cover_url = ""
         self._preview_url = ""
@@ -4210,6 +5154,9 @@ class AppController(QObject):
         )
         self._layered_analysis_enabled = bool(
             self._config.get("layered_analysis", {}).get("enabled", True)
+        )
+        self._series_split_enabled = bool(
+            self._config.get("series", {}).get("auto_split", False)
         )
         self._analysis_status = "等待开始"
         self._analysis_started_at = 0.0
@@ -4223,9 +5170,13 @@ class AppController(QObject):
         self._events = []
         self._story_progress = 0.0
         self._story_status = "等待组织故事"
+        self._story_started_at = 0.0
+        self._story_clock.stop()
         self._story = {}
         self._story_outline = []
         self._story_narration = []
+        self._storyboard = {}
+        self._storyboard_beats = []
         self._fact_review_busy = False
         self._fact_review_status = "可选功能，尚未进行事实审查"
         self._fact_review = {}
@@ -4239,9 +5190,24 @@ class AppController(QObject):
         self._terminology_review_issues = []
         self._matching_status = "等待匹配镜头"
         self._matches = []
+        self._manuscript_assets = []
+        self._stock_search_job_id += 1
+        self._stock_search_busy = False
+        self._stock_search_status = "等待自动寻找免费素材"
+        self._stock_search_progress = 0.0
+        self._stock_search_results = []
         self._export_progress = 0.0
         self._export_status = "等待生成成片预览"
         self._export_path = ""
+        self._preserve_original_audio = bool(
+            self._config.get("export", {}).get("preserve_original_audio", False)
+        )
+        self._burn_subtitles = bool(
+            self._config.get("export", {}).get("burn_subtitles", True)
+        )
+        self._export_fit_mode = self._normalize_export_fit_mode(
+            self._config.get("export", {}).get("fit_mode", "vertical_blur")
+        )
         self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
         self._voice_busy = False
         self._narration_speed = 1.0
@@ -4256,6 +5222,7 @@ class AppController(QObject):
         self._subtitle_style = self._default_subtitle_style()
         self._subtitle_effect_preview_url = ""
         self.projectChanged.emit()
+        self.seriesSplitChanged.emit()
         self.mediaChanged.emit()
         self.previewChanged.emit()
         self.analysisChanged.emit()
@@ -4427,6 +5394,7 @@ class AppController(QObject):
                     pass
                 self._load_events(self._current_project_file)
         self.analysisChanged.emit()
+        self.seriesSplitChanged.emit()
         self.noticeChanged.emit()
 
     @Slot(float, str, int)
@@ -4437,16 +5405,48 @@ class AppController(QObject):
         self._story_status = status
         self.storyChanged.emit()
 
+    @Slot(float, str, int)
+    def _apply_stock_search_progress(self, value: float, status: str, job_id: int) -> None:
+        if job_id != self._stock_search_job_id:
+            return
+        self._stock_search_progress = min(max(value, 0.0), 1.0)
+        self._stock_search_status = status
+        self.matchingChanged.emit()
+
+    @Slot(bool, str, object, int)
+    def _apply_stock_search_finished(
+        self, success: bool, message: str, result: object, job_id: int
+    ) -> None:
+        if job_id != self._stock_search_job_id:
+            return
+        self._stock_search_busy = False
+        self._stock_search_progress = 1.0 if success else self._stock_search_progress
+        self._stock_search_status = message if success else f"免费素材搜索失败：{message}"
+        self._notice = self._stock_search_status
+        self._stock_search_results = (
+            [dict(item) for item in result.get("results", []) if isinstance(item, dict)]
+            if success and isinstance(result, dict)
+            else []
+        )
+        self.matchingChanged.emit()
+        self.noticeChanged.emit()
+
     @Slot(bool, str, object, int)
     def _apply_story_finished(self, success: bool, message: str, story: object, job_id: int) -> None:
         if job_id != self._story_job_id:
             return
         self._story_busy = False
+        self._story_clock.stop()
         self._story_progress = 1.0 if success else self._story_progress
-        self._story_status = message if success else f"故事生成失败：{message}"
+        failure_label = "分镜规划失败" if self._project_type == "manuscript" else "故事生成失败"
+        self._story_status = message if success else f"{failure_label}：{message}"
         self._notice = self._story_status
         if success and isinstance(story, dict):
             self._set_story(story)
+            if self._current_project_file:
+                self._load_storyboard(self._current_project_file)
+                if self._project_type == "manuscript":
+                    self._load_events(self._current_project_file)
             if self._current_project_file and self._current_project_file.exists():
                 try:
                     payload = json.loads(
@@ -4459,10 +5459,15 @@ class AppController(QObject):
             self._set_fact_review({})
             self._set_terminology_review({})
             self._matches = []
-            self._matching_status = "故事已更新，请重新自动匹配镜头"
+            self._matching_status = (
+                "分镜已更新，请导入素材后自动匹配"
+                if self._project_type == "manuscript"
+                else "故事已更新，请重新自动匹配镜头"
+            )
             self._export_path = ""
             self._refresh_recent_projects()
         self.storyChanged.emit()
+        self.seriesSplitChanged.emit()
         self.matchingChanged.emit()
         self.exportChanged.emit()
         self.noticeChanged.emit()
@@ -4585,6 +5590,11 @@ class AppController(QObject):
         if self._analysis_busy:
             self.analysisChanged.emit()
 
+    @Slot()
+    def _tick_story_clock(self) -> None:
+        if self._story_busy:
+            self.storyChanged.emit()
+
     @staticmethod
     def _format_time(seconds: float) -> str:
         total = max(0, round(seconds))
@@ -4623,6 +5633,42 @@ class AppController(QObject):
         self._events = loaded
         self.eventsChanged.emit()
 
+    def _load_manuscript_assets(self, project_file: Path) -> None:
+        self._manuscript_assets = []
+        manifest_file = project_file.parent / "assets" / "manifest.json"
+        if manifest_file.exists():
+            try:
+                payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+                self._manuscript_assets = [
+                    dict(item)
+                    for item in payload.get("assets", [])
+                    if isinstance(item, dict)
+                    and Path(str(item.get("source_path", ""))).is_file()
+                ]
+            except (OSError, ValueError, TypeError):
+                self._manuscript_assets = []
+        if self._project_type == "manuscript" and self._manuscript_assets:
+            self._matching_status = f"已选择 {len(self._manuscript_assets)} 个本地素材；等待场景分析和自动匹配"
+
+    def _load_stock_search(self, project_file: Path) -> None:
+        self._stock_search_results = []
+        search_file = project_file.parent / "assets" / "online_search.json"
+        if not search_file.exists():
+            return
+        try:
+            payload = json.loads(search_file.read_text(encoding="utf-8"))
+            self._stock_search_results = [
+                dict(item)
+                for item in payload.get("results", [])
+                if isinstance(item, dict)
+            ]
+            found = int(payload.get("found_count", 0) or 0)
+            total = int(payload.get("beat_count", len(self._stock_search_results)) or 0)
+            self._stock_search_progress = 1.0
+            self._stock_search_status = f"已缓存免费素材候选：{found}/{total} 个分镜已找到"
+        except (OSError, ValueError, TypeError):
+            self._stock_search_results = []
+
     def _load_series(self, payload: dict[str, object], project_file: Path) -> None:
         series = payload.get("series", {})
         series = series if isinstance(series, dict) else {}
@@ -4645,7 +5691,7 @@ class AppController(QObject):
         index = int(series.get("part_index", 0) or 0)
         reason = str(series.get("reason_zh", "")).strip()
         self._series_summary = (
-            f"本素材已自动拆分为 {count} 集，当前第 {index} 集。{reason}"
+            f"本项目已自动拆分为 {count} 集，当前第 {index} 集。{reason}"
             if count > 1
             else ""
         )
@@ -4654,6 +5700,7 @@ class AppController(QObject):
         story_file = project_file.parent / "script" / "story.json"
         if not story_file.exists():
             self._set_story({})
+            self._load_storyboard(project_file)
             self._set_fact_review({})
             self._set_terminology_review({})
             return
@@ -4668,6 +5715,7 @@ class AppController(QObject):
             self._set_story(story)
         except (OSError, ValueError, TypeError):
             self._set_story({})
+        self._load_storyboard(project_file)
         self._load_content_review(project_file)
         proposal_file = project_file.parent / "script" / "duration_revision_proposal.json"
         self._duration_revision_proposal = {}
@@ -4692,6 +5740,80 @@ class AppController(QObject):
             except (OSError, ValueError, TypeError):
                 pass
         self.durationRevisionChanged.emit()
+
+    def _load_storyboard(self, project_file: Path) -> None:
+        storyboard_file = project_file.parent / "storyboard" / "storyboard.json"
+        storyboard: dict[str, object] = {}
+        if storyboard_file.exists():
+            try:
+                loaded = json.loads(storyboard_file.read_text(encoding="utf-8"))
+                storyboard = loaded if isinstance(loaded, dict) else {}
+            except (OSError, ValueError, TypeError):
+                storyboard = {}
+        self._storyboard = storyboard
+        self._storyboard_beats = [
+            dict(item)
+            for item in storyboard.get("beats", [])
+            if isinstance(item, dict)
+        ]
+        self.storyChanged.emit()
+
+    def _sync_storyboard_narration(self) -> None:
+        if not self._current_project_file or self._project_type != "manuscript":
+            return
+        storyboard_file = self._current_project_file.parent / "storyboard" / "storyboard.json"
+        if not storyboard_file.exists() or not self._storyboard_beats:
+            return
+        old_beats = [dict(item) for item in self._storyboard_beats]
+        synced: list[dict[str, object]] = []
+        for index, narration in enumerate(self._story_narration):
+            template = dict(old_beats[min(index, len(old_beats) - 1)])
+            narration_id = int(narration.get("id", index + 1) or index + 1)
+            template["id"] = narration_id
+            template["narration_id"] = narration_id
+            template["text_en"] = str(narration.get("text_en", ""))
+            template["estimated_duration_sec"] = float(
+                narration.get("estimated_duration_sec", 0) or 0
+            )
+            if index >= len(old_beats):
+                template["match_status"] = "missing"
+                template["match_confidence"] = 0
+                template["selected_asset_id"] = ""
+            synced.append(template)
+        self._storyboard["beats"] = synced
+        self._storyboard["shot_segment_count"] = len(synced)
+        self._storyboard["recommended_asset_count"] = (
+            max(
+                1,
+                min(
+                    len(synced),
+                    int(
+                        (
+                            sum(
+                                float(item.get("estimated_duration_sec", 0) or 0)
+                                for item in synced
+                            )
+                            + 9.999
+                        )
+                        // 10
+                    ),
+                ),
+            )
+            if synced
+            else 0
+        )
+        self._storyboard["matched_count"] = sum(
+            str(item.get("match_status", "")) in {"exact", "fallback"}
+            for item in synced
+        )
+        self._storyboard["coverage_percent"] = round(
+            100 * int(self._storyboard["matched_count"]) / len(synced)
+        ) if synced else 0
+        storyboard_file.write_text(
+            json.dumps(self._storyboard, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._storyboard_beats = synced
 
     def _load_matches(self, project_file: Path) -> None:
         matches_file = project_file.parent / "timeline" / "matches.json"
@@ -4806,6 +5928,18 @@ class AppController(QObject):
                     target=worker, name="storycut-voice-duration", daemon=True
                 ).start()
                 return
+        if self._narration_duration_sec > 0:
+            segments = None
+            if srt.exists():
+                try:
+                    segments = parse_srt_timings(srt.read_text(encoding="utf-8-sig"))
+                except (OSError, ValueError, TypeError):
+                    segments = None
+            self._calibrate_story_with_voice(
+                self._narration_duration_sec,
+                segments,
+                timing_source="loaded_audio",
+            )
         self._update_loaded_voice_status(audio, srt, project_file)
         self.voiceChanged.emit()
 
@@ -4841,12 +5975,27 @@ class AppController(QObject):
                 payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
                 voice_settings = payload.setdefault("settings", {}).setdefault("voice", {})
                 voice_settings["duration_sec"] = self._narration_duration_sec
+                voice_settings.setdefault(
+                    "original_duration_sec",
+                    self._narration_duration_sec * max(1.0, self._narration_speed),
+                )
                 voice_settings["audio_size"] = audio.stat().st_size
                 self._current_project_file.write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
             except (OSError, ValueError, TypeError):
                 pass
+            segments = None
+            if srt.exists():
+                try:
+                    segments = parse_srt_timings(srt.read_text(encoding="utf-8-sig"))
+                except (OSError, ValueError, TypeError):
+                    segments = None
+            self._calibrate_story_with_voice(
+                self._narration_duration_sec,
+                segments,
+                timing_source="loaded_audio",
+            )
         self._update_loaded_voice_status(audio, srt, self._current_project_file)
         self.voiceChanged.emit()
 
@@ -4885,6 +6034,12 @@ class AppController(QObject):
         self._preserve_original_audio = bool(
             self._config.get("export", {}).get("preserve_original_audio", False)
         )
+        self._burn_subtitles = bool(
+            self._config.get("export", {}).get("burn_subtitles", True)
+        )
+        self._export_fit_mode = self._normalize_export_fit_mode(
+            self._config.get("export", {}).get("fit_mode", "vertical_blur")
+        )
         try:
             payload = json.loads(project_file.read_text(encoding="utf-8"))
             saved = payload.get("settings", {}).get("subtitle", {})
@@ -4897,6 +6052,12 @@ class AppController(QObject):
             if isinstance(saved_export, dict):
                 self._preserve_original_audio = bool(
                     saved_export.get("preserve_original_audio", self._preserve_original_audio)
+                )
+                self._burn_subtitles = bool(
+                    saved_export.get("burn_subtitles", self._burn_subtitles)
+                )
+                self._export_fit_mode = self._normalize_export_fit_mode(
+                    saved_export.get("fit_mode", self._export_fit_mode)
                 )
         except (OSError, ValueError, TypeError):
             pass
@@ -4949,7 +6110,40 @@ class AppController(QObject):
             self._preserve_original_audio
             and int(self._media.get("audio_tracks", 0) or 0) > 0
         )
+        export["burn_subtitles"] = self._burn_subtitles
+        export["fit_mode"] = self._export_fit_mode
         return config
+
+    @staticmethod
+    def _normalize_export_fit_mode(value: object) -> str:
+        mode = str(value or "").strip().lower()
+        aliases = {"crop": "vertical_crop", "contain": "vertical_blur"}
+        mode = aliases.get(mode, mode)
+        return mode if mode in {"vertical_blur", "vertical_crop", "original"} else "vertical_blur"
+
+    def _calibrate_story_with_voice(
+        self,
+        duration_sec: float,
+        segments: list[dict[str, object]] | None = None,
+        timing_source: str = "audio",
+    ) -> None:
+        if not self._current_project_file or not self._story_narration or duration_sec <= 0:
+            return
+        calibrated = calibrate_story_timing_from_voice(
+            self._story,
+            duration_sec,
+            segments,
+            timing_source=timing_source,
+        )
+        story_file = self._current_project_file.parent / "script" / "story.json"
+        try:
+            story_file.parent.mkdir(parents=True, exist_ok=True)
+            story_file.write_text(
+                json.dumps(calibrated, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self._set_story(calibrated)
+        except OSError:
+            return
 
     def _apply_voice_timing_to_matches(self, segments: list[dict[str, object]] | None = None) -> None:
         if not self._current_project_file:
@@ -5159,6 +6353,22 @@ class AppController(QObject):
         temporary.write_text("\n".join(updated).rstrip() + "\n", encoding="utf-8")
         os.replace(temporary, env_file)
 
+    def _stock_api_key(self, name: str) -> str:
+        current = os.getenv(name, "").strip()
+        if current:
+            return current
+        env_file = self._root.parent / ".env"
+        if not env_file.exists():
+            return ""
+        try:
+            for line in env_file.read_text(encoding="utf-8-sig").splitlines():
+                stripped = line.strip()
+                if stripped.startswith(name + "="):
+                    return stripped.split("=", 1)[1].strip().strip('"').strip("'")
+        except OSError:
+            return ""
+        return ""
+
     @staticmethod
     def _normalize_api_base_url(value: str) -> str:
         if not value:
@@ -5174,6 +6384,11 @@ class AppController(QObject):
         if parsed.query or parsed.fragment:
             raise ValueError("接口地址不能包含查询参数或 # 片段，请填写 API 根地址")
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+    @staticmethod
+    def _sanitize_reasoning_effort(value: str) -> str:
+        candidate = str(value or "").strip().lower()
+        return candidate if candidate in {"low", "medium", "high", "xhigh"} else ""
 
     def _estimate_analysis_total(self, duration: float) -> float:
         samples: list[tuple[float, float]] = []

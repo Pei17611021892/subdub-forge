@@ -10,8 +10,11 @@ from unittest.mock import patch
 
 from src.story_service import (
     _build_speech_story_prompt,
+    _chat_json,
     _normalize_story,
     _problematic_tts_unit_ids,
+    _trim_narration_to_duration,
+    calibrate_story_timing_from_voice,
     generate_story_script,
     narrative_strategy_options,
     normalize_story_after_text_edit,
@@ -30,6 +33,105 @@ class StoryServiceTests(unittest.TestCase):
         unchanged_prompt = _build_speech_story_prompt([], 180, 300, "existing", "none")
         self.assertIn("First identify the dominant subject", auto_prompt)
         self.assertNotIn("NARRATIVE STRATEGY", unchanged_prompt)
+
+    def test_reasoning_effort_steps_down_until_provider_accepts_it(self) -> None:
+        attempts: list[str] = []
+
+        class CompatibilityError(Exception):
+            status_code = 400
+
+        class FakeCompletions:
+            def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                effort = str(kwargs.get("reasoning_effort", ""))
+                attempts.append(effort)
+                if effort != "low":
+                    raise CompatibilityError("unsupported reasoning_effort")
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'))]
+                )
+
+        client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+        result = _chat_json(
+            client,
+            "reasoning-model",
+            "Return JSON.",
+            0.5,
+            None,
+            "测试推理档位",
+            reasoning_effort="xhigh",
+        )
+
+        self.assertEqual(attempts, ["xhigh", "high", "medium", "low"])
+        self.assertTrue(result["ok"])
+
+    def test_real_voice_replaces_estimate_and_sync_refines_each_line(self) -> None:
+        story = {
+            "timing_model": "english_word_syllable_v3",
+            "word_count": 6,
+            "estimated_duration_sec": 6,
+            "narration": [
+                {"id": 1, "text_en": "First short line.", "word_count": 3, "estimated_duration_sec": 2},
+                {"id": 2, "text_en": "Second longer line.", "word_count": 3, "estimated_duration_sec": 4},
+            ],
+        }
+        calibrated = calibrate_story_timing_from_voice(story, 12)
+
+        self.assertEqual(calibrated["estimated_duration_before_voice_sec"], 6)
+        self.assertEqual(calibrated["estimated_duration_sec"], 12)
+        self.assertEqual(calibrated["timing_model"], "measured_voice_projection_v1")
+        self.assertEqual(
+            [item["estimated_duration_sec"] for item in calibrated["narration"]],
+            [4, 8],
+        )
+
+        synced = calibrate_story_timing_from_voice(
+            calibrated,
+            12,
+            [
+                {"start": 0.3, "end": 4.5, "text": "First short line."},
+                {"start": 5.0, "end": 11.8, "text": "Second longer line."},
+            ],
+        )
+        self.assertEqual(synced["voice_timing_source"], "synced_srt")
+        self.assertEqual(
+            [item["estimated_duration_sec"] for item in synced["narration"]],
+            [5, 7],
+        )
+
+    def test_single_short_fallback_keeps_hook_turning_point_and_ending(self) -> None:
+        narration = [
+            {
+                "id": index,
+                "event_ids": [index],
+                "text_en": f"Complete sentence {index}.",
+                "word_count": 20,
+                "estimated_duration_sec": 30,
+            }
+            for index in range(1, 9)
+        ]
+        trimmed = _trim_narration_to_duration(
+            {
+                "narration": narration,
+                "outline": [
+                    {"order": index, "event_ids": [index], "summary": str(index)}
+                    for index in range(1, 9)
+                ],
+                "selected_event_ids": list(range(1, 9)),
+                "omitted_event_ids": [],
+            },
+            {
+                "global_turning_point_event_ids": [5],
+                "routine_or_repetitive_event_ids": [2, 3, 4],
+            },
+            175,
+        )
+
+        kept = [item["event_ids"][0] for item in trimmed["narration"]]
+        self.assertIn(1, kept)
+        self.assertIn(5, kept)
+        self.assertIn(8, kept)
+        self.assertLess(trimmed["estimated_duration_sec"], 180)
+        self.assertTrue(trimmed["forced_single_short_trim"])
 
     def test_layered_structure_is_optional_prompt_context(self) -> None:
         default_prompt = _build_speech_story_prompt([], 180, 300, "existing", "none")

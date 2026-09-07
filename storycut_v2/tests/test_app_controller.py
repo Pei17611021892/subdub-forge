@@ -43,6 +43,86 @@ class AppControllerProjectNameTests(unittest.TestCase):
                 "v2-0817-2",
             )
 
+    def test_manuscript_project_uses_v3_name_and_persists_source_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            controller = self._controller(root)
+
+            controller.createManuscriptProject("  大象之间是否拥有语言？\r\n它们会使用低频声音。  ")
+
+            self.assertTrue(controller.hasProject)
+            self.assertTrue(controller.manuscriptProject)
+            self.assertEqual(controller.projectType, "manuscript")
+            self.assertTrue(controller.projectName.startswith("v3-"))
+            self.assertEqual(
+                controller.sourceManuscriptText,
+                "大象之间是否拥有语言？\n它们会使用低频声音。",
+            )
+            project_file = controller._current_project_file
+            self.assertIsNotNone(project_file)
+            payload = json.loads(project_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], 2)
+            self.assertEqual(payload["project_type"], "manuscript")
+            self.assertEqual(payload["stage"], "manuscript_ready")
+            self.assertEqual(payload["source_manuscript"], "source/manuscript.txt")
+            self.assertTrue((project_file.parent / "storyboard").is_dir())
+            self.assertTrue((project_file.parent / "assets").is_dir())
+
+            controller.updateSourceManuscript("新的完整文稿。")
+            reopened = self._controller(root)
+            reopened.openProject(str(project_file))
+            self.assertTrue(reopened.manuscriptProject)
+            self.assertEqual(reopened.sourceManuscriptText, "新的完整文稿。")
+            self.assertIn("纯文稿", reopened.recentProjects[0]["video"])
+
+    def test_import_manuscript_reads_file_and_empty_text_does_not_create_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            manuscript_file = root / "elephant.md"
+            manuscript_file.write_text("# 大象的语言\n\n它们如何交流？", encoding="utf-8")
+            controller = self._controller(root)
+
+            controller.createManuscriptProject("   ")
+            self.assertFalse(controller.hasProject)
+            self.assertIn("不能为空", controller.notice)
+
+            controller.importManuscript(str(manuscript_file))
+            self.assertTrue(controller.manuscriptProject)
+            self.assertEqual(
+                controller.sourceManuscriptText,
+                "# 大象的语言\n\n它们如何交流？",
+            )
+
+    def test_editing_source_manuscript_marks_existing_storyboard_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            controller = self._controller(root)
+            controller.createManuscriptProject("第一版文稿。")
+            project_file = controller._current_project_file
+            story = {
+                "narration": [{"id": 1, "text_en": "The first draft."}],
+            }
+            storyboard = {
+                "shot_segment_count": 1,
+                "recommended_asset_count": 1,
+                "coverage_percent": 0,
+                "beats": [{"id": 1, "text_en": "The first draft."}],
+            }
+            (project_file.parent / "script" / "story.json").write_text(
+                json.dumps(story), encoding="utf-8"
+            )
+            storyboard_file = project_file.parent / "storyboard" / "storyboard.json"
+            storyboard_file.write_text(json.dumps(storyboard), encoding="utf-8")
+            controller._set_story(story)
+            controller._load_storyboard(project_file)
+
+            controller.updateSourceManuscript("第二版文稿。")
+
+            self.assertTrue(controller.storyboardStale)
+            self.assertIn("需要重新规划", controller.storyStatus)
+            saved_storyboard = json.loads(storyboard_file.read_text(encoding="utf-8"))
+            self.assertTrue(saved_storyboard["stale"])
+
     def test_narrative_strategy_is_saved_and_restored_per_project(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
@@ -64,6 +144,39 @@ class AppControllerProjectNameTests(unittest.TestCase):
             second = self._controller(root)
             second.openProject(str(project_file))
             self.assertEqual(second.narrativeStrategy, "nature_observation")
+
+    def test_export_canvas_mode_is_saved_and_restored_per_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            project.mkdir(parents=True)
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "media": {"width": 1920, "height": 1080},
+                        "settings": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            controller = self._controller(root)
+            controller._current_project_file = project_file
+
+            controller.setExportFitMode("vertical_crop")
+
+            saved = json.loads(project_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved["settings"]["export"]["fit_mode"], "vertical_crop")
+            self.assertEqual(controller.subtitleCanvasWidth, 1080)
+            self.assertEqual(controller.subtitleCanvasHeight, 1920)
+            reopened = self._controller(root)
+            reopened.openProject(str(project_file))
+            self.assertEqual(reopened.exportFitMode, "vertical_crop")
+
+            reopened.setExportFitMode("original")
+            self.assertEqual(reopened.subtitleCanvasWidth, 1920)
+            self.assertEqual(reopened.subtitleCanvasHeight, 1080)
 
     def test_layered_analysis_is_automatic_and_not_user_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -140,7 +253,10 @@ class AppControllerProjectNameTests(unittest.TestCase):
                         "name": "long-demo",
                         "stage": "understood",
                         "source_video": "D:/source.mp4",
-                        "settings": {"content_mode": "speech"},
+                        "settings": {
+                            "content_mode": "speech",
+                            "series_split_enabled": True,
+                        },
                         "artifacts": {"events": "analysis/events.json"},
                     }
                 ),
@@ -205,6 +321,27 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertIn("自动拆分为 2 集", controller.storyStatus)
             self.assertTrue((root / "projects" / "long-demo-part-02" / "project.json").exists())
 
+    def test_series_split_is_opt_in_and_saved_per_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            project.mkdir(parents=True)
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps({"name": "demo", "settings": {}}), encoding="utf-8"
+            )
+            controller = self._controller(root)
+            controller.openProject(str(project_file))
+
+            self.assertFalse(controller.seriesSplitEnabled)
+            controller.setSeriesSplitEnabled(True)
+
+            saved = json.loads(project_file.read_text(encoding="utf-8"))
+            self.assertTrue(saved["settings"]["series_split_enabled"])
+            reopened = self._controller(root)
+            reopened.openProject(str(project_file))
+            self.assertTrue(reopened.seriesSplitEnabled)
+
     def test_story_planning_rate_inherits_median_measured_voice_rate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
@@ -241,6 +378,52 @@ class AppControllerProjectNameTests(unittest.TestCase):
             controller._config.setdefault("story", {})["planning_words_per_second"] = 1.45
 
             self.assertEqual(controller._planning_words_per_second(), 1.45)
+
+    def test_voice_calibration_updates_current_story_and_keeps_original_speed_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            (project / "script").mkdir(parents=True)
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "settings": {
+                            "voice": {
+                                "duration_sec": 150,
+                                "original_duration_sec": 180,
+                                "speed": 1.2,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            story = {
+                "word_count": 225,
+                "estimated_duration_sec": 140,
+                "narration": [
+                    {
+                        "id": 1,
+                        "text_en": "A measured sentence.",
+                        "word_count": 225,
+                        "estimated_duration_sec": 140,
+                    }
+                ],
+            }
+            story_file = project / "script" / "story.json"
+            story_file.write_text(json.dumps(story), encoding="utf-8")
+            controller = self._controller(root)
+            controller._current_project_file = project_file
+            controller._set_story(story)
+
+            controller._calibrate_story_with_voice(150, timing_source="processed_audio")
+
+            saved = json.loads(story_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved["estimated_duration_sec"], 150)
+            self.assertIn("实际配音 2:30", controller.storyStats)
+            self.assertAlmostEqual(controller._planning_words_per_second(), 1.25, delta=0.001)
 
     def test_fact_review_suggestion_replaces_line_and_marks_issue_applied(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

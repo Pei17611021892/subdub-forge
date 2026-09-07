@@ -9,6 +9,7 @@ output/
 logs/
 .joycode/
 .agents/
+.workbuddy/
 .idea/
 .vscode/
 .pytest_cache/

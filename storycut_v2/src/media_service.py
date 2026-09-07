@@ -100,8 +100,14 @@ def render_subtitle_effect_preview(
     if not ffmpeg:
         raise RuntimeError("未找到 FFmpeg，无法生成真实字幕底板预览")
 
-    width = max(2, int(video_width))
-    height = max(2, int(video_height))
+    export = config.get("export", {})
+    fit_mode = str(export.get("fit_mode", "original")).lower()
+    if fit_mode == "original":
+        width = max(2, int(video_width))
+        height = max(2, int(video_height))
+    else:
+        width = max(2, int(export.get("width", 1080) or 1080))
+        height = max(2, int(export.get("height", 1920) or 1920))
     mode = str(style.get("cleanupMode", "mask"))
     x_ratio = min(0.95, max(0.0, float(style.get("cleanupX", 0.08))))
     y_ratio = min(0.95, max(0.0, float(style.get("cleanupY", 0.82))))
@@ -123,16 +129,35 @@ def render_subtitle_effect_preview(
     w = min(width - x, base_w + padding * 2)
     h = min(height - y, base_h + padding * 2)
 
+    if fit_mode == "vertical_blur":
+        background_blur = max(
+            4, min(60, int(export.get("vertical_background_blur_radius", 24) or 24))
+        )
+        layout = (
+            "split=2[layoutbg][layoutfg];"
+            f"[layoutbg]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},gblur=sigma={background_blur}[layoutbgfit];"
+            f"[layoutfg]scale={width}:{height}:force_original_aspect_ratio=decrease[layoutfgfit];"
+            "[layoutbgfit][layoutfgfit]overlay=(W-w)/2:(H-h)/2[layout]"
+        )
+        effect_input = "[layout]"
+    elif fit_mode in {"crop", "vertical_crop"}:
+        layout = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}[layout]"
+        effect_input = "[layout]"
+    else:
+        layout = "null[layout]"
+        effect_input = "[layout]"
+
     if mode == "mask":
-        effect = f"drawbox=x={x}:y={y}:w={w}:h={h}:color=black@{opacity:.2f}:t=fill"
+        effect = f"{effect_input}drawbox=x={x}:y={y}:w={w}:h={h}:color=black@{opacity:.2f}:t=fill"
     elif mode == "delogo":
         dx, dy = max(2, x), max(2, y)
         dw = max(2, min(w, width - dx - 2))
         dh = max(2, min(h, height - dy - 2))
-        effect = f"delogo=x={dx}:y={dy}:w={dw}:h={dh}:show=0"
+        effect = f"{effect_input}delogo=x={dx}:y={dy}:w={dw}:h={dh}:show=0"
     else:
         effect = (
-            f"split=2[base][region];"
+            f"{effect_input}split=2[base][region];"
             f"[region]crop=w={w}:h={h}:x={x}:y={y},"
             f"boxblur=luma_radius={radius}:luma_power={power}[blur];"
             f"[base][blur]overlay=x={x}:y={y}"
@@ -141,7 +166,7 @@ def render_subtitle_effect_preview(
     command = [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
         "-ss", f"{max(0.0, timestamp):.3f}", "-i", str(video),
-        "-frames:v", "1", "-vf", f"{effect},scale=960:-2",
+        "-frames:v", "1", "-vf", f"{layout};{effect},scale=-2:960",
         "-q:v", "3", str(output),
     ]
     subprocess.run(command, capture_output=True, check=True)

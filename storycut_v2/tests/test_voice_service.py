@@ -12,6 +12,7 @@ from src.voice_service import (
     prepare_tts_srt,
     recommended_shorts_speed,
     scale_srt_timeline,
+    srt_to_plain_text,
 )
 
 
@@ -75,6 +76,17 @@ class VoiceServiceTests(unittest.TestCase):
             self.assertAlmostEqual(segments[1]["start"], 3.6)
             self.assertAlmostEqual(segments[1]["end"], 7.2)
             self.assertIn("00:00:07,200", destination.read_text(encoding="utf-8"))
+
+    def test_srt_to_plain_text_keeps_one_voice_unit_per_line(self) -> None:
+        content = (
+            "1\n00:00:00,000 --> 00:00:02,000\nFirst sentence.\n\n"
+            "2\n00:00:02,200 --> 00:00:05,000\nSecond line,\nwith a continuation.\n"
+        )
+
+        self.assertEqual(
+            srt_to_plain_text(content),
+            "First sentence.\nSecond line, with a continuation.\n",
+        )
 
 
 if __name__ == "__main__":

@@ -20,8 +20,13 @@ story:
   editor_model: ''
   base_url: ''
   temperature: 0.55
+  request_timeout_sec: 240
   planning_words_per_second: 1.45
   planning_safe_duration_sec: 174
+  # 留空为标准模式；可选 low/medium/high/xhigh。接口不支持时会自动降级。
+  reasoning_effort: ''
+  # 最终编辑、整篇重编和配音超时精简；留空继承上面的档位。
+  editor_reasoning_effort: ''
 
 fact_review:
   auto_after_story: false
@@ -40,7 +45,8 @@ layered_analysis:
   max_chunks: 10
 
 series:
-  auto_split: true
+  # 默认生成一条完整 Shorts；用户在第一步主动开启后才允许自动拆成多集。
+  auto_split: false
   candidate_min_source_duration_sec: 300
   candidate_min_event_count: 80
   candidate_min_transcript_units: 500
@@ -107,14 +113,20 @@ export:
   preset: veryfast
   audio_bitrate: 192k
   preserve_original_audio: false
+  # 是否把同步英文字幕烧录进成片；关闭后可交给外部剪辑软件处理。
+  burn_subtitles: true
   original_audio_mix_volume: 0.22
-  fit_mode: original
+  # Shorts 默认输出 9:16：主画面完整保留，模糊扩展背景填满画布。
+  # 可选 vertical_crop（铺满裁切）或 original（保持原比例）。
+  fit_mode: vertical_blur
+  vertical_background_blur_radius: 24
   cleanup_original_subtitles: false
   source_crop_height_ratio: 0.82
   subtitle_font: Arial
   subtitle_font_size: 48
   subtitle_margin_h: 72
-  subtitle_margin_v: 150
+  # 9:16 画布的默认安全位置，避开 Shorts 底部操作区。
+  subtitle_margin_v: 320
   subtitle_bold: true
   subtitle_italic: false
   subtitle_color: '#FFFFFFFF'

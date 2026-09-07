@@ -84,6 +84,9 @@ def propose_duration_revision(
     model = str(story_config.get("editor_model", "")).strip() or str(
         story_config.get("model", "gpt-4o-mini")
     )
+    reasoning_effort = str(
+        story_config.get("editor_reasoning_effort", "") or ""
+    ).strip() or str(story_config.get("reasoning_effort", "") or "").strip()
     temperature = max(0.0, min(1.0, float(story_config.get("temperature", 0.55))))
     client = OpenAI(api_key=str(api["api_key"]), base_url=str(api.get("base_url", "")).strip() or None)
 
@@ -105,6 +108,7 @@ def propose_duration_revision(
         temperature,
         str(api.get("base_url", "")).strip() or None,
         "配音超时精简",
+        reasoning_effort=reasoning_effort,
     )
     revised_raw = result.get("revised_story", result)
     if not isinstance(revised_raw, dict):
@@ -139,6 +143,7 @@ def propose_duration_revision(
             max(0.1, temperature - 0.1),
             str(api.get("base_url", "")).strip() or None,
             "配音超时平衡重编",
+            reasoning_effort=reasoning_effort,
         )
         retry_raw = retry.get("revised_story", retry)
         if not isinstance(retry_raw, dict):

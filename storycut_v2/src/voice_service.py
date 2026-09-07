@@ -89,6 +89,23 @@ def prepare_tts_srt(story_json: Path, output_dir: Path) -> dict[str, Any]:
     }
 
 
+def srt_to_plain_text(content: str) -> str:
+    """Convert SRT to one plain-text line per cue without timestamps or indices."""
+    lines: list[str] = []
+    for block in re.split(r"\r?\n\s*\r?\n", content.strip()):
+        cue_lines: list[str] = []
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if not line or "-->" in line:
+                continue
+            if not cue_lines and line.isdigit():
+                continue
+            cue_lines.append(line)
+        if cue_lines:
+            lines.append(" ".join(cue_lines))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def import_narration_audio(
     source_audio: Path,
     destination: Path,
