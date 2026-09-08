@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from .media_service import _resolve_tool
+from .media_service import _ffmpeg_supports_filter, _resolve_tool
 
 
 ProgressCallback = Callable[[float, str], None]
@@ -47,20 +47,88 @@ def render_rough_preview(
     cleanup_original_subtitles = bool(export_config.get("cleanup_original_subtitles", True))
     source_crop_ratio = min(1.0, max(0.6, float(export_config.get("source_crop_height_ratio", 0.82) or 0.82)))
     fit_mode = str(export_config.get("fit_mode", "original")).lower()
+    crop_fill_percent = _normalize_crop_fill_percent(
+        export_config.get("vertical_crop_fill_percent", 100)
+    )
     width = int(source_width or configured_width) if fit_mode == "original" else configured_width
     height = int(source_height or configured_height) if fit_mode == "original" else configured_height
     cleanup_mode = str(export_config.get("original_subtitle_cleanup_mode", "none")).lower()
     if cleanup_mode not in {"none", "mask", "blur", "delogo"}:
         cleanup_mode = "none"
+    if cleanup_mode == "delogo" and not _ffmpeg_supports_filter(ffmpeg, "delogo"):
+        cleanup_mode = "blur"
+    subtitle_background_enabled = bool(
+        export_config.get("subtitle_background_enabled", False)
+    )
+    subtitle_background_mode = str(
+        export_config.get("subtitle_background_mode", "mask")
+    ).lower()
+    if subtitle_background_mode not in {"mask", "blur", "delogo"}:
+        subtitle_background_mode = "mask"
+    if subtitle_background_mode == "delogo" and not _ffmpeg_supports_filter(ffmpeg, "delogo"):
+        subtitle_background_mode = "blur"
     filters: list[str] = []
     concat_inputs: list[str] = []
     original_audio_inputs: list[str] = []
+    source_aspect = max(0.01, float(source_width or width) / max(1.0, float(source_height or height)))
+    canvas_scale_x = min(3.0, max(0.25, float(export_config.get("canvas_scale_x", 1.0) or 1.0)))
+    canvas_scale_y = min(3.0, max(0.25, float(export_config.get("canvas_scale_y", 1.0) or 1.0)))
+    canvas_video_width = max(2, round(width * canvas_scale_x))
+    canvas_video_height = max(2, round((width / source_aspect) * canvas_scale_y))
+    canvas_video_width -= canvas_video_width % 2
+    canvas_video_height -= canvas_video_height % 2
     for index, clip in enumerate(clips):
         start = float(clip.get("source_start", 0))
         end = float(clip.get("source_end", 0))
         if end - start < 0.05:
             continue
         source_cleanup = f"crop=iw:ih*{source_crop_ratio:.3f}:0:0," if cleanup_original_subtitles else ""
+        if fit_mode == "crop_stretch":
+            fit_filter = (
+                f"scale={canvas_video_width}:{canvas_video_height},"
+                f"crop=w='min(iw\\,{width})':h='min(ih\\,{height})':"
+                "x='(iw-ow)/2':y='(ih-oh)/2',"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
+            )
+            filters.append(
+                f"[0:v]trim=start={start:.3f}:end={end:.3f},"
+                f"setpts=PTS-STARTPTS,fps={fps},{source_cleanup}{fit_filter},"
+                f"setsar=1,format=yuv420p[v{index}]"
+            )
+            concat_inputs.append(f"[v{index}]")
+            if preserve_original_audio:
+                filters.append(
+                    f"[0:a]atrim=start={start:.3f}:end={end:.3f},"
+                    f"asetpts=PTS-STARTPTS,aresample=48000[aorig{index}]"
+                )
+                original_audio_inputs.append(f"[aorig{index}]")
+            continue
+        if fit_mode in {"crop", "vertical_crop"} and crop_fill_percent < 100:
+            blur_radius = max(
+                4,
+                min(60, int(export_config.get("vertical_background_blur_radius", 24) or 24)),
+            )
+            foreground_height = _crop_region_height(height, crop_fill_percent)
+            filters.extend(
+                [
+                    f"[0:v]trim=start={start:.3f}:end={end:.3f},"
+                    f"setpts=PTS-STARTPTS,fps={fps},{source_cleanup}split=2[vbg{index}][vfg{index}]",
+                    f"[vbg{index}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                    f"crop={width}:{height},gblur=sigma={blur_radius}[vbgfit{index}]",
+                    f"[vfg{index}]scale={width}:{foreground_height}:force_original_aspect_ratio=increase,"
+                    f"crop={width}:{foreground_height}[vfgfit{index}]",
+                    f"[vbgfit{index}][vfgfit{index}]overlay=(W-w)/2:(H-h)/2,"
+                    f"setsar=1,format=yuv420p[v{index}]",
+                ]
+            )
+            concat_inputs.append(f"[v{index}]")
+            if preserve_original_audio:
+                filters.append(
+                    f"[0:a]atrim=start={start:.3f}:end={end:.3f},"
+                    f"asetpts=PTS-STARTPTS,aresample=48000[aorig{index}]"
+                )
+                original_audio_inputs.append(f"[aorig{index}]")
+            continue
         if fit_mode == "vertical_blur":
             blur_radius = max(
                 4,
@@ -115,7 +183,14 @@ def render_rough_preview(
     if valid_count == 0:
         raise ValueError("粗剪时间线中的镜头时长无效")
     has_subtitles = bool(subtitle_srt and subtitle_srt.exists())
-    needs_cleanup = cleanup_mode != "none"
+    use_subtitle_background_effect = bool(
+        has_subtitles
+        and subtitle_background_enabled
+        and subtitle_background_mode in {"blur", "delogo"}
+        and cleanup_mode == "none"
+    )
+    effect_mode = subtitle_background_mode if use_subtitle_background_effect else cleanup_mode
+    needs_cleanup = effect_mode != "none"
     concat_video_output = "[vjoined]" if needs_cleanup else ("[vbase]" if has_subtitles else "[vout]")
     filters.append(
         "".join(concat_inputs)
@@ -128,15 +203,16 @@ def render_rough_preview(
             + f"concat=n={valid_count}:v=0:a=1[aoriginal]"
         )
     if needs_cleanup:
-        cleanup_x_ratio = min(0.95, max(0.0, float(export_config.get("original_subtitle_cleanup_x", 0.08) or 0.08)))
-        cleanup_y_ratio = min(0.95, max(0.0, float(export_config.get("original_subtitle_cleanup_y", 0.82) or 0.82)))
-        cleanup_w_ratio = min(1.0, max(0.02, float(export_config.get("original_subtitle_cleanup_width", 0.84) or 0.84)))
-        cleanup_h_ratio = min(0.4, max(0.02, float(export_config.get("original_subtitle_cleanup_height", 0.14) or 0.14)))
-        cleanup_opacity = min(1.0, max(0.0, float(export_config.get("original_subtitle_cleanup_opacity", 0.78) or 0.78)))
-        blur_radius = max(1, min(40, int(export_config.get("original_subtitle_blur_radius", 12) or 12)))
-        blur_power = max(1, min(4, int(export_config.get("original_subtitle_blur_power", 2) or 2)))
-        region_padding = max(0, min(80, int(export_config.get("original_subtitle_region_padding", 4) or 4)))
-        feather = max(0, min(60, int(export_config.get("original_subtitle_feather", 12) or 12)))
+        prefix = "subtitle_background" if use_subtitle_background_effect else "original_subtitle_cleanup"
+        cleanup_x_ratio = min(0.95, max(0.0, float(export_config.get(f"{prefix}_x", 0.08) or 0.08)))
+        cleanup_y_ratio = min(0.95, max(0.0, float(export_config.get(f"{prefix}_y", 0.82) or 0.82)))
+        cleanup_w_ratio = min(1.0, max(0.02, float(export_config.get(f"{prefix}_width", 0.84) or 0.84)))
+        cleanup_h_ratio = min(0.4, max(0.02, float(export_config.get(f"{prefix}_height", 0.14) or 0.14)))
+        cleanup_opacity = min(1.0, max(0.0, float(export_config.get(f"{prefix}_opacity", 0.78) or 0.78)))
+        blur_radius = max(1, min(40, int(export_config.get(f"{prefix}_blur_radius", 12) or 12)))
+        blur_power = max(1, min(4, int(export_config.get(f"{prefix}_blur_power", 2) or 2)))
+        region_padding = 0 if use_subtitle_background_effect else max(0, min(80, int(export_config.get("original_subtitle_region_padding", 4) or 4)))
+        feather = 0 if use_subtitle_background_effect else max(0, min(60, int(export_config.get("original_subtitle_feather", 12) or 12)))
         padding = min(120, region_padding + feather)
 
         base_x = min(width - 4, round(width * cleanup_x_ratio))
@@ -148,12 +224,12 @@ def render_rough_preview(
         cleanup_w = min(width - cleanup_x, base_w + padding * 2)
         cleanup_h = min(height - cleanup_y, base_h + padding * 2)
         cleanup_output = "[vbase]" if has_subtitles else "[vout]"
-        if cleanup_mode == "mask":
+        if effect_mode == "mask":
             filters.append(
                 f"[vjoined]drawbox=x={cleanup_x}:y={cleanup_y}:w={cleanup_w}:h={cleanup_h}:"
                 f"color=black@{cleanup_opacity:.2f}:t=fill{cleanup_output}"
             )
-        elif cleanup_mode == "delogo":
+        elif effect_mode == "delogo":
             # Delogo interpolates inward from surrounding pixels and cannot touch
             # the frame edge, matching the proven implementation in the old tool.
             delogo_x = max(2, cleanup_x)
@@ -169,7 +245,7 @@ def render_rough_preview(
                 [
                     "[vjoined]split=2[cleanbase][cleanregion]",
                     f"[cleanregion]crop=w={cleanup_w}:h={cleanup_h}:x={cleanup_x}:y={cleanup_y},"
-                    f"boxblur=luma_radius={blur_radius}:luma_power={blur_power}[cleanblur]",
+                    f"gblur=sigma={blur_radius}:steps={blur_power}[cleanblur]",
                     f"[cleanbase][cleanblur]overlay=x={cleanup_x}:y={cleanup_y}{cleanup_output}",
                 ]
             )
@@ -296,11 +372,28 @@ def render_rough_preview(
         "height": height,
         "fit_mode": fit_mode,
         "subtitles_burned": has_subtitles,
-        "original_subtitles_cleaned": cleanup_original_subtitles or needs_cleanup,
+        "original_subtitles_cleaned": cleanup_original_subtitles or cleanup_mode != "none",
         "original_subtitle_cleanup_mode": cleanup_mode,
+        "subtitle_background_mode": (
+            subtitle_background_mode if subtitle_background_enabled else "none"
+        ),
         "ffmpeg_log": str(ffmpeg_log),
         "filter_log": str(filter_log),
     }
+
+
+def _normalize_crop_fill_percent(value: object) -> int:
+    try:
+        numeric = int(round(float(value)))
+    except (TypeError, ValueError):
+        numeric = 100
+    return min((50, 60, 70, 80, 90, 100), key=lambda option: abs(option - numeric))
+
+
+def _crop_region_height(canvas_height: int, fill_percent: object) -> int:
+    percent = _normalize_crop_fill_percent(fill_percent)
+    height = max(2, int(round(max(2, canvas_height) * percent / 100.0)))
+    return height if height % 2 == 0 else height - 1
 
 
 def _escape_subtitle_path(path: Path) -> str:
@@ -345,7 +438,8 @@ def _build_shorts_ass(
     configured_outline_color = _rgba_to_ass(
         str(config.get("subtitle_outline_color", "#000000FF"))
     )
-    background_enabled = bool(config.get("subtitle_background_enabled", True))
+    background_mode = str(config.get("subtitle_background_mode", "mask")).lower()
+    background_enabled = bool(config.get("subtitle_background_enabled", True)) and background_mode == "mask"
     background_opacity = min(0.95, max(0.0, float(config.get("subtitle_background_opacity", 0.62) or 0.62)))
     outline_width = int(config.get("subtitle_outline_width", 3) or 3)
     box_padding = int(config.get("subtitle_box_padding", 12) or 12)

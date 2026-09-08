@@ -116,9 +116,13 @@ export:
   # 是否把同步英文字幕烧录进成片；关闭后可交给外部剪辑软件处理。
   burn_subtitles: true
   original_audio_mix_volume: 0.22
-  # Shorts 默认输出 9:16：主画面完整保留，模糊扩展背景填满画布。
-  # 可选 vertical_crop（铺满裁切）或 original（保持原比例）。
-  fit_mode: vertical_blur
+  # crop_stretch 可选择画布比例并居中缩放/拉伸；另可选 vertical_blur 或 original。
+  fit_mode: crop_stretch
+  canvas_aspect_ratio: fit
+  canvas_fixed_scale: true
+  canvas_scale_x: 1.0
+  canvas_scale_y: 1.0
+  vertical_crop_fill_percent: 100
   vertical_background_blur_radius: 24
   cleanup_original_subtitles: false
   source_crop_height_ratio: 0.82
@@ -135,6 +139,8 @@ export:
   subtitle_spacing: 0
   subtitle_animation: fade
   subtitle_background_enabled: false
+  # 文字背景类型：mask（黑色弹框）、blur（局部模糊）、delogo（周边像素修复）。
+  subtitle_background_mode: mask
   subtitle_background_opacity: 0.62
   subtitle_outline_width: 3
   subtitle_box_padding: 12

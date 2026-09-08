@@ -62,6 +62,23 @@ ApplicationWindow {
         }
     }
 
+    component SubstepBadge: Rectangle {
+        id: substepBadge
+        property string stepNumber: "1"
+        implicitWidth: 32
+        implicitHeight: 32
+        radius: 10
+        color: "#30224d"
+        border.color: "#66469b"
+        Text {
+            anchors.centerIn: parent
+            text: substepBadge.stepNumber
+            color: "#d4c2ff"
+            font.pixelSize: 12
+            font.bold: true
+        }
+    }
+
     component LoadingRing: Item {
         id: loadingRing
         property color ringColor: accentLight
@@ -266,6 +283,31 @@ ApplicationWindow {
         modal: true
         padding: 22
         closePolicy: Popup.CloseOnEscape
+
+        Timer {
+            id: subtitleBackgroundPreviewTimer
+            interval: 450
+            repeat: false
+            onTriggered: {
+                if (!subtitleStyleDialog.opened || subtitleStyleDialog.editMode !== "style")
+                    return
+                if (appController.subtitleEffectPreviewBusy) {
+                    restart()
+                    return
+                }
+                appController.generateSubtitleEffectPreview()
+            }
+        }
+        Connections {
+            target: appController
+            function onSubtitleStyleChanged() {
+                if (subtitleStyleDialog.opened
+                        && subtitleStyleDialog.editMode === "style"
+                        && appController.subtitleStyle.backgroundEnabled
+                        && appController.subtitleStyle.backgroundMode !== "mask")
+                    subtitleBackgroundPreviewTimer.restart()
+            }
+        }
         background: Rectangle { radius: 16; color: "#12141b"; border.color: "#3a3f4c" }
         contentItem: ColumnLayout {
             spacing: 12
@@ -1062,6 +1104,52 @@ ApplicationWindow {
         defaultSuffix: exportFormat
         nameFilters: exportFormat === "txt" ? ["纯文本 (*.txt)"] : ["SRT 字幕 (*.srt)"]
         onAccepted: appController.saveTtsSrt(selectedFile.toString(), exportFormat)
+    }
+
+    FileDialog {
+        id: saveFinalVideoDialog
+        title: "导出最终成片 · 选择保存位置"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "mp4"
+        nameFilters: ["MP4 视频 (*.mp4)"]
+        onAccepted: appController.saveFinalVideo(selectedFile.toString())
+    }
+
+    Dialog {
+        id: deleteSubtitleCleanedVideoDialog
+        width: 470
+        anchors.centerIn: parent
+        modal: true
+        padding: 22
+        closePolicy: Popup.CloseOnEscape
+        background: Rectangle { radius: 16; color: "#14161d"; border.color: "#53323a" }
+        contentItem: ColumnLayout {
+            spacing: 12
+            Text { text: "删除去字幕中间视频？"; color: textMain; font.pixelSize: 18; font.bold: true }
+            Text {
+                Layout.fillWidth: true
+                text: "将删除当前项目内生成的 source_without_subtitles.mp4。之后字幕样式预览和成片合成会重新使用原视频。"
+                color: textMuted; font.pixelSize: 11; wrapMode: Text.WordWrap
+            }
+            Text { text: "此操作无法撤销，但可以重新设置遮罩并再次生成。"; color: "#fca5a5"; font.pixelSize: 10 }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                GhostButton { text: "取消"; onClicked: deleteSubtitleCleanedVideoDialog.close() }
+                Button {
+                    id: confirmDeleteCleanedVideoButton
+                    text: "确认删除"
+                    implicitHeight: 40
+                    leftPadding: 17; rightPadding: 17
+                    contentItem: Text { text: confirmDeleteCleanedVideoButton.text; color: "white"; font.pixelSize: 12; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                    background: Rectangle { radius: 9; color: confirmDeleteCleanedVideoButton.down ? "#991b1b" : confirmDeleteCleanedVideoButton.hovered ? "#dc2626" : "#b91c1c" }
+                    onClicked: {
+                        appController.deleteSubtitleCleanedVideo()
+                        deleteSubtitleCleanedVideoDialog.close()
+                    }
+                }
+            }
+        }
     }
 
     Dialog {
@@ -2178,8 +2266,211 @@ ApplicationWindow {
     }
 
     Dialog {
+        id: canvasTransformDialog
+        objectName: "canvasTransformDialog"
+        width: Math.min(window.width - 80, 920)
+        height: Math.min(window.height - 60, 680)
+        anchors.centerIn: parent
+        modal: true
+        padding: 0
+        closePolicy: Popup.CloseOnEscape
+
+        background: Rectangle {
+            radius: 18
+            color: "#111319"
+            border.color: "#343843"
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 22
+            spacing: 14
+
+            RowLayout {
+                Layout.fillWidth: true
+                ColumnLayout {
+                    Layout.fillWidth: true; spacing: 3
+                    Text { text: "裁剪拉伸"; color: textMain; font.pixelSize: 22; font.bold: true }
+                    Text { text: "设置成片盒子比例，拖动视频四角调整大小；视频始终保持居中。"; color: textMuted; font.pixelSize: 11 }
+                }
+                GhostButton { text: "复位"; onClicked: appController.resetCanvasTransform() }
+                GhostButton { text: "完成"; onClicked: canvasTransformDialog.close() }
+            }
+
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#282c35" }
+
+            RowLayout {
+                Layout.fillWidth: true; spacing: 8
+                Text { text: "盒子宽高比"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 78 }
+                Repeater {
+                    model: [
+                        { key: "fit", label: "适应（原片）" }, { key: "16:9", label: "16:9" },
+                        { key: "4:3", label: "4:3" }, { key: "1:1", label: "1:1" },
+                        { key: "3:4", label: "3:4" }, { key: "9:16", label: "9:16" }
+                    ]
+                    delegate: Rectangle {
+                        required property var modelData
+                        Layout.preferredWidth: modelData.key === "fit" ? 102 : 58
+                        Layout.preferredHeight: 32
+                        radius: 8
+                        color: appController.canvasAspectRatio === modelData.key ? "#50308a" : "#20232c"
+                        border.color: appController.canvasAspectRatio === modelData.key ? accent : "#383d49"
+                        Text { anchors.centerIn: parent; text: modelData.label; color: appController.canvasAspectRatio === modelData.key ? "white" : textMuted; font.pixelSize: 10; font.bold: true }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: appController.setCanvasAspectRatio(modelData.key) }
+                    }
+                }
+                Item { Layout.fillWidth: true }
+                Text { text: "固定比例拉伸"; color: textMain; font.pixelSize: 11 }
+                ModernSwitch { checked: appController.canvasFixedScale; onToggled: appController.setCanvasFixedScale(checked) }
+            }
+
+            Rectangle {
+                id: canvasEditorPanel
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 13
+                color: "#1a1c22"
+                border.color: "#2e323d"
+
+                Item {
+                    id: canvasEditorArea
+                    anchors.fill: parent
+                    anchors.margins: 20
+
+                    Rectangle {
+                        id: canvasBox
+                        property real ratio: Math.max(0.1, appController.subtitleCanvasWidth / Math.max(1, appController.subtitleCanvasHeight))
+                        property real availableWidth: canvasEditorArea.width * 0.82
+                        property real availableHeight: canvasEditorArea.height * 0.82
+                        property real areaRatio: availableWidth / Math.max(1, availableHeight)
+                        width: ratio >= areaRatio ? availableWidth : availableHeight * ratio
+                        height: ratio >= areaRatio ? availableWidth / ratio : availableHeight
+                        anchors.centerIn: parent
+                        color: "#030407"
+                        border.width: 2
+                        border.color: "#7f8491"
+                        clip: true
+
+                        Item {
+                            id: canvasVideoLayer
+                            property real sourceAspect: Math.max(0.1, appController.sourceVideoWidth / Math.max(1, appController.sourceVideoHeight))
+                            property real baseWidth: canvasBox.width
+                            property real baseHeight: baseWidth / sourceAspect
+                            width: baseWidth * appController.canvasScaleX
+                            height: baseHeight * appController.canvasScaleY
+                            anchors.centerIn: parent
+
+                            Image {
+                                anchors.fill: parent
+                                source: appController.subtitleCleanedPreviewUrl !== ""
+                                        ? appController.subtitleCleanedPreviewUrl : appController.coverUrl
+                                fillMode: Image.Stretch
+                                asynchronous: true
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        id: canvasSelectionFrame
+                        property real sourceAspect: Math.max(0.1, appController.sourceVideoWidth / Math.max(1, appController.sourceVideoHeight))
+                        property real baseWidth: canvasBox.width
+                        property real baseHeight: baseWidth / sourceAspect
+                        property real heightFillScale: canvasBox.height / Math.max(1, baseHeight)
+                        property real snapDistance: 24
+                        width: baseWidth * appController.canvasScaleX
+                        height: baseHeight * appController.canvasScaleY
+                        x: canvasBox.x + (canvasBox.width - width) / 2
+                        y: canvasBox.y + (canvasBox.height - height) / 2
+                        color: "transparent"
+                        border.width: 2
+                        border.color: "#f4f4f5"
+                        z: 5
+
+                        function snapHorizontalScale(value) {
+                            var edgeDistance = Math.abs(value - 1.0) * baseWidth / 2
+                            return edgeDistance <= snapDistance ? 1.0 : value
+                        }
+
+                        function snapVerticalScale(value) {
+                            var edgeDistance = Math.abs(value - heightFillScale) * baseHeight / 2
+                            return edgeDistance <= snapDistance
+                                   ? heightFillScale : value
+                        }
+
+                        function snapUniformScale(value) {
+                            var widthDistance = Math.abs(value - 1.0) * baseWidth / 2
+                            var heightDistance = Math.abs(value - heightFillScale) * baseHeight / 2
+                            if (widthDistance <= snapDistance && widthDistance <= heightDistance)
+                                return 1.0
+                            if (heightDistance <= snapDistance)
+                                return heightFillScale
+                            return value
+                        }
+
+                        Repeater {
+                            model: [
+                                { sx: -1, sy: -1 }, { sx: 1, sy: -1 },
+                                { sx: -1, sy: 1 }, { sx: 1, sy: 1 }
+                            ]
+                            delegate: Rectangle {
+                                required property var modelData
+                                width: 10; height: 10; radius: 5
+                                color: "#f4f4f5"; border.color: "#737986"
+                                x: modelData.sx < 0 ? -width / 2 : canvasSelectionFrame.width - width / 2
+                                y: modelData.sy < 0 ? -height / 2 : canvasSelectionFrame.height - height / 2
+                                z: 6
+                                MouseArea {
+                                    anchors.fill: parent
+                                    anchors.margins: -9
+                                    cursorShape: modelData.sx === modelData.sy
+                                                 ? Qt.SizeFDiagCursor : Qt.SizeBDiagCursor
+                                    property point pressedAt
+                                    property real startScaleX: 1
+                                    property real startScaleY: 1
+                                    onPressed: function(mouse) {
+                                        pressedAt = mapToItem(canvasEditorArea, mouse.x, mouse.y)
+                                        startScaleX = appController.canvasScaleX
+                                        startScaleY = appController.canvasScaleY
+                                    }
+                                    onPositionChanged: function(mouse) {
+                                        if (!pressed)
+                                            return
+                                        var current = mapToItem(canvasEditorArea, mouse.x, mouse.y)
+                                        var deltaX = (current.x - pressedAt.x) * modelData.sx * 2 / Math.max(1, canvasSelectionFrame.baseWidth)
+                                        var deltaY = (current.y - pressedAt.y) * modelData.sy * 2 / Math.max(1, canvasSelectionFrame.baseHeight)
+                                        if (appController.canvasFixedScale) {
+                                            var delta = Math.abs(deltaX) >= Math.abs(deltaY) ? deltaX : deltaY
+                                            var uniformScale = canvasSelectionFrame.snapUniformScale(startScaleX + delta)
+                                            appController.setCanvasScale(uniformScale, uniformScale)
+                                        } else {
+                                            var horizontalScale = canvasSelectionFrame.snapHorizontalScale(startScaleX + deltaX)
+                                            var verticalScale = canvasSelectionFrame.snapVerticalScale(startScaleY + deltaY)
+                                            appController.setCanvasScale(horizontalScale, verticalScale)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true; spacing: 10
+                Text { text: "宽度"; color: textMuted; font.pixelSize: 10 }
+                Slider { Layout.fillWidth: true; from: 0.25; to: 10; stepSize: 0.01; value: appController.canvasScaleX; onMoved: appController.setCanvasScale(value, appController.canvasScaleY) }
+                Text { text: Math.round(appController.canvasScaleX * 100) + "%"; color: accentLight; font.pixelSize: 10; Layout.preferredWidth: 42 }
+                Text { text: "高度"; color: textMuted; font.pixelSize: 10 }
+                Slider { Layout.fillWidth: true; from: 0.25; to: 10; stepSize: 0.01; value: appController.canvasScaleY; onMoved: appController.setCanvasScale(appController.canvasScaleX, value) }
+                Text { text: Math.round(appController.canvasScaleY * 100) + "%"; color: accentLight; font.pixelSize: 10; Layout.preferredWidth: 42 }
+            }
+        }
+    }
+
+    Dialog {
         id: subtitleStyleDialog
         objectName: "subtitleStyleDialog"
+        property string editMode: "style"
         width: Math.min(window.width - 70, 1040)
         height: Math.min(window.height - 50, 680)
         anchors.centerIn: parent
@@ -2205,13 +2496,18 @@ ApplicationWindow {
                         width: 46; height: 46; radius: 13
                         color: "#30254b"
                         border.color: "#614a8f"
-                        Text { anchors.centerIn: parent; text: "Aa"; color: "#c4b5fd"; font.pixelSize: 17; font.bold: true }
+                        Text { anchors.centerIn: parent; text: subtitleStyleDialog.editMode === "cleanup" ? "▤" : "Aa"; color: "#c4b5fd"; font.pixelSize: 17; font.bold: true }
                     }
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 3
-                        Text { text: "字幕样式与位置"; color: textMain; font.pixelSize: 22; font.bold: true }
-                        Text { text: "用同一块字幕底板遮住原字幕并承载英文字幕，所有设置自动保存到当前项目"; color: textMuted; font.pixelSize: 11 }
+                        Text { text: subtitleStyleDialog.editMode === "cleanup" ? "清除原视频字幕" : "字幕样式与位置"; color: textMain; font.pixelSize: 22; font.bold: true }
+                        Text {
+                            text: subtitleStyleDialog.editMode === "cleanup"
+                                  ? "设置原视频字幕的清除类型和范围；这里不会添加英文字幕"
+                                  : "设置英文字幕字体、位置和底板，所有修改自动保存到当前项目"
+                            color: textMuted; font.pixelSize: 11
+                        }
                     }
                     Rectangle {
                         width: 74; height: 28; radius: 14
@@ -2238,10 +2534,20 @@ ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true
                         Text { text: "实时预览"; color: textMain; font.pixelSize: 14; font.bold: true; Layout.fillWidth: true }
+                        Text {
+                            visible: subtitleStyleDialog.editMode === "style"
+                            text: "预览源：" + appController.subtitleStylePreviewSourceName
+                            color: appController.subtitleCleanedVideoReady ? "#63d39a" : textMuted
+                            font.pixelSize: 9
+                            elide: Text.ElideMiddle
+                            Layout.maximumWidth: 210
+                        }
                         GhostButton {
                             text: appController.subtitleEffectPreviewBusy ? "生成中…" : "查看真实预览"
                             enabled: !appController.subtitleEffectPreviewBusy
-                            onClicked: appController.generateSubtitleEffectPreview()
+                            onClicked: subtitleStyleDialog.editMode === "cleanup"
+                                       ? appController.generateSubtitleCleanupPreview()
+                                       : appController.generateSubtitleEffectPreview()
                         }
                         Text { text: appController.resolutionText; color: textMuted; font.pixelSize: 10 }
                     }
@@ -2255,8 +2561,9 @@ ApplicationWindow {
                         clip: true
                         Item {
                             id: subtitleVideoViewport
-                            property real sourceAspect: Math.max(1, appController.subtitleCanvasWidth)
-                                                        / Math.max(1, appController.subtitleCanvasHeight)
+                            property real sourceAspect: subtitleStyleDialog.editMode === "cleanup"
+                                                        ? Math.max(1, appController.sourceVideoWidth) / Math.max(1, appController.sourceVideoHeight)
+                                                        : Math.max(1, appController.subtitleCanvasWidth) / Math.max(1, appController.subtitleCanvasHeight)
                             property real frameAspect: subtitlePreviewFrame.width
                                                        / Math.max(1, subtitlePreviewFrame.height)
                             width: sourceAspect >= frameAspect
@@ -2270,19 +2577,53 @@ ApplicationWindow {
 
                             Image {
                                 anchors.fill: parent
-                                source: appController.subtitleEffectPreviewUrl
+                                source: appController.subtitleEffectPreviewReady
+                                        ? appController.subtitleEffectPreviewUrl
+                                        : subtitleStyleDialog.editMode === "cleanup"
+                                          ? appController.coverUrl
+                                          : appController.subtitleCleanedVideoReady
+                                            ? appController.subtitleCleanedPreviewUrl
+                                            : appController.coverUrl
                                 fillMode: Image.PreserveAspectCrop
                                 asynchronous: true
-                                visible: appController.exportFitMode === "vertical_blur"
+                                visible: subtitleStyleDialog.editMode !== "cleanup"
+                                         && (appController.exportFitMode === "vertical_blur"
+                                          || (appController.exportFitMode === "vertical_crop"
+                                              && appController.verticalCropFillPercent < 100))
                                          && !appController.subtitleEffectPreviewReady
                                 opacity: 0.38
                             }
                             Image {
                                 id: subtitleEffectImage
-                                anchors.fill: parent
-                                source: appController.subtitleEffectPreviewUrl
+                                anchors.centerIn: parent
+                                width: subtitleStyleDialog.editMode !== "cleanup"
+                                       && !appController.subtitleEffectPreviewReady
+                                       && appController.exportFitMode === "crop_stretch"
+                                       ? parent.width * appController.canvasScaleX
+                                       : parent.width
+                                height: subtitleStyleDialog.editMode !== "cleanup"
+                                        && !appController.subtitleEffectPreviewReady
+                                        && appController.exportFitMode === "crop_stretch"
+                                        ? parent.width
+                                          / Math.max(0.1, appController.sourceVideoWidth / Math.max(1, appController.sourceVideoHeight))
+                                          * appController.canvasScaleY
+                                        : subtitleStyleDialog.editMode !== "cleanup"
+                                        && !appController.subtitleEffectPreviewReady
+                                        && appController.exportFitMode === "vertical_crop"
+                                        && appController.verticalCropFillPercent < 100
+                                        ? parent.height * appController.verticalCropFillPercent / 100
+                                        : parent.height
+                                source: appController.subtitleEffectPreviewReady
+                                        ? appController.subtitleEffectPreviewUrl
+                                        : subtitleStyleDialog.editMode === "cleanup"
+                                          ? appController.coverUrl
+                                          : appController.subtitleCleanedVideoReady
+                                            ? appController.subtitleCleanedPreviewUrl
+                                            : appController.coverUrl
                                 fillMode: appController.subtitleEffectPreviewReady
                                           ? Image.Stretch
+                                          : subtitleStyleDialog.editMode === "cleanup"
+                                            ? Image.PreserveAspectCrop
                                           : appController.exportFitMode === "vertical_blur"
                                             ? Image.PreserveAspectFit
                                             : appController.exportFitMode === "vertical_crop"
@@ -2291,7 +2632,8 @@ ApplicationWindow {
                                 asynchronous: true
                             }
                             Rectangle {
-                                visible: appController.subtitleStyle.cleanupMode !== "none"
+                                visible: subtitleStyleDialog.editMode === "cleanup"
+                                         && appController.subtitleStyle.cleanupMode !== "none"
                                 x: parent.width * appController.subtitleStyle.cleanupX
                                 width: parent.width * appController.subtitleStyle.cleanupWidth
                                 y: parent.height * appController.subtitleStyle.cleanupY
@@ -2360,22 +2702,30 @@ ApplicationWindow {
                             }
                             Rectangle {
                                 id: subtitlePreviewBubble
+                                visible: subtitleStyleDialog.editMode === "style"
+                                property real previewPadding: Math.max(
+                                                                  5,
+                                                                  appController.subtitleStyle.boxPadding
+                                                                  / Math.max(1, appController.subtitleCanvasHeight)
+                                                                  * subtitleVideoViewport.height)
                                 width: parent.width * Math.max(
                                            0.2,
                                            1 - appController.subtitleStyle.horizontalMargin * 2
                                                / Math.max(1, appController.subtitleCanvasWidth))
-                                height: subtitlePreviewLabel.implicitHeight + 18
+                                height: subtitlePreviewLabel.implicitHeight + previewPadding * 2
                                 x: (parent.width - width) / 2
                                 y: Math.max(8, parent.height - height
                                             - appController.subtitleStyle.bottomMargin
                                               / Math.max(1, appController.subtitleCanvasHeight) * parent.height)
-                                radius: appController.subtitleStyle.backgroundEnabled ? 7 : 0
+                                radius: appController.subtitleStyle.backgroundEnabled
+                                        && appController.subtitleStyle.backgroundMode === "mask" ? 7 : 0
                                 color: appController.subtitleStyle.backgroundEnabled
+                                       && appController.subtitleStyle.backgroundMode === "mask"
                                        ? Qt.rgba(0, 0, 0, appController.subtitleStyle.backgroundOpacity)
                                        : "transparent"
                                 Text {
                                     id: subtitlePreviewLabel
-                                    width: parent.width - 24
+                                    width: parent.width - subtitlePreviewBubble.previewPadding * 2
                                     anchors.centerIn: parent
                                     text: appController.subtitlePreviewText
                                     color: appController.subtitleStyle.textColor.substring(0, 7)
@@ -2419,7 +2769,7 @@ ApplicationWindow {
                             Text { text: "提示"; color: accentLight; font.pixelSize: 11; font.bold: true }
                             Text {
                                 Layout.fillWidth: true
-                                text: "预览按最终成片画布计算。竖屏完整画面模式不会裁切主体；可拖动底板调整字幕安全位置。"
+                                text: "预览按最终成片画布计算。裁剪画面可设置占画布高度；可拖动底板调整字幕安全位置。"
                                 color: textMuted
                                 font.pixelSize: 10
                                 wrapMode: Text.WordWrap
@@ -2437,16 +2787,75 @@ ApplicationWindow {
                     color: "#171920"
                     border.color: "#292d38"
                     ScrollView {
+                        anchors.fill: parent
+                        anchors.margins: 16
+                        clip: true
+                        contentWidth: availableWidth
+                        visible: subtitleStyleDialog.editMode === "cleanup"
+                        ColumnLayout {
+                            width: parent.width
+                            spacing: 13
+                            Text { text: "字幕遮罩类型"; color: textMain; font.pixelSize: 13; font.bold: true }
+                            Text { Layout.fillWidth: true; text: "这里只处理原视频字幕，不会生成或显示英文字幕。拖动画面中的选框可快速调整位置。"; color: textMuted; font.pixelSize: 10; wrapMode: Text.WordWrap }
+                            ComboBox {
+                                Layout.fillWidth: true
+                                model: ["黑色遮罩（最彻底）", "局部柔化 / 模糊", "Delogo 周边像素修复"]
+                                currentIndex: appController.subtitleStyle.cleanupMode === "blur" ? 1 : appController.subtitleStyle.cleanupMode === "delogo" ? 2 : 0
+                                onActivated: appController.updateSubtitleStyle("cleanupMode", currentIndex === 1 ? "blur" : currentIndex === 2 ? "delogo" : "mask")
+                            }
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2b2f39" }
+                            Text { text: "遮罩区域"; color: textMain; font.pixelSize: 13; font.bold: true }
+                            RowLayout { Layout.fillWidth: true
+                                Text { text: "左侧位置"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 90 }
+                                Slider { Layout.fillWidth: true; from: 0; to: 0.8; stepSize: 0.005; value: appController.subtitleStyle.cleanupX; onMoved: appController.updateSubtitleStyle("cleanupX", value) }
+                                PreciseSpinBox { from: 0; to: 160; divisor: 2; suffix: "%"; value: Math.round(appController.subtitleStyle.cleanupX * 200); onValueModified: appController.updateSubtitleStyle("cleanupX", value / 200) }
+                            }
+                            RowLayout { Layout.fillWidth: true
+                                Text { text: "顶部位置"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 90 }
+                                Slider { Layout.fillWidth: true; from: 0; to: 0.94; stepSize: 0.005; value: appController.subtitleStyle.cleanupY; onMoved: appController.updateSubtitleStyle("cleanupY", value) }
+                                PreciseSpinBox { from: 0; to: 188; divisor: 2; suffix: "%"; value: Math.round(appController.subtitleStyle.cleanupY * 200); onValueModified: appController.updateSubtitleStyle("cleanupY", value / 200) }
+                            }
+                            RowLayout { Layout.fillWidth: true
+                                Text { text: "区域宽度"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 90 }
+                                Slider { Layout.fillWidth: true; from: 0.1; to: 1; stepSize: 0.005; value: appController.subtitleStyle.cleanupWidth; onMoved: appController.updateSubtitleStyle("cleanupWidth", value) }
+                                PreciseSpinBox { from: 20; to: 200; divisor: 2; suffix: "%"; value: Math.round(appController.subtitleStyle.cleanupWidth * 200); onValueModified: appController.updateSubtitleStyle("cleanupWidth", value / 200) }
+                            }
+                            RowLayout { Layout.fillWidth: true
+                                Text { text: "区域高度"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 90 }
+                                Slider { Layout.fillWidth: true; from: 0.02; to: 0.4; stepSize: 0.005; value: appController.subtitleStyle.cleanupHeight; onMoved: appController.updateSubtitleStyle("cleanupHeight", value) }
+                                PreciseSpinBox { from: 4; to: 80; divisor: 2; suffix: "%"; value: Math.round(appController.subtitleStyle.cleanupHeight * 200); onValueModified: appController.updateSubtitleStyle("cleanupHeight", value / 200) }
+                            }
+                            RowLayout { Layout.fillWidth: true; visible: appController.subtitleStyle.cleanupMode === "mask"
+                                Text { text: "遮罩浓度"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 90 }
+                                Slider { Layout.fillWidth: true; from: 0.25; to: 1; stepSize: 0.01; value: appController.subtitleStyle.cleanupOpacity; onMoved: appController.updateSubtitleStyle("cleanupOpacity", value) }
+                                PreciseSpinBox { from: 25; to: 100; suffix: "%"; value: Math.round(appController.subtitleStyle.cleanupOpacity * 100); onValueModified: appController.updateSubtitleStyle("cleanupOpacity", value / 100) }
+                            }
+                            RowLayout { Layout.fillWidth: true; visible: appController.subtitleStyle.cleanupMode === "blur"
+                                Text { text: "模糊强度"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 90 }
+                                Slider { Layout.fillWidth: true; from: 1; to: 40; stepSize: 1; value: appController.subtitleStyle.blurRadius; onMoved: appController.updateSubtitleStyle("blurRadius", Math.round(value)) }
+                                PreciseSpinBox { from: 1; to: 40; value: appController.subtitleStyle.blurRadius; onValueModified: appController.updateSubtitleStyle("blurRadius", value) }
+                            }
+                            RowLayout { Layout.fillWidth: true; visible: appController.subtitleStyle.cleanupMode === "blur" || appController.subtitleStyle.cleanupMode === "delogo"
+                                Text { text: "向外扩展"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 90 }
+                                Slider { Layout.fillWidth: true; from: 0; to: 80; stepSize: 1; value: appController.subtitleStyle.regionPadding; onMoved: appController.updateSubtitleStyle("regionPadding", Math.round(value)) }
+                                PreciseSpinBox { from: 0; to: 80; suffix: " px"; value: appController.subtitleStyle.regionPadding; onValueModified: appController.updateSubtitleStyle("regionPadding", value) }
+                            }
+                            Text { Layout.fillWidth: true; text: "设置完成后关闭窗口，再点击第 3 步“生成去字幕视频”。生成文件保存在当前项目内，后续步骤会自动使用。"; color: accentLight; font.pixelSize: 10; wrapMode: Text.WordWrap }
+                        }
+                    }
+                    ScrollView {
                         id: subtitleSettingsScroll
                         anchors.fill: parent
                         anchors.margins: 16
                         clip: true
                         contentWidth: availableWidth
+                        visible: subtitleStyleDialog.editMode === "style"
                         ColumnLayout {
                             width: subtitleSettingsScroll.availableWidth
                             spacing: 13
-                            Text { text: "字幕底板类型"; color: textMain; font.pixelSize: 13; font.bold: true }
+                            Text { visible: false; text: "字幕底板类型"; color: textMain; font.pixelSize: 13; font.bold: true }
                             Text {
+                                visible: false
                                 text: "这一块底板同时遮住原字幕并衬托英文字幕，不会再叠加第二层字幕背景。"
                                 color: textMuted
                                 font.pixelSize: 10
@@ -2454,6 +2863,7 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                             }
                             ComboBox {
+                                visible: false
                                 Layout.fillWidth: true
                                 model: ["黑色遮罩（最彻底）", "局部柔化 / 模糊（推荐）", "Delogo 周边像素修复"]
                                 currentIndex: appController.subtitleStyle.cleanupMode === "blur" ? 1
@@ -2463,7 +2873,7 @@ ApplicationWindow {
                                                  currentIndex === 1 ? "blur" : currentIndex === 2 ? "delogo" : "mask")
                             }
 
-                            Rectangle { Layout.fillWidth: true; height: 1; color: "#2b2f39"; Layout.topMargin: 2; Layout.bottomMargin: 2 }
+                            Rectangle { visible: false; Layout.fillWidth: true; height: 1; color: "#2b2f39"; Layout.topMargin: 2; Layout.bottomMargin: 2 }
                             Text { text: "推荐预设"; color: textMain; font.pixelSize: 13; font.bold: true }
                             RowLayout {
                                 Layout.fillWidth: true
@@ -2524,6 +2934,69 @@ ApplicationWindow {
                                 PreciseSpinBox {
                                     from: 30; to: 240; value: appController.subtitleStyle.horizontalMargin; suffix: " px"
                                     onValueModified: appController.updateSubtitleStyle("horizontalMargin", value)
+                                }
+                            }
+
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2b2f39"; Layout.topMargin: 2; Layout.bottomMargin: 2 }
+                            Text { text: "文字背景"; color: textMain; font.pixelSize: 13; font.bold: true }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Text { text: "显示背景"; color: textMain; font.pixelSize: 11; Layout.fillWidth: true }
+                                Text { text: appController.subtitleStyle.backgroundEnabled ? "已开启" : "已关闭"; color: appController.subtitleStyle.backgroundEnabled ? "#63d39a" : textMuted; font.pixelSize: 10 }
+                                ModernSwitch {
+                                    checked: appController.subtitleStyle.backgroundEnabled
+                                    onToggled: {
+                                        appController.updateSubtitleStyle("backgroundEnabled", checked)
+                                        subtitleBackgroundPreviewTimer.restart()
+                                    }
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: appController.subtitleStyle.backgroundEnabled
+                                Text { text: "背景类型"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
+                                DarkComboBox {
+                                    Layout.fillWidth: true
+                                    model: ["黑色弹框", "局部柔化 / 模糊", "Delogo 周边像素修复"]
+                                    currentIndex: appController.subtitleStyle.backgroundMode === "blur" ? 1
+                                                  : appController.subtitleStyle.backgroundMode === "delogo" ? 2 : 0
+                                    onActivated: {
+                                        appController.updateSubtitleStyle(
+                                            "backgroundMode",
+                                            currentIndex === 1 ? "blur" : currentIndex === 2 ? "delogo" : "mask")
+                                        subtitleBackgroundPreviewTimer.restart()
+                                    }
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: appController.subtitleStyle.backgroundEnabled
+                                         && appController.subtitleStyle.backgroundMode === "mask"
+                                Text { text: "背景透明度"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
+                                Slider {
+                                    Layout.fillWidth: true; from: 0.2; to: 0.95; stepSize: 0.01
+                                    value: appController.subtitleStyle.backgroundOpacity
+                                    onMoved: appController.updateSubtitleStyle("backgroundOpacity", value)
+                                }
+                                PreciseSpinBox {
+                                    from: 20; to: 95; suffix: "%"
+                                    value: Math.round(appController.subtitleStyle.backgroundOpacity * 100)
+                                    onValueModified: appController.updateSubtitleStyle("backgroundOpacity", value / 100)
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: appController.subtitleStyle.backgroundEnabled
+                                Text { text: "背景留白"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
+                                Slider {
+                                    Layout.fillWidth: true; from: 2; to: 32; stepSize: 1
+                                    value: appController.subtitleStyle.boxPadding
+                                    onMoved: appController.updateSubtitleStyle("boxPadding", Math.round(value))
+                                }
+                                PreciseSpinBox {
+                                    from: 2; to: 32; suffix: " px"
+                                    value: appController.subtitleStyle.boxPadding
+                                    onValueModified: appController.updateSubtitleStyle("boxPadding", value)
                                 }
                             }
 
@@ -2633,136 +3106,6 @@ ApplicationWindow {
                                 }
                             }
 
-                            Rectangle { Layout.fillWidth: true; height: 1; color: "#2b2f39"; Layout.topMargin: 2; Layout.bottomMargin: 2 }
-                            Text { text: "底板区域"; color: textMain; font.pixelSize: 13; font.bold: true }
-                            Text { text: "旧项目同款区域参数：先框准原字幕，再调整对应效果。"; color: textMuted; font.pixelSize: 10; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                Text { text: "底板左侧"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
-                                Slider {
-                                    Layout.fillWidth: true; from: 0; to: 0.8; stepSize: 0.005
-                                    value: appController.subtitleStyle.cleanupX
-                                    onMoved: appController.updateSubtitleStyle("cleanupX", value)
-                                }
-                                PreciseSpinBox {
-                                    from: 0; to: 160; divisor: 2; suffix: "%"
-                                    value: Math.round(appController.subtitleStyle.cleanupX * 200)
-                                    onValueModified: appController.updateSubtitleStyle("cleanupX", value / 200)
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                Text { text: "底板顶部"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
-                                Slider {
-                                    Layout.fillWidth: true; from: 0.55; to: 0.94; stepSize: 0.005
-                                    value: appController.subtitleStyle.cleanupY
-                                    onMoved: appController.updateSubtitleStyle("cleanupY", value)
-                                }
-                                PreciseSpinBox {
-                                    from: 110; to: 188; divisor: 2; suffix: "%"
-                                    value: Math.round(appController.subtitleStyle.cleanupY * 200)
-                                    onValueModified: appController.updateSubtitleStyle("cleanupY", value / 200)
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                Text { text: "底板宽度"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
-                                Slider {
-                                    Layout.fillWidth: true; from: 0.1; to: 1.0; stepSize: 0.005
-                                    value: appController.subtitleStyle.cleanupWidth
-                                    onMoved: appController.updateSubtitleStyle("cleanupWidth", value)
-                                }
-                                PreciseSpinBox {
-                                    from: 20; to: 200; divisor: 2; suffix: "%"
-                                    value: Math.round(appController.subtitleStyle.cleanupWidth * 200)
-                                    onValueModified: appController.updateSubtitleStyle("cleanupWidth", value / 200)
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                Text { text: "底板高度"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
-                                Slider {
-                                    Layout.fillWidth: true; from: 0.04; to: 0.3; stepSize: 0.005
-                                    value: appController.subtitleStyle.cleanupHeight
-                                    onMoved: appController.updateSubtitleStyle("cleanupHeight", value)
-                                }
-                                PreciseSpinBox {
-                                    from: 8; to: 60; divisor: 2; suffix: "%"
-                                    value: Math.round(appController.subtitleStyle.cleanupHeight * 200)
-                                    onValueModified: appController.updateSubtitleStyle("cleanupHeight", value / 200)
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: appController.subtitleStyle.cleanupMode === "mask"
-                                Text { text: "底板浓度"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
-                                Slider {
-                                    Layout.fillWidth: true; from: 0.25; to: 1.0; stepSize: 0.01
-                                    value: appController.subtitleStyle.cleanupOpacity
-                                    onMoved: appController.updateSubtitleStyle("cleanupOpacity", value)
-                                }
-                                PreciseSpinBox {
-                                    from: 25; to: 100; value: Math.round(appController.subtitleStyle.cleanupOpacity * 100); suffix: "%"
-                                    onValueModified: appController.updateSubtitleStyle("cleanupOpacity", value / 100)
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: appController.subtitleStyle.cleanupMode === "blur"
-                                Text { text: "柔化强度"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
-                                Slider {
-                                    Layout.fillWidth: true; from: 1; to: 40; stepSize: 1
-                                    value: appController.subtitleStyle.blurRadius
-                                    onMoved: appController.updateSubtitleStyle("blurRadius", Math.round(value))
-                                }
-                                PreciseSpinBox {
-                                    from: 1; to: 40; value: appController.subtitleStyle.blurRadius
-                                    onValueModified: appController.updateSubtitleStyle("blurRadius", value)
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: appController.subtitleStyle.cleanupMode === "blur"
-                                Text { text: "柔化层次"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
-                                Slider {
-                                    Layout.fillWidth: true; from: 1; to: 4; stepSize: 1
-                                    value: appController.subtitleStyle.blurPower
-                                    onMoved: appController.updateSubtitleStyle("blurPower", Math.round(value))
-                                }
-                                PreciseSpinBox {
-                                    from: 1; to: 4; value: appController.subtitleStyle.blurPower
-                                    onValueModified: appController.updateSubtitleStyle("blurPower", value)
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: appController.subtitleStyle.cleanupMode === "blur"
-                                         || appController.subtitleStyle.cleanupMode === "delogo"
-                                Text { text: "向外扩展"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
-                                Slider {
-                                    Layout.fillWidth: true; from: 0; to: 80; stepSize: 1
-                                    value: appController.subtitleStyle.regionPadding
-                                    onMoved: appController.updateSubtitleStyle("regionPadding", Math.round(value))
-                                }
-                                PreciseSpinBox {
-                                    from: 0; to: 80; value: appController.subtitleStyle.regionPadding; suffix: " px"
-                                    onValueModified: appController.updateSubtitleStyle("regionPadding", value)
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: appController.subtitleStyle.cleanupMode === "blur"
-                                Text { text: "柔边扩展"; color: textMain; font.pixelSize: 11; Layout.preferredWidth: 76 }
-                                Slider {
-                                    Layout.fillWidth: true; from: 0; to: 60; stepSize: 1
-                                    value: appController.subtitleStyle.feather
-                                    onMoved: appController.updateSubtitleStyle("feather", Math.round(value))
-                                }
-                                PreciseSpinBox {
-                                    from: 0; to: 60; value: appController.subtitleStyle.feather; suffix: " px"
-                                    onValueModified: appController.updateSubtitleStyle("feather", value)
-                                }
-                            }
                         }
                     }
                     }
@@ -4691,15 +5034,12 @@ ApplicationWindow {
                         id: exportSection
                         property bool expanded: true
                         Layout.fillWidth: true
-                        Layout.preferredHeight: expanded
-                                                ? (appController.matches.length > 0
-                                                   ? (appController.narrationAudioReady && !appController.syncedSrtReady ? 566 : 512)
-                                                   : 116)
-                                                : 90
+                        Layout.preferredHeight: expanded ? exportContent.implicitHeight + 36 : 90
                         radius: 14
                         color: panel
                         border.color: exportDone ? "#326b4d" : "#292c36"
                         ColumnLayout {
+                            id: exportContent
                             anchors.fill: parent
                             anchors.margins: 18
                             spacing: 12
@@ -4723,268 +5063,230 @@ ApplicationWindow {
                                     onClicked: exportSection.expanded = !exportSection.expanded
                                 }
                             }
-                            Rectangle {
-                                Layout.fillWidth: true
-                                visible: exportSection.expanded && appController.matches.length > 0
-                                Layout.preferredHeight: visible ? 96 : 0
-                                radius: 11
-                                color: "#151820"
-                                border.color: "#303440"
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.margins: 13
-                                    spacing: 12
-                                    ColumnLayout {
-                                        Layout.preferredWidth: 128
-                                        spacing: 3
-                                        Text { text: "成片画布"; color: textMain; font.pixelSize: 12; font.bold: true }
-                                        Text { text: "输出 " + appController.subtitleCanvasWidth + "×" + appController.subtitleCanvasHeight; color: textMuted; font.pixelSize: 9 }
-                                    }
-                                    Repeater {
-                                        model: [
-                                            { key: "vertical_blur", title: "竖屏完整画面", note: "推荐 · 不裁主体" },
-                                            { key: "vertical_crop", title: "竖屏铺满裁切", note: "主体居中时使用" },
-                                            { key: "original", title: "保持原始比例", note: "横版通常非 Shorts" }
-                                        ]
-                                        delegate: Rectangle {
-                                            required property var modelData
-                                            Layout.fillWidth: true
-                                            Layout.preferredHeight: 58
-                                            radius: 10
-                                            color: appController.exportFitMode === modelData.key ? "#332253" : "#1c2029"
-                                            border.width: appController.exportFitMode === modelData.key ? 2 : 1
-                                            border.color: appController.exportFitMode === modelData.key ? accent : "#343946"
-                                            Column {
-                                                anchors.centerIn: parent
-                                                spacing: 3
-                                                Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.title; color: textMain; font.pixelSize: 11; font.bold: true }
-                                                Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.note; color: appController.exportFitMode === modelData.key ? accentLight : textMuted; font.pixelSize: 9 }
-                                            }
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: appController.setExportFitMode(modelData.key)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: exportSection.expanded && appController.matches.length > 0
-                                spacing: 9
-                                FlatButton {
-                                    text: appController.exportBusy ? "正在生成…" : appController.previewVideoReady ? "重新生成成片预览" : "生成成片预览  →"
-                                    enabled: appController.narrationAudioReady && !appController.exportBusy && !appController.qualityCheckBusy
-                                    onClicked: appController.generateRoughPreview()
-                                }
-                                GhostButton {
-                                    text: "仅字幕测试预览"
-                                    enabled: appController.matches.length > 0 && !appController.exportBusy && !appController.qualityCheckBusy
-                                    onClicked: appController.generateSubtitleOnlyPreview()
-                                }
-                                GhostButton {
-                                    text: "字幕样式"
-                                    enabled: appController.storyNarration.length > 0
-                                    onClicked: subtitleStyleDialog.open()
-                                }
-                                GhostButton {
-                                    text: appController.qualityCheckBusy ? "检查中…" : "成片检查"
-                                    enabled: !appController.exportBusy && !appController.qualityCheckBusy
-                                    onClicked: appController.runQualityCheck()
-                                }
-                                Item { Layout.fillWidth: true }
-                                GhostButton {
-                                    visible: appController.previewVideoReady
-                                    text: "用播放器打开"
-                                    onClicked: appController.openRoughPreview()
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: exportSection.expanded && appController.matches.length > 0
-                                spacing: 9
-                                GhostButton {
-                                    text: "1  导出配音文稿"
-                                    onClicked: {
-                                        saveTtsSrtDialog.exportFormat = subtitleFormatCombo.currentIndex === 0 ? "txt" : "srt"
-                                        saveTtsSrtDialog.currentFile = appController.prepareTtsSrtExportUrl(saveTtsSrtDialog.exportFormat)
-                                        saveTtsSrtDialog.open()
-                                    }
-                                }
-                                DarkComboBox {
-                                    id: subtitleFormatCombo
-                                    Layout.preferredWidth: 142
-                                    model: ["TXT · 一句一行", "SRT · 含时间轴"]
-                                    currentIndex: 0
-                                }
-                                GhostButton {
-                                    text: appController.narrationAudioReady ? "重新导入英文配音" : "2  导入英文配音"
-                                    enabled: !appController.voiceBusy
-                                    onClicked: narrationAudioDialog.open()
-                                }
-                                GhostButton {
-                                    text: appController.syncedSrtReady ? "重新导入同步 SRT" : "3  导入同步 SRT（可选）"
-                                    enabled: !appController.voiceBusy
-                                    onClicked: narrationSrtDialog.open()
-                                }
-                                Text {
-                                    text: appController.voiceStatus
-                                    color: appController.narrationAudioReady ? "#63d39a" : textMuted
-                                    font.pixelSize: 10
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                }
-                                Text {
-                                    visible: appController.narrationAudioReady
-                                    text: "配音 " + appController.narrationDurationText
-                                    color: accentLight
-                                    font.pixelSize: 10
-                                    font.bold: true
-                                }
-                            }
-                            Rectangle {
-                                Layout.fillWidth: true
-                                visible: exportSection.expanded && appController.matches.length > 0
-                                Layout.preferredHeight: visible ? 66 : 0
-                                radius: 11
-                                color: "#171a21"
-                                border.color: appController.burnSubtitles ? "#4d3b72" : "#303540"
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 14
-                                    anchors.rightMargin: 14
-                                    spacing: 12
-                                    Rectangle {
-                                        Layout.preferredWidth: 34; Layout.preferredHeight: 34
-                                        radius: 9
-                                        color: appController.burnSubtitles ? "#332450" : "#23262e"
-                                        Text { anchors.centerIn: parent; text: "CC"; color: appController.burnSubtitles ? accentLight : textMuted; font.pixelSize: 10; font.bold: true }
-                                    }
-                                    ColumnLayout {
-                                        Layout.fillWidth: true; spacing: 2
-                                        Text { text: "烧录英文字幕"; color: textMain; font.pixelSize: 12; font.bold: true }
-                                        Text {
-                                            Layout.fillWidth: true
-                                            text: appController.burnSubtitles
-                                                  ? "生成成片时把同步 SRT 压入画面"
-                                                  : "只输出画面与配音，字幕可在剪映等软件中添加"
-                                            color: textMuted; font.pixelSize: 10
-                                            elide: Text.ElideRight
-                                        }
-                                    }
-                                    ModernSwitch {
-                                        Layout.preferredWidth: 46
-                                        Layout.preferredHeight: 26
-                                        checked: appController.burnSubtitles
-                                        onToggled: appController.setBurnSubtitles(checked)
-                                    }
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: exportSection.expanded
-                                         && appController.matches.length > 0
-                                         && appController.narrationAudioReady
-                                         && !appController.syncedSrtReady
-                                spacing: 10
-                                Text { text: "同步字幕兜底"; color: textMain; font.pixelSize: 11; font.bold: true }
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: "没有 GPT-SoVITS 同步 SRT 时，可用 Faster-Whisper 识别英文配音；CPU 可能较慢。"
-                                    color: textMuted
-                                    font.pixelSize: 10
-                                    elide: Text.ElideRight
-                                }
-                                GhostButton {
-                                    text: appController.voiceBusy ? "正在识别…" : "从配音生成 SRT"
-                                    enabled: !appController.voiceBusy
-                                    onClicked: appController.generateNarrationSrtWithWhisper()
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: exportSection.expanded && appController.matches.length > 0
-                                spacing: 10
-                                Text {
-                                    text: "配音超时处理"
-                                    color: textMain
-                                    font.pixelSize: 11
-                                    font.bold: true
-                                }
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: appController.narrationSpeedHint
-                                    color: appController.narrationOverShortsLimit ? "#f1b86b" : textMuted
-                                    font.pixelSize: 10
-                                    elide: Text.ElideRight
-                                }
-                                FlatButton {
-                                    visible: appController.narrationOverShortsLimit
-                                    text: appController.voiceBusy || appController.durationRevisionBusy
-                                          ? "正在处理…"
-                                          : (appController.canAutoFitNarration ? "自动适配至 3 分钟" : "AI 精简到 3 分钟")
-                                    enabled: !appController.voiceBusy && !appController.durationRevisionBusy
-                                             && (appController.canAutoFitNarration || appController.canReviseNarrationDuration)
-                                    onClicked: {
-                                        if (appController.canAutoFitNarration)
-                                            appController.autoFitNarrationToShorts()
-                                        else
-                                            appController.proposeNarrationDurationRevision()
-                                    }
-                                }
-                                GhostButton {
-                                    visible: appController.narrationSpeed > 1.001
-                                    text: "恢复原速"
-                                    enabled: !appController.voiceBusy
-                                    onClicked: appController.restoreNarrationSpeed()
-                                }
-                                GhostButton {
-                                    visible: appController.canRestoreDurationRevision
-                                    text: "恢复精简前版本"
-                                    enabled: !appController.voiceBusy && !appController.durationRevisionBusy
-                                    onClicked: restoreRevisionDialog.open()
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: exportSection.expanded && appController.matches.length > 0
-                                spacing: 10
-                                Text {
-                                    text: "保留原片声音"
-                                    color: textMain
-                                    font.pixelSize: 11
-                                    font.bold: true
-                                }
-                                ModernSwitch {
-                                    checked: appController.preserveOriginalAudio
-                                    onToggled: appController.setPreserveOriginalAudio(checked)
-                                }
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: appController.preserveOriginalAudio
-                                          ? (appController.narrationAudioReady
-                                             ? "已开启：原声将降低音量并与英文解说混合。"
-                                             : "已开启：仅字幕测试将保留剪辑镜头的原声。")
-                                          : "默认关闭：成片不包含原片声音。"
-                                    color: textMuted
-                                    font.pixelSize: 10
-                                }
-                            }
+
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 visible: exportSection.expanded && appController.matches.length > 0
-                                spacing: 7
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Text { text: appController.exportStatus; color: appController.previewVideoReady ? "#63d39a" : textMain; font.pixelSize: 11; Layout.fillWidth: true }
-                                    Text { text: Math.round(appController.exportProgress * 100) + "%"; color: accentLight; font.pixelSize: 11; font.bold: true }
-                                }
+                                spacing: 10
+
                                 Rectangle {
-                                    Layout.fillWidth: true; height: 5; radius: 3; color: "#30333d"
-                                    Rectangle { width: parent.width * appController.exportProgress; height: parent.height; radius: 3; color: accent }
+                                    Layout.fillWidth: true; Layout.preferredHeight: 70; radius: 11
+                                    color: "#171a21"; border.color: "#303540"
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.margins: 12; spacing: 12
+                                        SubstepBadge { stepNumber: "1" }
+                                        ColumnLayout { Layout.preferredWidth: 180; spacing: 2
+                                            Text { text: "导出配音文稿"; color: textMain; font.pixelSize: 13; font.bold: true }
+                                            Text { text: "提供给 GPT-SoVITS"; color: textMuted; font.pixelSize: 9 }
+                                        }
+                                        DarkComboBox { id: ttsDocumentFormatCombo; Layout.preferredWidth: 158; model: ["TXT · 一句一行", "SRT · 含时间轴"]; currentIndex: 0 }
+                                        GhostButton {
+                                            text: "选择位置并导出"
+                                            onClicked: {
+                                                saveTtsSrtDialog.exportFormat = ttsDocumentFormatCombo.currentIndex === 0 ? "txt" : "srt"
+                                                saveTtsSrtDialog.currentFile = appController.prepareTtsSrtExportUrl(saveTtsSrtDialog.exportFormat)
+                                                saveTtsSrtDialog.open()
+                                            }
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                    }
                                 }
-                                Text { visible: appController.previewVideoReady; text: appController.previewVideoPath; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true; elide: Text.ElideMiddle }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: voiceDetailColumn.implicitHeight + 24
+                                    radius: 11
+                                    color: "#171a21"
+                                    border.color: appController.narrationAudioReady ? "#315d48" : "#303540"
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.margins: 12; spacing: 12
+                                        SubstepBadge { stepNumber: "2"; Layout.alignment: Qt.AlignTop }
+                                        ColumnLayout {
+                                            id: voiceDetailColumn
+                                            Layout.fillWidth: true; spacing: 8
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 9
+                                                ColumnLayout { Layout.preferredWidth: 180; spacing: 2
+                                                    Text { text: "导入配音与同步 SRT"; color: textMain; font.pixelSize: 13; font.bold: true }
+                                                    Text { text: appController.voiceStatus; color: appController.narrationAudioReady ? "#63d39a" : textMuted; font.pixelSize: 9; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                }
+                                                GhostButton { text: appController.narrationAudioReady ? "重新导入英文配音" : "导入英文配音"; enabled: !appController.voiceBusy; onClicked: narrationAudioDialog.open() }
+                                                GhostButton { text: appController.syncedSrtReady ? "重新导入同步 SRT" : "导入同步 SRT（可选）"; enabled: !appController.voiceBusy; onClicked: narrationSrtDialog.open() }
+                                                Text { visible: appController.narrationAudioReady; text: "配音 " + appController.narrationDurationText; color: accentLight; font.pixelSize: 10; font.bold: true }
+                                                Item { Layout.fillWidth: true }
+                                            }
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 9
+                                                visible: appController.narrationAudioReady && !appController.syncedSrtReady
+                                                Text { text: "没有同步 SRT，可从配音识别生成（CPU 可能较慢）"; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true }
+                                                GhostButton { text: appController.voiceBusy ? "正在识别…" : "从配音生成 SRT"; enabled: !appController.voiceBusy; onClicked: appController.generateNarrationSrtWithWhisper() }
+                                            }
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 9
+                                                visible: appController.narrationAudioReady
+                                                Text { text: appController.narrationSpeedHint; color: appController.narrationOverShortsLimit ? "#f1b86b" : textMuted; font.pixelSize: 9; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                FlatButton {
+                                                    visible: appController.narrationOverShortsLimit
+                                                    text: appController.voiceBusy || appController.durationRevisionBusy ? "正在处理…" : (appController.canAutoFitNarration ? "自动适配至 3 分钟" : "AI 精简到 3 分钟")
+                                                    enabled: !appController.voiceBusy && !appController.durationRevisionBusy && (appController.canAutoFitNarration || appController.canReviseNarrationDuration)
+                                                    onClicked: appController.canAutoFitNarration ? appController.autoFitNarrationToShorts() : appController.proposeNarrationDurationRevision()
+                                                }
+                                                GhostButton { visible: appController.narrationSpeed > 1.001; text: "恢复原速"; enabled: !appController.voiceBusy; onClicked: appController.restoreNarrationSpeed() }
+                                                GhostButton { visible: appController.canRestoreDurationRevision; text: "恢复精简前版本"; enabled: !appController.voiceBusy && !appController.durationRevisionBusy; onClicked: restoreRevisionDialog.open() }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true; Layout.preferredHeight: cleanupDetailColumn.implicitHeight + 24; radius: 11
+                                    color: "#171a21"; border.color: appController.subtitleCleanedVideoReady ? "#315d48" : "#303540"
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.margins: 12; spacing: 12
+                                        SubstepBadge { stepNumber: "3"; Layout.alignment: Qt.AlignTop }
+                                        ColumnLayout { id: cleanupDetailColumn; Layout.fillWidth: true; spacing: 7
+                                            RowLayout { Layout.fillWidth: true; spacing: 9
+                                                ColumnLayout { Layout.fillWidth: true; spacing: 2
+                                                    Text { text: "清除原视频字幕"; color: textMain; font.pixelSize: 13; font.bold: true }
+                                                    Text { text: "先设置遮罩区域，再生成后续步骤使用的去字幕中间视频"; color: textMuted; font.pixelSize: 9 }
+                                                }
+                                                GhostButton { text: "设置字幕遮罩"; enabled: !appController.subtitleCleanupBusy; onClicked: { appController.clearSubtitleEffectPreview(); subtitleStyleDialog.editMode = "cleanup"; subtitleStyleDialog.open() } }
+                                                FlatButton { text: appController.subtitleCleanupBusy ? "正在生成…" : appController.subtitleCleanedVideoReady ? "重新生成去字幕视频" : "生成去字幕视频"; enabled: !appController.subtitleCleanupBusy && !appController.exportBusy; onClicked: appController.generateSubtitleCleanVideo() }
+                                            }
+                                            RowLayout { Layout.fillWidth: true
+                                                Text { text: appController.subtitleCleanupStatus; color: appController.subtitleCleanedVideoReady ? "#63d39a" : textMuted; font.pixelSize: 9; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                GhostButton { visible: appController.subtitleCleanedVideoReady; text: "用播放器打开"; onClicked: appController.openSubtitleCleanedVideo() }
+                                                GhostButton { visible: appController.subtitleCleanedVideoReady; text: "删除中间视频"; foreground: "#fca5a5"; onClicked: deleteSubtitleCleanedVideoDialog.open() }
+                                                Text { visible: appController.subtitleCleanupBusy; text: Math.round(appController.subtitleCleanupProgress * 100) + "%"; color: accentLight; font.pixelSize: 9; font.bold: true }
+                                            }
+                                            Rectangle { visible: appController.subtitleCleanupBusy; Layout.fillWidth: true; Layout.preferredHeight: 4; radius: 2; color: "#30333d"; Rectangle { width: parent.width * appController.subtitleCleanupProgress; height: parent.height; radius: 2; color: accent } }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 108
+                                    radius: 11; color: "#171a21"; border.color: "#303540"
+                                    ColumnLayout {
+                                        anchors.fill: parent; anchors.margins: 12; spacing: 8
+                                        RowLayout {
+                                            Layout.fillWidth: true; spacing: 12
+                                            SubstepBadge { stepNumber: "4" }
+                                            ColumnLayout { Layout.preferredWidth: 142; spacing: 2
+                                                Text { text: "成片画布"; color: textMain; font.pixelSize: 13; font.bold: true }
+                                                Text { text: "输出 " + appController.subtitleCanvasWidth + "×" + appController.subtitleCanvasHeight; color: textMuted; font.pixelSize: 9 }
+                                            }
+                                            Repeater {
+                                                model: [
+                                                    { key: "crop_stretch", title: "裁剪拉伸", note: "自由调整画面" },
+                                                    { key: "vertical_blur", title: "竖屏完整", note: "不裁切主体" },
+                                                    { key: "original", title: "原始比例", note: "不转换画布" }
+                                                ]
+                                                delegate: Rectangle {
+                                                    required property var modelData
+                                                    Layout.fillWidth: true; Layout.preferredHeight: 52; radius: 9
+                                                    color: appController.exportFitMode === modelData.key ? "#332253" : "#1c2029"
+                                                    border.width: appController.exportFitMode === modelData.key ? 2 : 1
+                                                    border.color: appController.exportFitMode === modelData.key ? accent : "#343946"
+                                                    Column { anchors.centerIn: parent; spacing: 2
+                                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.title; color: textMain; font.pixelSize: 11; font.bold: true }
+                                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.note; color: appController.exportFitMode === modelData.key ? accentLight : textMuted; font.pixelSize: 9 }
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: {
+                                                            appController.setExportFitMode(modelData.key)
+                                                            if (modelData.key === "crop_stretch")
+                                                                canvasTransformDialog.open()
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            GhostButton {
+                                                visible: appController.exportFitMode === "crop_stretch"
+                                                text: "调整"
+                                                onClicked: canvasTransformDialog.open()
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    visible: appController.burnSubtitles
+                                    Layout.fillWidth: true; Layout.preferredHeight: 70; radius: 11
+                                    color: "#171a21"; border.color: "#303540"
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.margins: 12; spacing: 12
+                                        SubstepBadge { stepNumber: "5" }
+                                        ColumnLayout { Layout.fillWidth: true; spacing: 2
+                                            Text { text: "字幕样式"; color: textMain; font.pixelSize: 13; font.bold: true }
+                                            Text { text: "调整字体、字号、位置、描边和字幕安全区域"; color: textMuted; font.pixelSize: 9 }
+                                        }
+                                        GhostButton {
+                                            text: "编辑字幕样式"
+                                            enabled: appController.storyNarration.length > 0
+                                            onClicked: {
+                                                appController.clearSubtitleEffectPreview()
+                                                subtitleStyleDialog.editMode = "style"
+                                                subtitleStyleDialog.open()
+                                                appController.generateSubtitleEffectPreview()
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: synthesisColumn.implicitHeight + 24
+                                    radius: 11; color: "#171a21"
+                                    border.color: appController.previewVideoReady ? "#315d48" : "#303540"
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.margins: 12; spacing: 12
+                                        SubstepBadge { stepNumber: appController.burnSubtitles ? "6" : "5"; Layout.alignment: Qt.AlignTop }
+                                        ColumnLayout {
+                                            id: synthesisColumn
+                                            Layout.fillWidth: true; spacing: 9
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 8
+                                                ColumnLayout { Layout.preferredWidth: 150; spacing: 2
+                                                    Text { text: "合成与测试"; color: textMain; font.pixelSize: 13; font.bold: true }
+                                                    Text { text: "确认设置后输出成片"; color: textMuted; font.pixelSize: 9 }
+                                                }
+                                                FlatButton { text: appController.exportBusy ? "正在生成…" : appController.previewVideoReady ? "重新生成成片预览" : "生成成片预览  →"; enabled: appController.narrationAudioReady && !appController.exportBusy && !appController.qualityCheckBusy; onClicked: appController.generateRoughPreview() }
+                                                GhostButton { visible: appController.burnSubtitles; text: "仅字幕测试预览"; enabled: !appController.exportBusy && !appController.qualityCheckBusy; onClicked: appController.generateSubtitleOnlyPreview() }
+                                                GhostButton { text: appController.qualityCheckBusy ? "检查中…" : "成片检查"; enabled: !appController.exportBusy && !appController.qualityCheckBusy; onClicked: appController.runQualityCheck() }
+                                                Item { Layout.fillWidth: true }
+                                            }
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 9
+                                                Text { text: "是否烧录字幕"; color: textMain; font.pixelSize: 10; font.bold: true }
+                                                ModernSwitch { checked: appController.burnSubtitles; onToggled: appController.setBurnSubtitles(checked) }
+                                                Text { text: appController.burnSubtitles ? "显示第 5 步并应用全部字幕样式" : "不添加字幕，可在外部软件处理"; color: textMuted; font.pixelSize: 9 }
+                                                Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 20; color: "#343946" }
+                                                Text { text: "保留原片声音"; color: textMain; font.pixelSize: 10; font.bold: true }
+                                                ModernSwitch { checked: appController.preserveOriginalAudio; onToggled: appController.setPreserveOriginalAudio(checked) }
+                                                Text { text: appController.preserveOriginalAudio ? "原声将降低音量后混合" : "默认关闭"; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true }
+                                                GhostButton { visible: appController.previewVideoReady; text: "用播放器打开"; onClicked: appController.openRoughPreview() }
+                                                FlatButton {
+                                                    visible: appController.previewVideoReady
+                                                    text: "导出成片"
+                                                    onClicked: {
+                                                        saveFinalVideoDialog.currentFile = appController.prepareFinalVideoExportUrl()
+                                                        saveFinalVideoDialog.open()
+                                                    }
+                                                }
+                                            }
+                                            RowLayout { Layout.fillWidth: true
+                                                Text { text: appController.exportStatus; color: appController.previewVideoReady ? "#63d39a" : textMain; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                Text { text: Math.round(appController.exportProgress * 100) + "%"; color: accentLight; font.pixelSize: 10; font.bold: true }
+                                            }
+                                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 5; radius: 3; color: "#30333d"; Rectangle { width: parent.width * appController.exportProgress; height: parent.height; radius: 3; color: accent } }
+                                            Text { visible: appController.previewVideoReady; text: appController.previewVideoPath; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true; elide: Text.ElideMiddle }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

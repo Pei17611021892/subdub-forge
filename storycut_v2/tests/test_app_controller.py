@@ -187,19 +187,203 @@ class AppControllerProjectNameTests(unittest.TestCase):
             controller = self._controller(root)
             controller._current_project_file = project_file
 
-            controller.setExportFitMode("vertical_crop")
+            controller.setExportFitMode("original")
+            controller.setExportFitMode("crop_stretch")
+            controller.setCanvasAspectRatio("9:16")
+            controller.setCanvasFixedScale(False)
+            controller.setCanvasScale(1.25, 0.8)
 
             saved = json.loads(project_file.read_text(encoding="utf-8"))
-            self.assertEqual(saved["settings"]["export"]["fit_mode"], "vertical_crop")
+            self.assertEqual(saved["settings"]["export"]["fit_mode"], "crop_stretch")
+            self.assertEqual(saved["settings"]["export"]["canvas_aspect_ratio"], "9:16")
+            self.assertFalse(saved["settings"]["export"]["canvas_fixed_scale"])
+            self.assertAlmostEqual(saved["settings"]["export"]["canvas_scale_x"], 1.25)
+            self.assertAlmostEqual(saved["settings"]["export"]["canvas_scale_y"], 0.8)
             self.assertEqual(controller.subtitleCanvasWidth, 1080)
             self.assertEqual(controller.subtitleCanvasHeight, 1920)
             reopened = self._controller(root)
             reopened.openProject(str(project_file))
-            self.assertEqual(reopened.exportFitMode, "vertical_crop")
+            self.assertEqual(reopened.exportFitMode, "crop_stretch")
+            self.assertEqual(reopened.canvasAspectRatio, "9:16")
+            self.assertFalse(reopened.canvasFixedScale)
+            self.assertAlmostEqual(reopened.canvasScaleX, 1.25)
+            self.assertAlmostEqual(reopened.canvasScaleY, 0.8)
 
             reopened.setExportFitMode("original")
             self.assertEqual(reopened.subtitleCanvasWidth, 1920)
             self.assertEqual(reopened.subtitleCanvasHeight, 1080)
+
+            reopened.setExportFitMode("crop_stretch")
+            reopened.setCanvasFixedScale(False)
+            reopened.setCanvasScale(50, 0.01)
+            self.assertAlmostEqual(reopened.canvasScaleX, 10.0)
+            self.assertAlmostEqual(reopened.canvasScaleY, 0.25)
+
+    def test_subtitle_cleaned_video_is_loaded_and_invalidated_by_cleanup_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            media = project / "media"
+            media.mkdir(parents=True)
+            cleaned = media / "source_without_subtitles.mp4"
+            cleaned.write_bytes(b"cleaned")
+            cleaned_preview = project / "cache" / "source_without_subtitles.jpg"
+            cleaned_preview.parent.mkdir(parents=True)
+            cleaned_preview.write_bytes(b"preview")
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "media": {"width": 1920, "height": 1080},
+                        "settings": {},
+                        "artifacts": {
+                            "subtitle_cleaned_video": "media/source_without_subtitles.mp4"
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            controller = self._controller(root)
+            observed_cleaned_states: list[bool] = []
+            controller.subtitleEffectPreviewChanged.connect(
+                lambda: observed_cleaned_states.append(controller.subtitleCleanedVideoReady)
+            )
+            controller.openProject(str(project_file))
+            self.assertTrue(controller.subtitleCleanedVideoReady)
+            self.assertIn(True, observed_cleaned_states)
+            self.assertTrue(controller.subtitleCleanedPreviewUrl.endswith("source_without_subtitles.jpg"))
+
+            controller.updateSubtitleStyle("cleanupY", 0.75)
+
+            saved = json.loads(project_file.read_text(encoding="utf-8"))
+            self.assertFalse(controller.subtitleCleanedVideoReady)
+            self.assertEqual(controller.subtitleCleanedPreviewUrl, "")
+            self.assertNotIn("subtitle_cleaned_video", saved["artifacts"])
+            self.assertTrue(cleaned.exists())
+
+    def test_cleaned_video_delete_and_final_video_save(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            media = project / "media"
+            media.mkdir(parents=True)
+            cleaned = media / "source_without_subtitles.mp4"
+            cleaned.write_bytes(b"cleaned")
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "settings": {},
+                        "artifacts": {
+                            "subtitle_cleaned_video": "media/source_without_subtitles.mp4"
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            controller = self._controller(root)
+            controller.openProject(str(project_file))
+            controller.deleteSubtitleCleanedVideo()
+            self.assertFalse(cleaned.exists())
+            self.assertFalse(controller.subtitleCleanedVideoReady)
+
+            preview = root / "export" / "preview.mp4"
+            preview.parent.mkdir(parents=True)
+            preview.write_bytes(b"video")
+            destination = root / "saved" / "finished.mp4"
+            controller._export_path = str(preview)
+            controller.saveFinalVideo(destination.as_uri())
+            self.assertEqual(destination.read_bytes(), b"video")
+
+    def test_subtitle_style_preview_prefers_cleaned_video_and_falls_back_to_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            cleaned = root / "projects" / "demo" / "media" / "source_without_subtitles.mp4"
+            cleaned.parent.mkdir(parents=True)
+            cleaned.write_bytes(b"cleaned")
+            controller = self._controller(root)
+            controller._video_path = str(source)
+            controller._subtitle_cleaned_video_path = str(cleaned)
+
+            self.assertEqual(controller._subtitle_style_preview_video_path(), cleaned)
+            self.assertEqual(controller.subtitleStylePreviewSourceName, cleaned.name)
+
+            cleaned.unlink()
+            self.assertEqual(controller._subtitle_style_preview_video_path(), source)
+            self.assertEqual(controller.subtitleStylePreviewSourceName, source.name)
+
+    def test_text_style_edits_keep_preview_image_and_background_mode_is_exported(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            controller = self._controller(Path(temporary_dir))
+            controller._subtitle_effect_preview_url = "file:///cleaned-preview.jpg"
+
+            controller.updateSubtitleStyle("fontSize", 56)
+            self.assertEqual(
+                controller.subtitleEffectPreviewUrl, "file:///cleaned-preview.jpg"
+            )
+
+            controller.updateSubtitleStyle("backgroundEnabled", True)
+            controller.updateSubtitleStyle("backgroundMode", "blur")
+            export = controller._config_with_project_style()["export"]
+            self.assertTrue(export["subtitle_background_enabled"])
+            self.assertEqual(export["subtitle_background_mode"], "blur")
+            self.assertGreater(export["subtitle_background_height"], 0)
+
+    def test_subtitle_test_preview_is_not_loaded_as_final_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            project.mkdir(parents=True)
+            subtitle_test = root / "export" / "demo_storycut_subtitle_test.mp4"
+            subtitle_test.parent.mkdir(parents=True)
+            subtitle_test.write_bytes(b"test")
+            project_file = project / "project.json"
+            relative = Path("..") / ".." / "export" / subtitle_test.name
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "artifacts": {"rough_preview": relative.as_posix()},
+                        "settings": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            controller = self._controller(root)
+
+            controller._load_export(project_file)
+
+            self.assertFalse(controller.previewVideoReady)
+            self.assertTrue(controller.subtitleTestPreviewReady)
+            saved = json.loads(project_file.read_text(encoding="utf-8"))
+            self.assertNotIn("rough_preview", saved["artifacts"])
+            self.assertEqual(saved["artifacts"]["subtitle_test_preview"], relative.as_posix())
+
+    def test_subtitle_test_completion_does_not_replace_final_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            final_preview = root / "final.mp4"
+            subtitle_test = root / "subtitle_test.mp4"
+            final_preview.write_bytes(b"final")
+            subtitle_test.write_bytes(b"test")
+            controller = self._controller(root)
+            controller._export_path = str(final_preview)
+            controller._export_job_id = 3
+
+            controller._apply_export_finished(
+                True,
+                "仅字幕测试预览已生成",
+                {"path": str(subtitle_test), "preview_kind": "subtitle_test"},
+                3,
+            )
+
+            self.assertTrue(controller.previewVideoReady)
+            self.assertEqual(controller.previewVideoPath, str(final_preview))
+            self.assertTrue(controller.subtitleTestPreviewReady)
 
     def test_layered_analysis_is_automatic_and_not_user_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

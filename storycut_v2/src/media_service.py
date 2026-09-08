@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -102,6 +103,9 @@ def render_subtitle_effect_preview(
 
     export = config.get("export", {})
     fit_mode = str(export.get("fit_mode", "original")).lower()
+    crop_fill_percent = _normalize_crop_fill_percent(
+        export.get("vertical_crop_fill_percent", 100)
+    )
     if fit_mode == "original":
         width = max(2, int(video_width))
         height = max(2, int(video_height))
@@ -109,6 +113,10 @@ def render_subtitle_effect_preview(
         width = max(2, int(export.get("width", 1080) or 1080))
         height = max(2, int(export.get("height", 1920) or 1920))
     mode = str(style.get("cleanupMode", "mask"))
+    if mode not in {"none", "mask", "blur", "delogo"}:
+        mode = "none"
+    if mode == "delogo" and not _ffmpeg_supports_filter(ffmpeg, "delogo"):
+        mode = "blur"
     x_ratio = min(0.95, max(0.0, float(style.get("cleanupX", 0.08))))
     y_ratio = min(0.95, max(0.0, float(style.get("cleanupY", 0.82))))
     w_ratio = min(1.0, max(0.02, float(style.get("cleanupWidth", 0.84))))
@@ -129,7 +137,22 @@ def render_subtitle_effect_preview(
     w = min(width - x, base_w + padding * 2)
     h = min(height - y, base_h + padding * 2)
 
-    if fit_mode == "vertical_blur":
+    if fit_mode == "crop_stretch":
+        source_aspect = max(0.01, float(video_width) / max(1.0, float(video_height)))
+        scale_x = min(3.0, max(0.25, float(export.get("canvas_scale_x", 1.0) or 1.0)))
+        scale_y = min(3.0, max(0.25, float(export.get("canvas_scale_y", 1.0) or 1.0)))
+        video_w = max(2, round(width * scale_x))
+        video_h = max(2, round((width / source_aspect) * scale_y))
+        video_w -= video_w % 2
+        video_h -= video_h % 2
+        layout = (
+            f"scale={video_w}:{video_h},"
+            f"crop=w='min(iw\\,{width})':h='min(ih\\,{height})':"
+            "x='(iw-ow)/2':y='(ih-oh)/2',"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black[layout]"
+        )
+        effect_input = "[layout]"
+    elif fit_mode == "vertical_blur":
         background_blur = max(
             4, min(60, int(export.get("vertical_background_blur_radius", 24) or 24))
         )
@@ -142,13 +165,29 @@ def render_subtitle_effect_preview(
         )
         effect_input = "[layout]"
     elif fit_mode in {"crop", "vertical_crop"}:
-        layout = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}[layout]"
+        if crop_fill_percent < 100:
+            background_blur = max(
+                4, min(60, int(export.get("vertical_background_blur_radius", 24) or 24))
+            )
+            foreground_height = _crop_region_height(height, crop_fill_percent)
+            layout = (
+                "split=2[layoutbg][layoutfg];"
+                f"[layoutbg]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},gblur=sigma={background_blur}[layoutbgfit];"
+                f"[layoutfg]scale={width}:{foreground_height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{foreground_height}[layoutfgfit];"
+                "[layoutbgfit][layoutfgfit]overlay=(W-w)/2:(H-h)/2[layout]"
+            )
+        else:
+            layout = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}[layout]"
         effect_input = "[layout]"
     else:
         layout = "null[layout]"
         effect_input = "[layout]"
 
-    if mode == "mask":
+    if mode == "none":
+        effect = f"{effect_input}null"
+    elif mode == "mask":
         effect = f"{effect_input}drawbox=x={x}:y={y}:w={w}:h={h}:color=black@{opacity:.2f}:t=fill"
     elif mode == "delogo":
         dx, dy = max(2, x), max(2, y)
@@ -159,7 +198,7 @@ def render_subtitle_effect_preview(
         effect = (
             f"{effect_input}split=2[base][region];"
             f"[region]crop=w={w}:h={h}:x={x}:y={y},"
-            f"boxblur=luma_radius={radius}:luma_power={power}[blur];"
+            f"gblur=sigma={radius}:steps={power}[blur];"
             f"[base][blur]overlay=x={x}:y={y}"
         )
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +209,37 @@ def render_subtitle_effect_preview(
         "-q:v", "3", str(output),
     ]
     subprocess.run(command, capture_output=True, check=True)
+
+
+def _normalize_crop_fill_percent(value: object) -> int:
+    try:
+        numeric = int(round(float(value)))
+    except (TypeError, ValueError):
+        numeric = 100
+    return min((50, 60, 70, 80, 90, 100), key=lambda option: abs(option - numeric))
+
+
+def _crop_region_height(canvas_height: int, fill_percent: object) -> int:
+    percent = _normalize_crop_fill_percent(fill_percent)
+    height = max(2, int(round(max(2, canvas_height) * percent / 100.0)))
+    return height if height % 2 == 0 else height - 1
+
+
+def _ffmpeg_supports_filter(ffmpeg: str, filter_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    pattern = rf"\b{re.escape(filter_name)}\b"
+    return bool(re.search(pattern, (result.stdout or "") + (result.stderr or "")))
 
 
 def _probe_with_ffprobe(video: Path, ffprobe: str) -> dict[str, Any]:

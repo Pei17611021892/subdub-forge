@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "version": "2.0.9",
+  "version": "2.1.0",
   "files": [
     "config.default.yaml",
     "main.py",
@@ -20,6 +20,7 @@
     "src/quality_service.py",
     "src/series_service.py",
     "src/story_service.py",
+    "src/subtitle_cleanup_service.py",
     "src/content_review_service.py",
     "src/update_manager.py",
     "src/vision_service.py",
@@ -35,6 +36,7 @@
     "tests/test_repository_updater.py",
     "tests/test_series_service.py",
     "tests/test_story_service.py",
+    "tests/test_subtitle_cleanup_service.py",
     "tests/test_content_review_service.py",
     "tests/test_vision_service.py",
     "tests/test_voice_service.py",

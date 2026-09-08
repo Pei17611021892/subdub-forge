@@ -60,6 +60,7 @@ from .matching_service import (
     select_shot_match,
 )
 from .export_service import render_rough_preview
+from .subtitle_cleanup_service import render_subtitle_clean_video
 from .quality_service import (
     combine_quality_reports,
     inspect_media_content,
@@ -111,6 +112,8 @@ class AppController(QObject):
     _mediaReady = Signal(object, str, str, int)
     _previewReady = Signal(str, str, int, float)
     _subtitleEffectPreviewReady = Signal(str, int)
+    _subtitleCleanupProgressReady = Signal(float, str, int)
+    _subtitleCleanupFinished = Signal(bool, str, str, int)
     _analysisProgressReady = Signal(float, str, float, int)
     _modelDownloadProgressReady = Signal(float, str, bool, int)
     _analysisFinished = Signal(bool, str, int)
@@ -219,6 +222,7 @@ class AppController(QObject):
         self._export_progress = 0.0
         self._export_status = "等待生成成片预览"
         self._export_path = ""
+        self._subtitle_test_preview_path = ""
         self._preserve_original_audio = bool(
             self._config.get("export", {}).get("preserve_original_audio", False)
         )
@@ -226,7 +230,22 @@ class AppController(QObject):
             self._config.get("export", {}).get("burn_subtitles", True)
         )
         self._export_fit_mode = self._normalize_export_fit_mode(
-            self._config.get("export", {}).get("fit_mode", "vertical_blur")
+            self._config.get("export", {}).get("fit_mode", "crop_stretch")
+        )
+        self._canvas_aspect_ratio = self._normalize_canvas_aspect_ratio(
+            self._config.get("export", {}).get("canvas_aspect_ratio", "fit")
+        )
+        self._canvas_fixed_scale = bool(
+            self._config.get("export", {}).get("canvas_fixed_scale", True)
+        )
+        self._canvas_scale_x = self._normalize_canvas_scale(
+            self._config.get("export", {}).get("canvas_scale_x", 1.0)
+        )
+        self._canvas_scale_y = self._normalize_canvas_scale(
+            self._config.get("export", {}).get("canvas_scale_y", 1.0)
+        )
+        self._vertical_crop_fill_percent = self._normalize_vertical_crop_fill_percent(
+            self._config.get("export", {}).get("vertical_crop_fill_percent", 100)
         )
         self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
         self._voice_busy = False
@@ -246,10 +265,16 @@ class AppController(QObject):
         self._subtitle_effect_preview_url = ""
         self._subtitle_effect_preview_busy = False
         self._subtitle_effect_preview_job_id = 0
+        self._subtitle_cleanup_job_id = 0
+        self._subtitle_cleanup_busy = False
+        self._subtitle_cleanup_progress = 0.0
+        self._subtitle_cleanup_status = "尚未生成去字幕视频"
+        self._subtitle_cleaned_video_path = ""
+        self._subtitle_cleaned_preview_url = ""
         try:
-            self._app_version = str(read_version().get("version", "2.0.9"))
+            self._app_version = str(read_version().get("version", "2.1.0"))
         except Exception:
-            self._app_version = "2.0.9"
+            self._app_version = "2.1.0"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -262,6 +287,8 @@ class AppController(QObject):
         self._mediaReady.connect(self._apply_media_result)
         self._previewReady.connect(self._apply_preview_result)
         self._subtitleEffectPreviewReady.connect(self._apply_subtitle_effect_preview)
+        self._subtitleCleanupProgressReady.connect(self._apply_subtitle_cleanup_progress)
+        self._subtitleCleanupFinished.connect(self._apply_subtitle_cleanup_finished)
         self._analysisProgressReady.connect(self._apply_analysis_progress)
         self._modelDownloadProgressReady.connect(self._apply_model_download_progress)
         self._analysisFinished.connect(self._apply_analysis_finished)
@@ -852,6 +879,21 @@ class AppController(QObject):
     def previewVideoPath(self) -> str:
         return self._export_path
 
+    @Property(bool, notify=exportChanged)
+    def subtitleTestPreviewReady(self) -> bool:
+        return bool(
+            self._subtitle_test_preview_path
+            and Path(self._subtitle_test_preview_path).exists()
+        )
+
+    @Slot(result=str)
+    def prepareFinalVideoExportUrl(self) -> str:
+        if not self.previewVideoReady:
+            return ""
+        self._export_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{self._safe_name(self._project_name)}_final.mp4"
+        return QUrl.fromLocalFile(str(self._export_dir / filename)).toString()
+
     @Slot(result=str)
     @Slot(str, result=str)
     def prepareTtsSrtExportUrl(self, export_format: str = "srt") -> str:
@@ -877,21 +919,47 @@ class AppController(QObject):
         return self._export_fit_mode
 
     @Property(int, notify=exportChanged)
+    def verticalCropFillPercent(self) -> int:
+        return self._vertical_crop_fill_percent
+
+    @Property(str, notify=exportChanged)
+    def canvasAspectRatio(self) -> str:
+        return self._canvas_aspect_ratio
+
+    @Property(bool, notify=exportChanged)
+    def canvasFixedScale(self) -> bool:
+        return self._canvas_fixed_scale
+
+    @Property(float, notify=exportChanged)
+    def canvasScaleX(self) -> float:
+        return self._canvas_scale_x
+
+    @Property(float, notify=exportChanged)
+    def canvasScaleY(self) -> float:
+        return self._canvas_scale_y
+
+    @Property(int, notify=exportChanged)
     def subtitleCanvasWidth(self) -> int:
         if self._export_fit_mode == "original":
             return max(1, int(self._media.get("width", 1920) or 1920))
+        if self._export_fit_mode == "crop_stretch":
+            return self._canvas_dimensions()[0]
         return max(1, int(self._config.get("export", {}).get("width", 1080) or 1080))
 
     @Property(int, notify=exportChanged)
     def subtitleCanvasHeight(self) -> int:
         if self._export_fit_mode == "original":
             return max(1, int(self._media.get("height", 1080) or 1080))
+        if self._export_fit_mode == "crop_stretch":
+            return self._canvas_dimensions()[1]
         return max(1, int(self._config.get("export", {}).get("height", 1920) or 1920))
 
     @Property(str, notify=exportChanged)
     def exportLayoutHint(self) -> str:
-        if self._export_fit_mode == "vertical_crop":
-            return "9:16 铺满画布，会从左右裁掉部分横版画面；适合主体始终居中的素材。"
+        if self._export_fit_mode == "crop_stretch":
+            ratio = "适应原片" if self._canvas_aspect_ratio == "fit" else self._canvas_aspect_ratio
+            scale_mode = "固定比例" if self._canvas_fixed_scale else "自由拉伸"
+            return f"裁剪拉伸 · {ratio} · {scale_mode} · 画面始终居中。"
         if self._export_fit_mode == "original":
             return "保持原视频比例；横版成片通常不会被 YouTube 识别为 Shorts。"
         return "9:16 Shorts：完整保留主画面，使用模糊扩展背景填满，不裁切主体。"
@@ -1137,6 +1205,39 @@ class AppController(QObject):
     @Property(bool, notify=subtitleEffectPreviewChanged)
     def subtitleEffectPreviewReady(self) -> bool:
         return bool(self._subtitle_effect_preview_url)
+
+    @Property(bool, notify=subtitleEffectPreviewChanged)
+    def subtitleCleanupBusy(self) -> bool:
+        return self._subtitle_cleanup_busy
+
+    @Property(float, notify=subtitleEffectPreviewChanged)
+    def subtitleCleanupProgress(self) -> float:
+        return self._subtitle_cleanup_progress
+
+    @Property(str, notify=subtitleEffectPreviewChanged)
+    def subtitleCleanupStatus(self) -> str:
+        return self._subtitle_cleanup_status
+
+    @Property(bool, notify=subtitleEffectPreviewChanged)
+    def subtitleCleanedVideoReady(self) -> bool:
+        return bool(
+            self._subtitle_cleaned_video_path
+            and Path(self._subtitle_cleaned_video_path).exists()
+        )
+
+    @Property(str, notify=subtitleEffectPreviewChanged)
+    def subtitleCleanedPreviewUrl(self) -> str:
+        return self._subtitle_cleaned_preview_url
+
+    @Property(str, notify=subtitleEffectPreviewChanged)
+    def subtitleStylePreviewSourceName(self) -> str:
+        source = self._subtitle_style_preview_video_path()
+        return source.name if source else "尚未选择视频"
+
+    def _subtitle_style_preview_video_path(self) -> Path | None:
+        if self.subtitleCleanedVideoReady:
+            return Path(self._subtitle_cleaned_video_path)
+        return Path(self._video_path) if self._video_path else None
 
     @Property(int, notify=mediaChanged)
     def sourceVideoWidth(self) -> int:
@@ -2784,6 +2885,7 @@ class AppController(QObject):
                 artifacts.pop("matches", None)
                 artifacts.pop("rough_cut", None)
                 artifacts.pop("rough_preview", None)
+                artifacts.pop("subtitle_test_preview", None)
                 artifacts.pop("fact_review", None)
                 artifacts.pop("terminology_review", None)
                 artifacts.pop("content_review", None)
@@ -2906,6 +3008,7 @@ class AppController(QObject):
                 artifacts.pop("matches", None)
                 artifacts.pop("rough_cut", None)
                 artifacts.pop("rough_preview", None)
+                artifacts.pop("subtitle_test_preview", None)
                 project_file.write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
@@ -3632,6 +3735,7 @@ class AppController(QObject):
             else None,
             "成片预览已生成，可使用系统播放器查看",
             "storycut_final_preview.mp4",
+            "final",
         )
 
     @Slot()
@@ -3713,13 +3817,8 @@ class AppController(QObject):
                     )
                 except (OSError, ValueError, TypeError):
                     pass
-                export_config = self._config.get("export", {})
-                if str(export_config.get("fit_mode", "original")).lower() == "original":
-                    expected_width = int(self._media.get("width", 0) or 0)
-                    expected_height = int(self._media.get("height", 0) or 0)
-                else:
-                    expected_width = int(export_config.get("width", 0) or 0)
-                    expected_height = int(export_config.get("height", 0) or 0)
+                expected_width = self.subtitleCanvasWidth
+                expected_height = self.subtitleCanvasHeight
                 render_report = inspect_rendered_video(
                     rendered,
                     expected_duration,
@@ -3819,6 +3918,7 @@ class AppController(QObject):
                 else "仅字幕测试预览已生成（无声音，字幕时间为估算值）"
             ),
             "storycut_subtitle_test.mp4",
+            "subtitle_test",
         )
 
     @Slot(bool)
@@ -3865,9 +3965,9 @@ class AppController(QObject):
             except (OSError, ValueError, TypeError):
                 pass
         self._export_status = (
-            "将烧录同步英文字幕，请重新生成预览"
+            "将烧录同步字幕并应用全部字幕样式，请重新生成预览"
             if self._burn_subtitles
-            else "已关闭英文字幕烧录，请重新生成预览"
+            else "已关闭字幕烧录，成片不会添加字幕，请重新生成预览"
         )
         self.exportChanged.emit()
 
@@ -3894,12 +3994,101 @@ class AppController(QObject):
         self.subtitleEffectPreviewChanged.emit()
         self.exportChanged.emit()
 
+    @Slot(str)
+    def setCanvasAspectRatio(self, value: str) -> None:
+        normalized = self._normalize_canvas_aspect_ratio(value)
+        if normalized == self._canvas_aspect_ratio:
+            return
+        self._canvas_aspect_ratio = normalized
+        self._canvas_scale_x = 1.0
+        self._canvas_scale_y = 1.0
+        self._save_canvas_transform()
+
+    @Slot(bool)
+    def setCanvasFixedScale(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._canvas_fixed_scale:
+            return
+        self._canvas_fixed_scale = enabled
+        if enabled:
+            uniform = max(self._canvas_scale_x, self._canvas_scale_y)
+            self._canvas_scale_x = uniform
+            self._canvas_scale_y = uniform
+        self._save_canvas_transform()
+
+    @Slot(float, float)
+    def setCanvasScale(self, scale_x: float, scale_y: float) -> None:
+        x = self._normalize_canvas_scale(scale_x)
+        y = self._normalize_canvas_scale(scale_y)
+        if self._canvas_fixed_scale:
+            uniform = x if abs(x - self._canvas_scale_x) >= abs(y - self._canvas_scale_y) else y
+            uniform = self._normalize_canvas_scale(uniform)
+            x = uniform
+            y = uniform
+        if abs(x - self._canvas_scale_x) < 0.001 and abs(y - self._canvas_scale_y) < 0.001:
+            return
+        self._canvas_scale_x = x
+        self._canvas_scale_y = y
+        self._save_canvas_transform()
+
+    @Slot()
+    def resetCanvasTransform(self) -> None:
+        self._canvas_aspect_ratio = "fit"
+        self._canvas_fixed_scale = True
+        self._canvas_scale_x = 1.0
+        self._canvas_scale_y = 1.0
+        self._save_canvas_transform()
+
+    def _save_canvas_transform(self) -> None:
+        if self._current_project_file:
+            try:
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                export = payload.setdefault("settings", {}).setdefault("export", {})
+                export["canvas_aspect_ratio"] = self._canvas_aspect_ratio
+                export["canvas_fixed_scale"] = self._canvas_fixed_scale
+                export["canvas_scale_x"] = self._canvas_scale_x
+                export["canvas_scale_y"] = self._canvas_scale_y
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        self._subtitle_effect_preview_url = ""
+        self._export_status = "裁剪拉伸设置已修改，请重新生成预览"
+        self.subtitleEffectPreviewChanged.emit()
+        self.exportChanged.emit()
+
+    @Slot(int)
+    def setVerticalCropFillPercent(self, value: int) -> None:
+        normalized = self._normalize_vertical_crop_fill_percent(value)
+        if normalized == self._vertical_crop_fill_percent:
+            return
+        self._vertical_crop_fill_percent = normalized
+        if self._current_project_file:
+            try:
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                payload.setdefault("settings", {}).setdefault("export", {})[
+                    "vertical_crop_fill_percent"
+                ] = normalized
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        self._subtitle_effect_preview_url = ""
+        self._export_status = "画面裁剪范围已修改，请重新生成预览"
+        self.subtitleEffectPreviewChanged.emit()
+        self.exportChanged.emit()
+
     def _start_rough_preview(
         self,
         narration_audio: Path | None,
         subtitle_srt: Path | None,
         finished_status: str,
         output_filename: str,
+        preview_kind: str = "final",
     ) -> None:
         if not self._current_project_file:
             return
@@ -3914,8 +4103,15 @@ class AppController(QObject):
         self.exportChanged.emit()
         output_filename = f"{self._safe_name(self._project_name)}_{output_filename}"
         output = self._export_dir / output_filename
-        source = Path(self._video_path)
+        source = (
+            Path(self._subtitle_cleaned_video_path)
+            if self.subtitleCleanedVideoReady
+            else Path(self._video_path)
+        )
         render_config = self._config_with_project_style()
+        # 原字幕只在第 3 步处理一次。最终合成若使用中间视频，不再重复套遮罩；
+        # 用户跳过第 3 步时则直接使用原视频，不会意外盖住画面。
+        render_config.setdefault("export", {})["original_subtitle_cleanup_mode"] = "none"
         preflight_report = deepcopy(self._quality_report) if narration_audio else {}
 
         def report(value: float, status: str) -> None:
@@ -3948,11 +4144,16 @@ class AppController(QObject):
                     preflight_report, rendered_report
                 )
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
-                payload["stage"] = "previewed"
+                if preview_kind == "final":
+                    payload["stage"] = "previewed"
                 payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
                 relative_output = os.path.relpath(output, project_file.parent).replace("\\", "/")
-                payload.setdefault("artifacts", {})["rough_preview"] = relative_output
+                artifact_key = (
+                    "rough_preview" if preview_kind == "final" else "subtitle_test_preview"
+                )
+                payload.setdefault("artifacts", {})[artifact_key] = relative_output
                 project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                result["preview_kind"] = preview_kind
                 self._exportFinished.emit(True, finished_status, result, job_id)
             except Exception as exc:
                 self._export_dir.mkdir(parents=True, exist_ok=True)
@@ -3966,6 +4167,26 @@ class AppController(QObject):
     def openRoughPreview(self) -> None:
         if self._export_path and Path(self._export_path).exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._export_path))
+
+    @Slot(str)
+    def saveFinalVideo(self, url: str) -> None:
+        if not url or not self.previewVideoReady:
+            return
+        try:
+            source = Path(self._export_path)
+            destination = Path(QUrlHelper.to_local_path(url))
+            if destination.suffix.lower() != ".mp4":
+                destination = destination.with_suffix(".mp4")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.resolve() != destination.resolve():
+                shutil.copy2(source, destination)
+            self._export_status = f"成片已导出：{destination}"
+            self._notice = self._export_status
+        except (OSError, ValueError) as exc:
+            self._export_status = f"成片导出失败：{exc}"
+            self._notice = self._export_status
+        self.exportChanged.emit()
+        self.noticeChanged.emit()
 
     @Slot(str)
     @Slot(str, str)
@@ -4023,6 +4244,7 @@ class AppController(QObject):
             "letterSpacing",
             "animation",
             "backgroundEnabled",
+            "backgroundMode",
             "backgroundOpacity",
             "outlineWidth",
             "boxPadding",
@@ -4061,19 +4283,52 @@ class AppController(QObject):
             value = cleaned if re.fullmatch(r"#[0-9A-F]{8}", cleaned) else "#FFFFFFFF"
         elif key == "animation":
             value = str(value) if str(value) in {"none", "fade", "pop"} else "fade"
+        elif key == "backgroundMode":
+            value = str(value) if str(value) in {"mask", "blur", "delogo"} else "mask"
         else:
             value = str(value)
         self._subtitle_style[key] = value
-        if key == "cleanupMode":
-            # The cleanup layer is also the visible subtitle backdrop.  Keep the
-            # ASS renderer from drawing a second box immediately around the text.
-            self._subtitle_style["backgroundEnabled"] = False
-        self._subtitle_effect_preview_url = ""
+        cleanup_keys = {
+            "cleanupMode", "cleanupX", "cleanupY", "cleanupWidth", "cleanupHeight",
+            "cleanupOpacity", "blurRadius", "blurPower", "regionPadding", "feather",
+        }
+        if key in cleanup_keys:
+            self._subtitle_cleaned_video_path = ""
+            self._subtitle_cleaned_preview_url = ""
+            self._subtitle_cleanup_progress = 0.0
+            self._subtitle_cleanup_status = "遮罩设置已修改，请重新生成去字幕视频"
+            if self._current_project_file:
+                try:
+                    payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                    payload.setdefault("artifacts", {}).pop("subtitle_cleaned_video", None)
+                    self._current_project_file.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                except (OSError, ValueError, TypeError):
+                    pass
+        # 字体、位置等轻量设置由 QML 即时叠加预览，不要清空已经生成的
+        # 去字幕画面，否则缺少静态封面的项目会在调节时闪成黑屏。
+        if key in cleanup_keys:
+            self._subtitle_effect_preview_url = ""
         self.subtitleEffectPreviewChanged.emit()
         self._save_subtitle_style()
 
     @Slot()
     def generateSubtitleEffectPreview(self) -> None:
+        self._generate_subtitle_effect_preview(cleanup_only=False)
+
+    @Slot()
+    def clearSubtitleEffectPreview(self) -> None:
+        self._subtitle_effect_preview_job_id += 1
+        self._subtitle_effect_preview_busy = False
+        self._subtitle_effect_preview_url = ""
+        self.subtitleEffectPreviewChanged.emit()
+
+    @Slot()
+    def generateSubtitleCleanupPreview(self) -> None:
+        self._generate_subtitle_effect_preview(cleanup_only=True)
+
+    def _generate_subtitle_effect_preview(self, cleanup_only: bool) -> None:
         if not self._video_path or not self._current_project_file:
             self._notice = "请先创建并分析视频项目"
             self.noticeChanged.emit()
@@ -4089,8 +4344,19 @@ class AppController(QObject):
         job_id = self._subtitle_effect_preview_job_id
         self._subtitle_effect_preview_busy = True
         self.subtitleEffectPreviewChanged.emit()
-        video = Path(self._video_path)
-        output = self._current_project_file.parent / "cache" / f"subtitle_effect_{job_id % 2}.jpg"
+        video = (
+            Path(self._video_path)
+            if cleanup_only
+            else self._subtitle_style_preview_video_path()
+        )
+        if video is None:
+            self._subtitle_effect_preview_busy = False
+            self._notice = "找不到字幕预览源视频"
+            self.subtitleEffectPreviewChanged.emit()
+            self.noticeChanged.emit()
+            return
+        preview_prefix = "subtitle_cleanup_effect" if cleanup_only else "subtitle_style_effect"
+        output = self._current_project_file.parent / "cache" / f"{preview_prefix}_{job_id % 2}.jpg"
         style = dict(self._subtitle_style)
         duration = float(self._media.get("duration_sec", 0) or 0)
         timestamp = min(max(0.0, self._preview_position), max(0.0, duration - 0.1))
@@ -4099,6 +4365,14 @@ class AppController(QObject):
 
         def worker() -> None:
             try:
+                preview_config = self._config_with_project_style()
+                if cleanup_only:
+                    preview_config.setdefault("export", {})["fit_mode"] = "original"
+                else:
+                    # 第 5 步使用独立的文字背景效果，不能再次套用第 3 步的
+                    # 原字幕清理区域。黑色弹框由 QML/ASS 绘制，模糊与
+                    # Delogo 才需要 FFmpeg 生成真实底板画面。
+                    style.update(self._subtitle_background_effect_style(style))
                 render_subtitle_effect_preview(
                     video,
                     output,
@@ -4106,7 +4380,7 @@ class AppController(QObject):
                     style,
                     width,
                     height,
-                    self._config_with_project_style(),
+                    preview_config,
                     self._root,
                 )
                 self._subtitleEffectPreviewReady.emit(output.as_uri() + f"?v={job_id}", job_id)
@@ -4114,6 +4388,88 @@ class AppController(QObject):
                 self._subtitleEffectPreviewReady.emit("", job_id)
 
         threading.Thread(target=worker, name="storycut-subtitle-effect-preview", daemon=True).start()
+
+    @Slot()
+    def generateSubtitleCleanVideo(self) -> None:
+        if self._subtitle_cleanup_busy or self._export_busy or not self._current_project_file:
+            return
+        if not self._ensure_source_video():
+            return
+        width = int(self._media.get("width", 0) or 0)
+        height = int(self._media.get("height", 0) or 0)
+        duration = float(self._media.get("duration_sec", 0) or 0)
+        if width <= 0 or height <= 0 or duration <= 0:
+            self._notice = "缺少原视频尺寸或时长信息，无法生成去字幕视频"
+            self.noticeChanged.emit()
+            return
+        self._subtitle_cleanup_job_id += 1
+        job_id = self._subtitle_cleanup_job_id
+        self._subtitle_cleanup_busy = True
+        self._subtitle_cleanup_progress = 0.01
+        self._subtitle_cleanup_status = "正在准备去字幕视频…"
+        self.subtitleEffectPreviewChanged.emit()
+        source = Path(self._video_path)
+        output = self._current_project_file.parent / "media" / "source_without_subtitles.mp4"
+        preview_output = self._current_project_file.parent / "cache" / "source_without_subtitles.jpg"
+        style = dict(self._subtitle_style)
+        config = self._config_with_project_style()
+
+        def report(value: float, status: str) -> None:
+            self._subtitleCleanupProgressReady.emit(value, status, job_id)
+
+        def worker() -> None:
+            try:
+                result = render_subtitle_clean_video(
+                    source, output, style, width, height, duration, config, self._root, report
+                )
+                try:
+                    extract_preview_frame(
+                        result,
+                        preview_output,
+                        min(max(0.0, self._preview_position), max(0.0, duration - 0.1)),
+                        config,
+                        self._root,
+                    )
+                except Exception:
+                    pass
+                self._subtitleCleanupFinished.emit(True, "去字幕视频生成完成", str(result), job_id)
+            except Exception as exc:
+                self._subtitleCleanupFinished.emit(False, str(exc), "", job_id)
+
+        threading.Thread(target=worker, name="storycut-subtitle-cleanup", daemon=True).start()
+
+    @Slot()
+    def openSubtitleCleanedVideo(self) -> None:
+        if self.subtitleCleanedVideoReady:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._subtitle_cleaned_video_path))
+
+    @Slot()
+    def deleteSubtitleCleanedVideo(self) -> None:
+        if not self._current_project_file:
+            return
+        target = Path(self._subtitle_cleaned_video_path) if self._subtitle_cleaned_video_path else None
+        try:
+            project_dir = self._current_project_file.parent.resolve()
+            if target and target.exists() and target.resolve().is_relative_to(project_dir):
+                target.unlink()
+            payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+            payload.setdefault("artifacts", {}).pop("subtitle_cleaned_video", None)
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            self._current_project_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self._subtitle_cleaned_video_path = ""
+            self._subtitle_cleaned_preview_url = ""
+            self._subtitle_cleanup_progress = 0.0
+            self._subtitle_cleanup_status = "已删除去字幕中间视频；后续将使用原视频"
+            self._notice = self._subtitle_cleanup_status
+            self._subtitle_effect_preview_url = ""
+            preview = self._current_project_file.parent / "cache" / "source_without_subtitles.jpg"
+            preview.unlink(missing_ok=True)
+        except (OSError, ValueError, TypeError) as exc:
+            self._notice = f"删除去字幕中间视频失败：{exc}"
+        self.subtitleEffectPreviewChanged.emit()
+        self.noticeChanged.emit()
 
     @Slot(str)
     def applySubtitlePreset(self, preset: str) -> None:
@@ -4495,6 +4851,7 @@ class AppController(QObject):
                 "narration_srt_original",
                 "narration_whisper",
                 "rough_preview",
+                "subtitle_test_preview",
                 "duration_revision_proposal",
                 "fact_review",
                 "terminology_review",
@@ -4523,6 +4880,7 @@ class AppController(QObject):
             self._narration_speed = 1.0
             self._voice_status = "新 SRT 已准备；请重新生成并导入 GPT-SoVITS 配音"
             self._export_path = ""
+            self._subtitle_test_preview_path = ""
             self._duration_revision_proposal = {}
             self._duration_revision_status = "新稿已应用"
             self._matching_status = "新稿已自动重新匹配镜头"
@@ -4904,6 +5262,7 @@ class AppController(QObject):
             + ("仍超过 Shorts 上限，请删减文案" if self.narrationOverShortsLimit else "镜头与字幕时间线已同步校准")
         )
         self._export_path = ""
+        self._subtitle_test_preview_path = ""
         self.voiceChanged.emit()
         self.exportChanged.emit()
 
@@ -5208,6 +5567,7 @@ class AppController(QObject):
         self._export_progress = 0.0
         self._export_status = "等待生成成片预览"
         self._export_path = ""
+        self._subtitle_test_preview_path = ""
         self._preserve_original_audio = bool(
             self._config.get("export", {}).get("preserve_original_audio", False)
         )
@@ -5215,7 +5575,22 @@ class AppController(QObject):
             self._config.get("export", {}).get("burn_subtitles", True)
         )
         self._export_fit_mode = self._normalize_export_fit_mode(
-            self._config.get("export", {}).get("fit_mode", "vertical_blur")
+            self._config.get("export", {}).get("fit_mode", "crop_stretch")
+        )
+        self._canvas_aspect_ratio = self._normalize_canvas_aspect_ratio(
+            self._config.get("export", {}).get("canvas_aspect_ratio", "fit")
+        )
+        self._canvas_fixed_scale = bool(
+            self._config.get("export", {}).get("canvas_fixed_scale", True)
+        )
+        self._canvas_scale_x = self._normalize_canvas_scale(
+            self._config.get("export", {}).get("canvas_scale_x", 1.0)
+        )
+        self._canvas_scale_y = self._normalize_canvas_scale(
+            self._config.get("export", {}).get("canvas_scale_y", 1.0)
+        )
+        self._vertical_crop_fill_percent = self._normalize_vertical_crop_fill_percent(
+            self._config.get("export", {}).get("vertical_crop_fill_percent", 100)
         )
         self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
         self._voice_busy = False
@@ -5230,6 +5605,12 @@ class AppController(QObject):
         self._quality_busy = False
         self._subtitle_style = self._default_subtitle_style()
         self._subtitle_effect_preview_url = ""
+        self._subtitle_cleanup_job_id += 1
+        self._subtitle_cleanup_busy = False
+        self._subtitle_cleanup_progress = 0.0
+        self._subtitle_cleanup_status = "尚未生成去字幕视频"
+        self._subtitle_cleaned_video_path = ""
+        self._subtitle_cleaned_preview_url = ""
         self.projectChanged.emit()
         self.seriesSplitChanged.emit()
         self.mediaChanged.emit()
@@ -5310,6 +5691,46 @@ class AppController(QObject):
             self._notice = "真实字幕底板预览已生成"
         else:
             self._notice = "真实预览生成失败，请确认 FFmpeg 可用"
+        self.subtitleEffectPreviewChanged.emit()
+        self.noticeChanged.emit()
+
+    @Slot(float, str, int)
+    def _apply_subtitle_cleanup_progress(self, value: float, status: str, job_id: int) -> None:
+        if job_id != self._subtitle_cleanup_job_id:
+            return
+        self._subtitle_cleanup_progress = min(1.0, max(0.0, value))
+        self._subtitle_cleanup_status = status
+        self.subtitleEffectPreviewChanged.emit()
+
+    @Slot(bool, str, str, int)
+    def _apply_subtitle_cleanup_finished(
+        self, success: bool, status: str, output_path: str, job_id: int
+    ) -> None:
+        if job_id != self._subtitle_cleanup_job_id:
+            return
+        self._subtitle_cleanup_busy = False
+        if success and output_path and self._current_project_file:
+            self._subtitle_cleanup_progress = 1.0
+            self._subtitle_cleanup_status = status
+            self._subtitle_cleaned_video_path = output_path
+            cleaned_preview = self._current_project_file.parent / "cache" / "source_without_subtitles.jpg"
+            self._subtitle_cleaned_preview_url = (
+                cleaned_preview.as_uri() if cleaned_preview.exists() else ""
+            )
+            try:
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                relative = Path(output_path).relative_to(self._current_project_file.parent)
+                payload.setdefault("artifacts", {})["subtitle_cleaned_video"] = relative.as_posix()
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._current_project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+            self._notice = "去字幕视频已生成，后续画布、字幕和合成将使用它"
+        else:
+            self._subtitle_cleanup_status = f"去字幕视频生成失败：{status}"
+            self._notice = self._subtitle_cleanup_status
         self.subtitleEffectPreviewChanged.emit()
         self.noticeChanged.emit()
 
@@ -5474,6 +5895,7 @@ class AppController(QObject):
                 else "故事已更新，请重新自动匹配镜头"
             )
             self._export_path = ""
+            self._subtitle_test_preview_path = ""
             self._refresh_recent_projects()
         self.storyChanged.emit()
         self.seriesSplitChanged.emit()
@@ -5545,7 +5967,11 @@ class AppController(QObject):
         self._export_status = message if success else f"Shorts 预览生成失败：{message}"
         self._notice = self._export_status
         if success and isinstance(result, dict):
-            self._export_path = str(result.get("path", ""))
+            preview_kind = str(result.get("preview_kind", "final"))
+            if preview_kind == "subtitle_test":
+                self._subtitle_test_preview_path = str(result.get("path", ""))
+            else:
+                self._export_path = str(result.get("path", ""))
             report = result.get("quality_report", {})
             if isinstance(report, dict) and report:
                 self._quality_report = dict(report)
@@ -5874,22 +6300,49 @@ class AppController(QObject):
 
     def _load_export(self, project_file: Path) -> None:
         output: Path | None = None
+        subtitle_test_output: Path | None = None
         try:
             payload = json.loads(project_file.read_text(encoding="utf-8"))
-            relative = str(payload.get("artifacts", {}).get("rough_preview", ""))
+            artifacts = payload.get("artifacts", {})
+            artifacts = artifacts if isinstance(artifacts, dict) else {}
+            relative = str(artifacts.get("rough_preview", ""))
             candidate = project_file.parent / relative if relative else None
             if candidate and candidate.exists():
-                output = candidate
+                if "subtitle_test" in candidate.name.lower():
+                    # 旧版本把仅字幕测试误记成了最终成片预览；打开项目时纠正。
+                    subtitle_test_output = candidate
+                    artifacts.pop("rough_preview", None)
+                    artifacts["subtitle_test_preview"] = relative
+                    payload["artifacts"] = artifacts
+                    project_file.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                else:
+                    output = candidate
+            test_relative = str(artifacts.get("subtitle_test_preview", ""))
+            test_candidate = project_file.parent / test_relative if test_relative else None
+            if test_candidate and test_candidate.exists():
+                subtitle_test_output = test_candidate
         except (OSError, ValueError, TypeError):
             pass
         if output is None:
             legacy_candidates = (
                 project_file.parent / "export" / "storycut_final_preview.mp4",
-                project_file.parent / "export" / "storycut_subtitle_test.mp4",
                 project_file.parent / "exports" / "rough_preview.mp4",
             )
             output = next((path for path in legacy_candidates if path.exists()), None)
+        if subtitle_test_output is None:
+            legacy_test_candidates = (
+                project_file.parent / "export" / "storycut_subtitle_test.mp4",
+                project_file.parent / "exports" / "storycut_subtitle_test.mp4",
+            )
+            subtitle_test_output = next(
+                (path for path in legacy_test_candidates if path.exists()), None
+            )
         self._export_path = str(output) if output else ""
+        self._subtitle_test_preview_path = (
+            str(subtitle_test_output) if subtitle_test_output else ""
+        )
         self._export_progress = 1.0 if output else 0.0
         self._export_status = "成片预览已生成，可使用系统播放器查看" if output else "等待生成成片预览"
         self.exportChanged.emit()
@@ -6023,6 +6476,7 @@ class AppController(QObject):
             "letterSpacing": float(export.get("subtitle_spacing", 0) or 0),
             "animation": str(export.get("subtitle_animation", "fade")),
             "backgroundEnabled": False,
+            "backgroundMode": str(export.get("subtitle_background_mode", "mask")),
             "backgroundOpacity": float(export.get("subtitle_background_opacity", 0.62) or 0.62),
             "outlineWidth": int(export.get("subtitle_outline_width", 3) or 3),
             "boxPadding": int(export.get("subtitle_box_padding", 12) or 12),
@@ -6040,6 +6494,12 @@ class AppController(QObject):
 
     def _load_subtitle_style(self, project_file: Path) -> None:
         self._subtitle_style = self._default_subtitle_style()
+        self._subtitle_cleanup_job_id += 1
+        self._subtitle_cleanup_busy = False
+        self._subtitle_cleanup_progress = 0.0
+        self._subtitle_cleanup_status = "尚未生成去字幕视频"
+        self._subtitle_cleaned_video_path = ""
+        self._subtitle_cleaned_preview_url = ""
         self._preserve_original_audio = bool(
             self._config.get("export", {}).get("preserve_original_audio", False)
         )
@@ -6047,16 +6507,32 @@ class AppController(QObject):
             self._config.get("export", {}).get("burn_subtitles", True)
         )
         self._export_fit_mode = self._normalize_export_fit_mode(
-            self._config.get("export", {}).get("fit_mode", "vertical_blur")
+            self._config.get("export", {}).get("fit_mode", "crop_stretch")
+        )
+        self._canvas_aspect_ratio = self._normalize_canvas_aspect_ratio(
+            self._config.get("export", {}).get("canvas_aspect_ratio", "fit")
+        )
+        self._canvas_fixed_scale = bool(
+            self._config.get("export", {}).get("canvas_fixed_scale", True)
+        )
+        self._canvas_scale_x = self._normalize_canvas_scale(
+            self._config.get("export", {}).get("canvas_scale_x", 1.0)
+        )
+        self._canvas_scale_y = self._normalize_canvas_scale(
+            self._config.get("export", {}).get("canvas_scale_y", 1.0)
+        )
+        self._vertical_crop_fill_percent = self._normalize_vertical_crop_fill_percent(
+            self._config.get("export", {}).get("vertical_crop_fill_percent", 100)
         )
         try:
             payload = json.loads(project_file.read_text(encoding="utf-8"))
             saved = payload.get("settings", {}).get("subtitle", {})
             if isinstance(saved, dict):
                 self._subtitle_style.update(saved)
+            if self._subtitle_style.get("backgroundMode") not in {"mask", "blur", "delogo"}:
+                self._subtitle_style["backgroundMode"] = "mask"
             if self._subtitle_style.get("cleanupMode") not in {"mask", "blur", "delogo"}:
                 self._subtitle_style["cleanupMode"] = "mask"
-            self._subtitle_style["backgroundEnabled"] = False
             saved_export = payload.get("settings", {}).get("export", {})
             if isinstance(saved_export, dict):
                 self._preserve_original_audio = bool(
@@ -6068,9 +6544,42 @@ class AppController(QObject):
                 self._export_fit_mode = self._normalize_export_fit_mode(
                     saved_export.get("fit_mode", self._export_fit_mode)
                 )
+                self._canvas_aspect_ratio = self._normalize_canvas_aspect_ratio(
+                    saved_export.get("canvas_aspect_ratio", self._canvas_aspect_ratio)
+                )
+                self._canvas_fixed_scale = bool(
+                    saved_export.get("canvas_fixed_scale", self._canvas_fixed_scale)
+                )
+                self._canvas_scale_x = self._normalize_canvas_scale(
+                    saved_export.get("canvas_scale_x", self._canvas_scale_x)
+                )
+                self._canvas_scale_y = self._normalize_canvas_scale(
+                    saved_export.get("canvas_scale_y", self._canvas_scale_y)
+                )
+                self._vertical_crop_fill_percent = self._normalize_vertical_crop_fill_percent(
+                    saved_export.get(
+                        "vertical_crop_fill_percent", self._vertical_crop_fill_percent
+                    )
+                )
+            cleaned_relative = str(
+                payload.get("artifacts", {}).get("subtitle_cleaned_video", "") or ""
+            )
+            if cleaned_relative:
+                cleaned_path = project_file.parent / cleaned_relative
+                if cleaned_path.exists():
+                    self._subtitle_cleaned_video_path = str(cleaned_path)
+                    cleaned_preview = project_file.parent / "cache" / "source_without_subtitles.jpg"
+                    self._subtitle_cleaned_preview_url = (
+                        cleaned_preview.as_uri() if cleaned_preview.exists() else ""
+                    )
+                    self._subtitle_cleanup_progress = 1.0
+                    self._subtitle_cleanup_status = "去字幕视频已就绪"
         except (OSError, ValueError, TypeError):
             pass
         self.subtitleStyleChanged.emit()
+        # 去字幕视频状态与预览 URL 使用此信号通知 QML。项目打开时必须主动
+        # 刷新，否则界面会一直显示“尚未生成”，直到用户打开字幕设置弹窗。
+        self.subtitleEffectPreviewChanged.emit()
         self.exportChanged.emit()
 
     def _save_subtitle_style(self) -> None:
@@ -6102,6 +6611,7 @@ class AppController(QObject):
         export["subtitle_spacing"] = style["letterSpacing"]
         export["subtitle_animation"] = style["animation"]
         export["subtitle_background_enabled"] = style["backgroundEnabled"]
+        export["subtitle_background_mode"] = style["backgroundMode"]
         export["subtitle_background_opacity"] = style["backgroundOpacity"]
         export["subtitle_outline_width"] = style["outlineWidth"]
         export["subtitle_box_padding"] = style["boxPadding"]
@@ -6121,14 +6631,98 @@ class AppController(QObject):
         )
         export["burn_subtitles"] = self._burn_subtitles
         export["fit_mode"] = self._export_fit_mode
+        if self._export_fit_mode == "crop_stretch":
+            export["width"] = self.subtitleCanvasWidth
+            export["height"] = self.subtitleCanvasHeight
+        export["vertical_crop_fill_percent"] = self._vertical_crop_fill_percent
+        export["canvas_aspect_ratio"] = self._canvas_aspect_ratio
+        export["canvas_fixed_scale"] = self._canvas_fixed_scale
+        export["canvas_scale_x"] = self._canvas_scale_x
+        export["canvas_scale_y"] = self._canvas_scale_y
+        background_effect = self._subtitle_background_effect_style(style)
+        export["subtitle_background_x"] = background_effect["cleanupX"]
+        export["subtitle_background_y"] = background_effect["cleanupY"]
+        export["subtitle_background_width"] = background_effect["cleanupWidth"]
+        export["subtitle_background_height"] = background_effect["cleanupHeight"]
+        export["subtitle_background_blur_radius"] = background_effect["blurRadius"]
+        export["subtitle_background_blur_power"] = background_effect["blurPower"]
         return config
+
+    def _subtitle_background_effect_style(
+        self, style: dict[str, object]
+    ) -> dict[str, object]:
+        width = max(2, self.subtitleCanvasWidth)
+        height = max(2, self.subtitleCanvasHeight)
+        horizontal_margin = max(0, int(style.get("horizontalMargin", 72) or 72))
+        bottom_margin = max(0, int(style.get("bottomMargin", 72) or 72))
+        font_size = max(8, int(style.get("fontSize", 48) or 48))
+        box_padding = max(0, int(style.get("boxPadding", 12) or 12))
+        region_height = min(
+            int(height * 0.32),
+            max(font_size * 2 + box_padding * 2, int(height * 0.06)),
+        )
+        x_ratio = min(0.45, horizontal_margin / width)
+        width_ratio = max(0.1, 1.0 - x_ratio * 2)
+        height_ratio = min(0.32, region_height / height)
+        y_ratio = max(0.0, 1.0 - bottom_margin / height - height_ratio)
+        mode = str(style.get("backgroundMode", "mask"))
+        enabled = bool(style.get("backgroundEnabled", False))
+        return {
+            "cleanupMode": mode if enabled and mode in {"blur", "delogo"} else "none",
+            "cleanupX": x_ratio,
+            "cleanupY": y_ratio,
+            "cleanupWidth": width_ratio,
+            "cleanupHeight": height_ratio,
+            "cleanupOpacity": float(style.get("backgroundOpacity", 0.62) or 0.62),
+            "blurRadius": int(style.get("blurRadius", 12) or 12),
+            "blurPower": int(style.get("blurPower", 2) or 2),
+            "regionPadding": 0,
+            "feather": 0,
+        }
 
     @staticmethod
     def _normalize_export_fit_mode(value: object) -> str:
         mode = str(value or "").strip().lower()
-        aliases = {"crop": "vertical_crop", "contain": "vertical_blur"}
+        aliases = {
+            "crop": "crop_stretch",
+            "vertical_crop": "crop_stretch",
+            "contain": "vertical_blur",
+        }
         mode = aliases.get(mode, mode)
-        return mode if mode in {"vertical_blur", "vertical_crop", "original"} else "vertical_blur"
+        return mode if mode in {"crop_stretch", "vertical_blur", "original"} else "crop_stretch"
+
+    @staticmethod
+    def _normalize_canvas_aspect_ratio(value: object) -> str:
+        normalized = str(value or "fit").strip().lower()
+        return normalized if normalized in {"fit", "16:9", "4:3", "1:1", "3:4", "9:16"} else "fit"
+
+    @staticmethod
+    def _normalize_canvas_scale(value: object) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = 1.0
+        return min(10.0, max(0.25, numeric))
+
+    def _canvas_dimensions(self) -> tuple[int, int]:
+        source_width = max(2, int(self._media.get("width", 1920) or 1920))
+        source_height = max(2, int(self._media.get("height", 1080) or 1080))
+        dimensions = {
+            "16:9": (1920, 1080),
+            "4:3": (1440, 1080),
+            "1:1": (1080, 1080),
+            "3:4": (1080, 1440),
+            "9:16": (1080, 1920),
+        }
+        return dimensions.get(self._canvas_aspect_ratio, (source_width, source_height))
+
+    @staticmethod
+    def _normalize_vertical_crop_fill_percent(value: object) -> int:
+        try:
+            numeric = int(round(float(value)))
+        except (TypeError, ValueError):
+            numeric = 100
+        return min((50, 60, 70, 80, 90, 100), key=lambda option: abs(option - numeric))
 
     def _calibrate_story_with_voice(
         self,
