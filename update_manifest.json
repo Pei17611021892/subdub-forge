@@ -1,17 +1,14 @@
 {
   "format": 2,
-  "version": "2.1.2",
+  "version": "2.1.3",
   "scope": "repository",
   "files": [
     ".env.example",
     ".gitignore",
-    "AGENTS.md",
     "CODEX_HANDOFF.md",
     "LICENSE",
     "MODEL_DOWNLOAD.md",
     "README.md",
-    "docs/archive/DEVELOPMENT_HISTORY.md",
-    "docs/phases/manuscript-workflow.md",
     "repository_updater.py",
     "requirements.txt",
     "storycut_v2/config.default.yaml",

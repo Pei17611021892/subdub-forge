@@ -43,6 +43,7 @@ PROTECTED_PARTS = {
 ALLOWED_ROOT_FILES = {
     ".env.example",
     ".gitignore",
+    "AGENTS.md",
     "CODEX_HANDOFF.md",
     "LICENSE",
     "MODEL_DOWNLOAD.md",
@@ -54,6 +55,7 @@ ALLOWED_ROOT_FILES = {
     "点我启动StoryCut（AI解说剪辑）.vbs",
 }
 ALLOWED_APP_DIRS = {"storycut_v2"}
+ALLOWED_MANAGED_DIRS = {"docs", *ALLOWED_APP_DIRS}
 
 
 class UpdateError(RuntimeError):
@@ -189,7 +191,7 @@ def _safe_managed_path(value: str) -> Path:
     if len(relative.parts) == 1:
         if relative.name not in ALLOWED_ROOT_FILES:
             raise UpdateError(f"更新清单包含未授权的根目录文件：{value}")
-    elif first not in ALLOWED_APP_DIRS:
+    elif first not in ALLOWED_MANAGED_DIRS:
         raise UpdateError(f"更新清单包含未授权的目录：{value}")
     return relative
 

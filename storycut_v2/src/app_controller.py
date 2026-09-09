@@ -302,9 +302,9 @@ class AppController(QObject):
         self._subtitle_cleaned_video_path = ""
         self._subtitle_cleaned_preview_url = ""
         try:
-            self._app_version = str(read_version().get("version", "2.1.2"))
+            self._app_version = str(read_version().get("version", "2.1.3"))
         except Exception:
-            self._app_version = "2.1.2"
+            self._app_version = "2.1.3"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
