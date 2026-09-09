@@ -137,6 +137,16 @@ def describe_event_keyframes(
         text = str(response.choices[0].message.content or "")
         descriptions = _parse_json_array(text)
         by_id = {int(item.get("id", 0)): item for item in descriptions}
+        missing_ids = [
+            int(event.get("id", 0))
+            for event in batch
+            if int(event.get("id", 0)) not in by_id
+        ]
+        if missing_ids:
+            raise RuntimeError(
+                "视觉接口未返回这些关键场景："
+                + ", ".join(str(item) for item in missing_ids[:12])
+            )
         for event in batch:
             description = by_id.get(int(event["id"]), {})
             _apply_vision_item(event, description, content_mode, technical_enabled)
@@ -182,6 +192,9 @@ def describe_event_keyframes(
         for event in events
     )
     payload["high_detail_review_count"] = reviewed
+    payload["visual_description_event_count"] = sum(
+        bool(str(event.get("visual_description", "")).strip()) for event in events
+    )
     payload["events"] = events
     events_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

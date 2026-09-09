@@ -24,7 +24,7 @@ ApplicationWindow {
     property bool manuscriptProject: appController.projectType === "manuscript"
     property bool understandingDone: manuscriptProject
                                             ? appController.sourceManuscriptText.trim().length > 0
-                                            : appController.events.length > 0
+                                            : appController.analysisComplete
     property bool storyDone: appController.storyNarration.length > 0
                              && (!manuscriptProject || !appController.storyboardStale)
     property bool matchingDone: appController.matches.length > 0
@@ -3580,7 +3580,7 @@ ApplicationWindow {
 
                         Repeater {
                             model: [
-                                { n: "01", title: manuscriptProject ? "整理文稿" : "理解原片", desc: manuscriptProject ? "保存原稿，确认内容与目标" : "语音识别、场景检测与画面理解", state: understandingDone ? "已完成" : appController.hasProject ? "可开始" : "等待创建项目" },
+                                { n: "01", title: manuscriptProject ? "整理文稿" : "理解原片", desc: manuscriptProject ? "保存原稿，确认内容与目标" : "语音识别、场景检测与画面理解", state: appController.analysisNeedsVisionRetry ? "画面理解失败，需重试" : understandingDone ? "已完成" : appController.hasProject ? "可开始" : "等待创建项目" },
                                 { n: "02", title: manuscriptProject ? "规划分镜" : "组织故事", desc: manuscriptProject ? "拆分旁白，明确每段需要的画面" : "挑选关键事件，生成精简叙事", state: storyDone ? "已完成" : understandingDone ? "可开始" : manuscriptProject ? "等待整理文稿" : "等待理解原片" },
                                 { n: "03", title: manuscriptProject ? "匹配素材" : "匹配镜头", desc: manuscriptProject ? "导入素材，自动寻找最佳候选片段" : "为每句解说寻找最佳原片段", state: matchingDone ? "已完成" : storyDone ? "可开始" : manuscriptProject ? "等待规划分镜" : "等待组织故事" },
                                 { n: "04", title: manuscriptProject ? "配音导出" : "预览导出", desc: manuscriptProject ? "确认配音、字幕与素材并输出成片" : "确认配音、字幕与镜头并输出成片", state: exportDone ? "预览已生成" : matchingDone ? "可开始" : manuscriptProject ? "等待素材匹配" : "等待镜头匹配" }
@@ -3635,7 +3635,7 @@ ApplicationWindow {
                         Layout.preferredHeight: expanded ? understandingContent.implicitHeight + 36 : 90
                         radius: 14
                         color: panel
-                        border.color: understandingDone ? "#326b4d" : "#292c36"
+                        border.color: appController.analysisNeedsVisionRetry ? "#9a5b27" : understandingDone ? "#326b4d" : "#292c36"
 
                         ColumnLayout {
                             id: understandingContent
@@ -3654,13 +3654,16 @@ ApplicationWindow {
                                     Text {
                                         text: manuscriptProject
                                               ? "原稿保存在当前项目中；编辑停止约 0.7 秒后自动保存。"
-                                              : understandingDone
+                                              : appController.analysisNeedsVisionRetry
+                                                ? appController.analysisStatus
+                                                : understandingDone
                                                 ? appController.analysisStatus
                                                 : appController.videoPath
                                                   ? "识别语音、检测场景并理解关键画面。"
                                                   : "请先创建视频项目，随后即可开始原片理解。"
-                                        color: understandingDone ? "#8ee3b4" : textMuted
+                                        color: appController.analysisNeedsVisionRetry ? "#f1b86b" : understandingDone ? "#8ee3b4" : textMuted
                                         font.pixelSize: 12
+                                        wrapMode: Text.WordWrap
                                     }
                                     TapHandler { onTapped: understandingSection.expanded = !understandingSection.expanded }
                                 }
@@ -3693,6 +3696,54 @@ ApplicationWindow {
                                         } else {
                                             apiPreflightDialog.requestedAction = "understanding"
                                             apiPreflightDialog.open()
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: visionFailureContent.implicitHeight + 26
+                                visible: understandingSection.expanded
+                                         && !manuscriptProject
+                                         && appController.analysisNeedsVisionRetry
+                                radius: 10
+                                color: "#2c2018"
+                                border.color: "#9a5b27"
+
+                                RowLayout {
+                                    id: visionFailureContent
+                                    anchors.fill: parent
+                                    anchors.margins: 13
+                                    spacing: 14
+
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 3
+                                        Text {
+                                            text: "关键画面理解请求失败"
+                                            color: "#f1b86b"
+                                            font.pixelSize: 13
+                                            font.bold: true
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: "语音转写和场景切分已经保留，不必全部重跑。" + appController.visionFailureDetail
+                                            color: "#d8c0aa"
+                                            font.pixelSize: 11
+                                            wrapMode: Text.WordWrap
+                                        }
+                                    }
+                                    FlatButton {
+                                        text: appController.analysisBusy ? "正在重试…" : "重试画面理解"
+                                        enabled: !appController.analysisBusy
+                                        onClicked: {
+                                            if (appController.refreshApiConfiguration()) {
+                                                appController.retryVisionUnderstanding()
+                                            } else {
+                                                apiPreflightDialog.requestedAction = "understanding"
+                                                apiPreflightDialog.open()
+                                            }
                                         }
                                     }
                                 }

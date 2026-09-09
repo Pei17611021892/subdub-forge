@@ -85,6 +85,16 @@ from .update_manager import check_for_update, download_and_apply, read_version
 
 
 class AppController(QObject):
+    _RENDER_ARTIFACT_KEYS = ("rough_preview", "subtitle_test_preview")
+    _VOICE_ARTIFACT_KEYS = (
+        "narration_audio",
+        "narration_audio_original",
+        "narration_srt",
+        "narration_srt_original",
+        "narration_whisper",
+    )
+    _TIMELINE_ARTIFACT_KEYS = ("matches", "rough_cut")
+
     projectChanged = Signal()
     noticeChanged = Signal()
     recentProjectsChanged = Signal()
@@ -170,6 +180,9 @@ class AppController(QObject):
         self._analysis_busy = False
         self._analysis_progress = 0.0
         self._analysis_status = "等待开始"
+        self._analysis_complete = False
+        self._analysis_needs_vision_retry = False
+        self._vision_failure_detail = ""
         self._analysis_started_at = 0.0
         self._analysis_eta_seconds = -1.0
         self._analysis_eta_updated_at = 0.0
@@ -272,9 +285,9 @@ class AppController(QObject):
         self._subtitle_cleaned_video_path = ""
         self._subtitle_cleaned_preview_url = ""
         try:
-            self._app_version = str(read_version().get("version", "2.1.0"))
+            self._app_version = str(read_version().get("version", "2.1.1"))
         except Exception:
-            self._app_version = "2.1.0"
+            self._app_version = "2.1.1"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -426,6 +439,18 @@ class AppController(QObject):
     @Property(str, notify=analysisChanged)
     def analysisStatus(self) -> str:
         return self._analysis_status
+
+    @Property(bool, notify=analysisChanged)
+    def analysisComplete(self) -> bool:
+        return self._analysis_complete
+
+    @Property(bool, notify=analysisChanged)
+    def analysisNeedsVisionRetry(self) -> bool:
+        return self._analysis_needs_vision_retry
+
+    @Property(str, notify=analysisChanged)
+    def visionFailureDetail(self) -> str:
+        return self._vision_failure_detail
 
     @Property(str, notify=analysisChanged)
     def analysisContentMode(self) -> str:
@@ -1239,6 +1264,17 @@ class AppController(QObject):
             return Path(self._subtitle_cleaned_video_path)
         return Path(self._video_path) if self._video_path else None
 
+    def _available_video_source(self, allow_cleaned_video: bool = True) -> Path | None:
+        original = Path(self._video_path) if self._video_path else None
+        if original and original.exists():
+            return original
+        cleaned = (
+            Path(self._subtitle_cleaned_video_path)
+            if allow_cleaned_video and self._subtitle_cleaned_video_path
+            else None
+        )
+        return cleaned if cleaned and cleaned.exists() else None
+
     @Property(int, notify=mediaChanged)
     def sourceVideoWidth(self) -> int:
         return int(self._media.get("width", 1920) or 1920)
@@ -1548,6 +1584,7 @@ class AppController(QObject):
         if not url:
             return
         path = Path(QUrlHelper.to_local_path(url))
+        self._clear_current_project()
         self._project_type = "video"
         self._source_manuscript_text = ""
         self._video_path = str(path)
@@ -1748,6 +1785,9 @@ class AppController(QObject):
                     )
                 self._story_status = "文稿已修改，旧英文解说和分镜需要重新规划"
                 self._notice = self._story_status
+                self._invalidate_timeline_binding("原稿已修改，请重新规划分镜并匹配素材")
+                self._invalidate_voice_binding("原稿已修改，请重新规划分镜后再导入配音")
+                self._invalidate_render_outputs("原稿已修改，请重新生成预览")
                 self.storyChanged.emit()
             else:
                 self._notice = f"文稿已保存，共 {len(manuscript)} 个字符。"
@@ -1931,6 +1971,9 @@ class AppController(QObject):
             project_file = project_file / "project.json"
         try:
             payload = json.loads(project_file.read_text(encoding="utf-8"))
+            # Parse first so a broken project does not discard the current one,
+            # then reset every project-bound in-memory value before rebinding.
+            self._clear_current_project()
             self._current_project_file = project_file
             self._project_name = str(payload.get("name") or project_file.parent.name)
             project_type = str(payload.get("project_type") or "").strip().lower()
@@ -1978,6 +2021,7 @@ class AppController(QObject):
                 "analyzed": "已完成原片分析",
                 "transcribed": "已完成语音转录",
                 "understood": "已完成原片理解",
+                "analysis_partial": "画面理解失败，等待重试",
                 "scripted": "已生成解说文案",
                 "matched": "已完成镜头匹配",
                 "previewed": "已生成粗剪预览",
@@ -1993,6 +2037,7 @@ class AppController(QObject):
             self.mediaChanged.emit()
             self.previewChanged.emit()
             self._load_events(project_file)
+            self._restore_analysis_state(payload, project_file)
             self._load_story(project_file)
             self._load_manuscript_assets(project_file)
             self._load_stock_search(project_file)
@@ -2103,7 +2148,7 @@ class AppController(QObject):
     def requestPreviewFrame(self, seconds: float) -> None:
         if not self._video_path or not self._current_project_file:
             return
-        if not self._ensure_source_video():
+        if not self._ensure_source_video(allow_cleaned_video=True):
             return
         duration = self.durationSeconds
         timestamp = min(max(float(seconds), 0.0), duration if duration > 0 else float(seconds))
@@ -2112,7 +2157,9 @@ class AppController(QObject):
         self._preview_busy = True
         self._preview_position = timestamp
         self.previewChanged.emit()
-        video = Path(self._video_path)
+        video = self._available_video_source()
+        if video is None:
+            return
         output = self._current_project_file.parent / "cache" / f"preview_{job_id % 2}.jpg"
 
         def worker() -> None:
@@ -2264,6 +2311,9 @@ class AppController(QObject):
         self._analysis_busy = True
         self._analysis_progress = 0.01
         self._analysis_status = "准备理解原片…"
+        self._analysis_complete = False
+        self._analysis_needs_vision_retry = False
+        self._vision_failure_detail = ""
         self._analysis_started_at = time.monotonic()
         self._analysis_estimated_total = -1.0
         self._model_download_progress = 0.0
@@ -2420,13 +2470,22 @@ class AppController(QObject):
                             span = 0.10 if layered_enabled else 0.17
                             report(0.82 + value * span, status, max(3.0, eta))
 
-                        describe_event_keyframes(
+                        described_payload = describe_event_keyframes(
                             analysis_dir / "events.json",
                             self._config,
                             self._root,
                             vision_report,
                             video,
                         )
+                        described_count = sum(
+                            bool(str(event.get("visual_description", "")).strip())
+                            for event in described_payload.get("events", [])
+                            if isinstance(event, dict)
+                        )
+                        if target_count and described_count < target_count:
+                            raise RuntimeError(
+                                f"视觉接口只完成 {described_count}/{target_count} 个关键场景描述"
+                            )
                     except Exception as exc:
                         if content_mode == "visual":
                             raise RuntimeError(
@@ -2460,7 +2519,18 @@ class AppController(QObject):
                     if layered_enabled and skip_vision:
                         layered_warning = "仅本地预处理不会调用分层理解 API"
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
-                payload["stage"] = "understood"
+                payload["stage"] = (
+                    "analysis_partial"
+                    if vision_warning and not skip_vision
+                    else "understood"
+                )
+                payload["analysis_state"] = (
+                    "local_only"
+                    if skip_vision
+                    else "vision_failed"
+                    if vision_warning
+                    else "complete"
+                )
                 payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
                 payload.setdefault("artifacts", {})["transcript"] = "analysis/transcript.json"
                 payload["artifacts"]["transcript_srt"] = "analysis/transcript.srt"
@@ -2497,7 +2567,7 @@ class AppController(QObject):
                 status_file.write_text(
                     json.dumps(
                         {
-                            "state": "completed",
+                            "state": "partial" if vision_warning and not skip_vision else "completed",
                             "progress": 1.0,
                             "status": message,
                             "elapsed_sec": round(time.monotonic() - self._analysis_started_at, 1),
@@ -2530,6 +2600,139 @@ class AppController(QObject):
 
         threading.Thread(target=worker, name="storycut-understanding", daemon=True).start()
 
+    @Slot()
+    def retryVisionUnderstanding(self) -> None:
+        if self._analysis_busy or not self._current_project_file:
+            return
+        if not self.apiConfigured:
+            self._notice = "未配置 AI 接口，无法重试画面理解"
+            self.noticeChanged.emit()
+            return
+        project_file = self._current_project_file
+        events_file = project_file.parent / "analysis" / "events.json"
+        if not events_file.exists():
+            self._notice = "现有场景数据不存在，请重新理解原片"
+            self.noticeChanged.emit()
+            return
+
+        self._analysis_job_id += 1
+        job_id = self._analysis_job_id
+        self._analysis_busy = True
+        self._analysis_progress = 0.01
+        self._analysis_status = "正在重试关键画面理解；已保留语音转写和场景切分…"
+        self._analysis_started_at = time.monotonic()
+        self._analysis_complete = False
+        self.analysisChanged.emit()
+        source_video = self._available_video_source()
+        status_file = project_file.parent / "analysis" / "status.json"
+
+        def report(value: float, status: str) -> None:
+            self._analysisProgressReady.emit(
+                min(0.98, max(0.02, float(value))), status, -1.0, job_id
+            )
+
+        def worker() -> None:
+            try:
+                result = describe_event_keyframes(
+                    events_file,
+                    self._config,
+                    self._root,
+                    report,
+                    source_video,
+                )
+                events = [
+                    item for item in result.get("events", []) if isinstance(item, dict)
+                ]
+                targets = [item for item in events if str(item.get("keyframe", "")).strip()]
+                described = [
+                    item for item in targets if str(item.get("visual_description", "")).strip()
+                ]
+                if targets and len(described) < len(targets):
+                    raise RuntimeError(
+                        f"视觉接口只完成 {len(described)}/{len(targets)} 个关键场景描述"
+                    )
+
+                layered_file = project_file.parent / "analysis" / "layered_structure.json"
+                layered_warning = ""
+                if self._layered_analysis_enabled:
+                    try:
+                        analyze_layered_structure(
+                            events_file,
+                            layered_file,
+                            self._config,
+                            self._root,
+                            lambda value, status: report(0.82 + float(value) * 0.16, status),
+                        )
+                    except Exception as exc:
+                        layered_file.unlink(missing_ok=True)
+                        layered_warning = str(exc)
+
+                payload = json.loads(project_file.read_text(encoding="utf-8"))
+                payload["analysis_state"] = "complete"
+                payload["stage"] = "understood"
+                warnings = payload.setdefault("warnings", {})
+                warnings.pop("vision", None)
+                if layered_warning:
+                    warnings["layered_analysis"] = layered_warning
+                else:
+                    warnings.pop("layered_analysis", None)
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                project_file.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                message = (
+                    "关键画面理解已补全；旧故事和镜头已失效，请重新生成故事"
+                    if not layered_warning
+                    else f"关键画面理解已补全；分层理解未生成：{layered_warning}"
+                )
+                status_file.write_text(
+                    json.dumps(
+                        {
+                            "state": "completed",
+                            "progress": 1.0,
+                            "status": message,
+                            "elapsed_sec": round(time.monotonic() - self._analysis_started_at, 1),
+                            "updated_at": datetime.now().isoformat(timespec="seconds"),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                self._analysisFinished.emit(True, message, job_id)
+            except Exception as exc:
+                message = f"画面理解重试失败：{exc}"
+                try:
+                    payload = json.loads(project_file.read_text(encoding="utf-8"))
+                    payload["analysis_state"] = "vision_failed"
+                    payload.setdefault("warnings", {})["vision"] = str(exc)
+                    payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                    project_file.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    status_file.write_text(
+                        json.dumps(
+                            {
+                                "state": "failed",
+                                "progress": round(self._analysis_progress, 4),
+                                "status": message,
+                                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                except (OSError, ValueError, TypeError):
+                    pass
+                self._analysisFinished.emit(False, message, job_id)
+
+        threading.Thread(
+            target=worker,
+            name="storycut-vision-retry",
+            daemon=True,
+        ).start()
+
     @Slot(int)
     def generateStory(self, target_duration_sec: int) -> None:
         if (
@@ -2541,6 +2744,13 @@ class AppController(QObject):
             return
         if self._project_type == "manuscript":
             self._generate_manuscript_storyboard(target_duration_sec)
+            return
+        if self._analysis_needs_vision_retry:
+            self._notice = (
+                "关键画面理解尚未成功。请先在第 1 步点击“重试画面理解”，"
+                "成功后再重新生成故事。"
+            )
+            self.noticeChanged.emit()
             return
         if not self.apiConfigured:
             message = "未配置 OPENAI_API_KEY，无法生成故事。请在仓库根目录 .env 中配置后重试"
@@ -2862,24 +3072,47 @@ class AppController(QObject):
                 payload["stage"] = "scripted"
                 payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
                 artifacts = payload.setdefault("artifacts", {})
-                artifacts["story"] = "script/story.json"
+                self._update_payload_artifacts(
+                    payload,
+                    invalidate=(
+                        *self._TIMELINE_ARTIFACT_KEYS,
+                        *self._VOICE_ARTIFACT_KEYS,
+                        *self._RENDER_ARTIFACT_KEYS,
+                        "tts_reference_srt",
+                        "tts_input",
+                        "fact_review",
+                        "terminology_review",
+                        "content_review",
+                        "duration_revision_proposal",
+                    ),
+                    bind={"story": "script/story.json"},
+                )
+                artifacts = payload.setdefault("artifacts", {})
                 story_plan_file = project_file.parent / "script" / "story_plan.json"
                 if story_plan_file.exists():
-                    artifacts["story_plan"] = "script/story_plan.json"
+                    self._update_payload_artifacts(
+                        payload, bind={"story_plan": "script/story_plan.json"}
+                    )
                 else:
                     artifacts.pop("story_plan", None)
                 series_evaluation_file = (
                     project_file.parent / "script" / "series_evaluation.json"
                 )
                 if series_evaluation_file.exists():
-                    artifacts["series_evaluation"] = "script/series_evaluation.json"
+                    self._update_payload_artifacts(
+                        payload,
+                        bind={"series_evaluation": "script/series_evaluation.json"},
+                    )
                 else:
                     artifacts.pop("series_evaluation", None)
                 single_story_draft = (
                     project_file.parent / "script" / "single_story_draft.json"
                 )
                 if single_story_draft.exists():
-                    artifacts["single_story_draft"] = "script/single_story_draft.json"
+                    self._update_payload_artifacts(
+                        payload,
+                        bind={"single_story_draft": "script/single_story_draft.json"},
+                    )
                 else:
                     artifacts.pop("single_story_draft", None)
                 artifacts.pop("matches", None)
@@ -3002,8 +3235,21 @@ class AppController(QObject):
                     target_duration_sec
                 )
                 artifacts = payload.setdefault("artifacts", {})
-                artifacts["story"] = "script/story.json"
-                artifacts["storyboard"] = "storyboard/storyboard.json"
+                self._update_payload_artifacts(
+                    payload,
+                    invalidate=(
+                        *self._TIMELINE_ARTIFACT_KEYS,
+                        *self._VOICE_ARTIFACT_KEYS,
+                        *self._RENDER_ARTIFACT_KEYS,
+                        "tts_reference_srt",
+                        "tts_input",
+                    ),
+                    bind={
+                        "story": "script/story.json",
+                        "storyboard": "storyboard/storyboard.json",
+                    },
+                )
+                artifacts = payload.setdefault("artifacts", {})
                 artifacts["events"] = "analysis/events.json"
                 artifacts.pop("matches", None)
                 artifacts.pop("rough_cut", None)
@@ -3089,6 +3335,15 @@ class AppController(QObject):
             prepare_tts_srt(
                 story_file, self._current_project_file.parent / "script" / "tts"
             )
+            payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+            self._update_payload_artifacts(
+                payload,
+                bind={"tts_reference_srt": "script/tts/gpt_sovits_reference.srt"},
+            )
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            self._current_project_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         except (OSError, ValueError, TypeError):
             pass
         if self._matches:
@@ -3108,6 +3363,8 @@ class AppController(QObject):
                 self._matches = []
                 self._matching_status = "文案断句已变化，请重新匹配镜头"
                 self.matchingChanged.emit()
+        self._invalidate_voice_binding("英文解说已修改，请重新生成并导入配音")
+        self._invalidate_render_outputs("英文解说已修改，请重新生成预览")
         self._invalidate_duration_revision()
         if invalidate_reviews and self._fact_review:
             self._fact_review["stale"] = True
@@ -3274,7 +3531,10 @@ class AppController(QObject):
                 )
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
                 artifacts = payload.setdefault("artifacts", {})
-                artifacts["content_review"] = "script/content_review.json"
+                self._update_payload_artifacts(
+                    payload,
+                    bind={"content_review": "script/content_review.json"},
+                )
                 artifacts.pop("fact_review", None)
                 artifacts.pop("terminology_review", None)
                 payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
@@ -3461,17 +3721,49 @@ class AppController(QObject):
         self.matchingChanged.emit()
         try:
             matches_file = project_file.parent / "timeline" / "matches.json"
-            generate_shot_matches(story_file, events_file, matches_file)
+            match_payload = generate_shot_matches(story_file, events_file, matches_file)
+            if self.narrationAudioReady and self._narration_duration_sec > 0:
+                synced_segments = None
+                if self.syncedSrtReady:
+                    try:
+                        synced_segments = parse_srt_timings(
+                            Path(self._synced_srt_path).read_text(encoding="utf-8-sig")
+                        )
+                    except (OSError, ValueError, TypeError):
+                        synced_segments = None
+                match_payload = apply_voice_timing(
+                    matches_file,
+                    self._narration_duration_sec,
+                    synced_segments,
+                )
             build_rough_cut(matches_file, project_file.parent / "timeline" / "rough_cut.json")
             payload = json.loads(project_file.read_text(encoding="utf-8"))
             payload["stage"] = "matched"
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            payload.setdefault("artifacts", {})["matches"] = "timeline/matches.json"
-            payload["artifacts"]["rough_cut"] = "timeline/rough_cut.json"
+            self._update_payload_artifacts(
+                payload,
+                invalidate=self._RENDER_ARTIFACT_KEYS,
+                bind={
+                    "matches": "timeline/matches.json",
+                    "rough_cut": "timeline/rough_cut.json",
+                },
+            )
             project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            self._matching_status = "镜头已自动匹配完成；可直接进入预览导出"
+            matching_warnings = [
+                str(item).strip()
+                for item in match_payload.get("matching_warnings", [])
+                if str(item).strip()
+            ]
+            self._matching_status = (
+                "镜头已完成全局匹配，但关键帧视觉理解缺失；建议重新理解原片后再生成故事和匹配镜头"
+                if matching_warnings
+                else "镜头已完成全局匹配；可直接进入预览导出"
+            )
             self._notice = self._matching_status
             self._load_matches(project_file)
+            self._invalidate_render_outputs(
+                "镜头匹配已更新，请重新生成预览", persist=False
+            )
             self._refresh_recent_projects()
             self.noticeChanged.emit()
         except Exception as exc:
@@ -3682,6 +3974,7 @@ class AppController(QObject):
             build_rough_cut(matches_file, self._current_project_file.parent / "timeline" / "rough_cut.json")
             self._matching_status = f"第 {narration_id} 句已改用场景 {event_id}"
             self._load_matches(self._current_project_file)
+            self._invalidate_render_outputs("镜头已替换，请重新生成预览")
         except (OSError, ValueError, TypeError) as exc:
             self._notice = f"无法替换镜头：{exc}"
             self.noticeChanged.emit()
@@ -3698,6 +3991,7 @@ class AppController(QObject):
             build_rough_cut(matches_file, self._current_project_file.parent / "timeline" / "rough_cut.json")
             self._matching_status = f"第 {narration_id} 句镜头范围已调整并保存"
             self._load_matches(self._current_project_file)
+            self._invalidate_render_outputs("镜头范围已调整，请重新生成预览")
         except (OSError, ValueError, TypeError) as exc:
             self._notice = f"无法调整镜头范围：{exc}"
             self.noticeChanged.emit()
@@ -3706,7 +4000,7 @@ class AppController(QObject):
     def generateRoughPreview(self) -> None:
         if self._export_busy or self._quality_busy or not self._current_project_file or not self._video_path:
             return
-        if not self._ensure_source_video():
+        if not self._ensure_source_video(allow_cleaned_video=True):
             return
         if not self._run_quality_check():
             self.qualityDialogRequested.emit()
@@ -3772,7 +4066,11 @@ class AppController(QObject):
     def _run_quality_check(self) -> bool:
         # Preview generation performs this preflight on the UI thread, so keep
         # the full FFmpeg decode scan in the explicit background check only.
-        self._quality_report = self._collect_quality_report(deep_scan=False)
+        # Preflight validates current inputs only. An older preview must never
+        # prevent the user from rendering the replacement that makes it stale.
+        self._quality_report = self._collect_quality_report(
+            deep_scan=False, include_render=False
+        )
         self.qualityChanged.emit()
         passed = bool(self._quality_report.get("passed", False))
         self._notice = (
@@ -3783,7 +4081,9 @@ class AppController(QObject):
         self.noticeChanged.emit()
         return passed
 
-    def _collect_quality_report(self, deep_scan: bool = True) -> dict[str, object]:
+    def _collect_quality_report(
+        self, deep_scan: bool = True, include_render: bool = True
+    ) -> dict[str, object]:
         if not self._current_project_file:
             return {
                 "passed": False,
@@ -3796,18 +4096,25 @@ class AppController(QObject):
                 ],
             }
         else:
+            quality_source = self._available_video_source()
+            quality_media = dict(self._media)
+            if quality_source and str(quality_source) != self._video_path:
+                try:
+                    quality_media["file_size"] = quality_source.stat().st_size
+                except OSError:
+                    pass
             project_report = inspect_project_for_export(
                 self._current_project_file,
-                Path(self._video_path) if self._video_path else None,
+                quality_source,
                 Path(self._narration_audio_path) if self._narration_audio_path else None,
                 self._narration_duration_sec,
                 Path(self._synced_srt_path) if self._synced_srt_path else None,
-                self._media,
+                quality_media,
             )
             render_report: dict[str, object] = {}
             deep_report: dict[str, object] = {}
             rendered = Path(self._export_path) if self._export_path else None
-            if rendered and rendered.exists():
+            if include_render and rendered and rendered.exists():
                 expected_duration = 0.0
                 rough_cut = self._current_project_file.parent / "timeline" / "rough_cut.json"
                 try:
@@ -3878,7 +4185,7 @@ class AppController(QObject):
     def generateSubtitleOnlyPreview(self) -> None:
         if self._export_busy or self._quality_busy or not self._current_project_file or not self._video_path:
             return
-        if not self._ensure_source_video():
+        if not self._ensure_source_video(allow_cleaned_video=True):
             return
         project_file = self._current_project_file
         matches_file = project_file.parent / "timeline" / "matches.json"
@@ -3892,6 +4199,15 @@ class AppController(QObject):
             story_file = project_file.parent / "script" / "story.json"
             result = prepare_tts_srt(story_file, project_file.parent / "script" / "tts")
             subtitle_srt = Path(result["reference_srt_path"])
+            payload = json.loads(project_file.read_text(encoding="utf-8"))
+            self._update_payload_artifacts(
+                payload,
+                bind={"tts_reference_srt": "script/tts/gpt_sovits_reference.srt"},
+            )
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            project_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             segments = parse_srt_timings(subtitle_srt.read_text(encoding="utf-8-sig"))
             estimated_duration = float(result.get("estimated_duration_sec", 0) or 0)
             if estimated_duration >= SHORTS_MAX_DURATION_SEC:
@@ -3947,7 +4263,7 @@ class AppController(QObject):
             if self._preserve_original_audio
             else "已关闭原片声音，请重新生成预览"
         )
-        self.exportChanged.emit()
+        self._invalidate_render_outputs(self._export_status)
 
     @Slot(bool)
     def setBurnSubtitles(self, enabled: bool) -> None:
@@ -3969,7 +4285,7 @@ class AppController(QObject):
             if self._burn_subtitles
             else "已关闭字幕烧录，成片不会添加字幕，请重新生成预览"
         )
-        self.exportChanged.emit()
+        self._invalidate_render_outputs(self._export_status)
 
     @Slot(str)
     def setExportFitMode(self, mode: str) -> None:
@@ -3992,7 +4308,7 @@ class AppController(QObject):
         self._subtitle_effect_preview_url = ""
         self._export_status = "成片画布已修改，请重新生成预览"
         self.subtitleEffectPreviewChanged.emit()
-        self.exportChanged.emit()
+        self._invalidate_render_outputs(self._export_status)
 
     @Slot(str)
     def setCanvasAspectRatio(self, value: str) -> None:
@@ -4057,7 +4373,7 @@ class AppController(QObject):
         self._subtitle_effect_preview_url = ""
         self._export_status = "裁剪拉伸设置已修改，请重新生成预览"
         self.subtitleEffectPreviewChanged.emit()
-        self.exportChanged.emit()
+        self._invalidate_render_outputs(self._export_status)
 
     @Slot(int)
     def setVerticalCropFillPercent(self, value: int) -> None:
@@ -4080,7 +4396,7 @@ class AppController(QObject):
         self._subtitle_effect_preview_url = ""
         self._export_status = "画面裁剪范围已修改，请重新生成预览"
         self.subtitleEffectPreviewChanged.emit()
-        self.exportChanged.emit()
+        self._invalidate_render_outputs(self._export_status)
 
     def _start_rough_preview(
         self,
@@ -4143,6 +4459,8 @@ class AppController(QObject):
                 result["quality_report"] = combine_quality_reports(
                     preflight_report, rendered_report
                 )
+                if job_id != self._export_job_id:
+                    return
                 payload = json.loads(project_file.read_text(encoding="utf-8"))
                 if preview_kind == "final":
                     payload["stage"] = "previewed"
@@ -4151,7 +4469,9 @@ class AppController(QObject):
                 artifact_key = (
                     "rough_preview" if preview_kind == "final" else "subtitle_test_preview"
                 )
-                payload.setdefault("artifacts", {})[artifact_key] = relative_output
+                self._update_payload_artifacts(
+                    payload, bind={artifact_key: relative_output}
+                )
                 project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
                 result["preview_kind"] = preview_kind
                 self._exportFinished.emit(True, finished_status, result, job_id)
@@ -4211,8 +4531,11 @@ class AppController(QObject):
             elif source.resolve() != destination.resolve():
                 shutil.copy2(source, destination)
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
-            payload.setdefault("artifacts", {}).pop("tts_input", None)
-            payload["artifacts"]["tts_reference_srt"] = "script/tts/gpt_sovits_reference.srt"
+            self._update_payload_artifacts(
+                payload,
+                invalidate=("tts_input",),
+                bind={"tts_reference_srt": "script/tts/gpt_sovits_reference.srt"},
+            )
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             if fmt == "txt":
@@ -4293,6 +4616,8 @@ class AppController(QObject):
             "cleanupOpacity", "blurRadius", "blurPower", "regionPadding", "feather",
         }
         if key in cleanup_keys:
+            self._subtitle_cleanup_job_id += 1
+            self._subtitle_cleanup_busy = False
             self._subtitle_cleaned_video_path = ""
             self._subtitle_cleaned_preview_url = ""
             self._subtitle_cleanup_progress = 0.0
@@ -4300,7 +4625,9 @@ class AppController(QObject):
             if self._current_project_file:
                 try:
                     payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
-                    payload.setdefault("artifacts", {}).pop("subtitle_cleaned_video", None)
+                    self._update_payload_artifacts(
+                        payload, invalidate=("subtitle_cleaned_video",)
+                    )
                     self._current_project_file.write_text(
                         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
                     )
@@ -4402,6 +4729,10 @@ class AppController(QObject):
             self._notice = "缺少原视频尺寸或时长信息，无法生成去字幕视频"
             self.noticeChanged.emit()
             return
+        self._subtitle_cleaned_video_path = ""
+        self._subtitle_cleaned_preview_url = ""
+        self._persist_artifact_invalidation(("subtitle_cleaned_video",))
+        self._invalidate_render_outputs("正在重新生成去字幕视频，完成后请重新生成预览")
         self._subtitle_cleanup_job_id += 1
         job_id = self._subtitle_cleanup_job_id
         self._subtitle_cleanup_busy = True
@@ -4453,7 +4784,10 @@ class AppController(QObject):
             if target and target.exists() and target.resolve().is_relative_to(project_dir):
                 target.unlink()
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
-            payload.setdefault("artifacts", {}).pop("subtitle_cleaned_video", None)
+            self._update_payload_artifacts(
+                payload,
+                invalidate=("subtitle_cleaned_video", *self._RENDER_ARTIFACT_KEYS),
+            )
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._current_project_file.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -4469,6 +4803,7 @@ class AppController(QObject):
         except (OSError, ValueError, TypeError) as exc:
             self._notice = f"删除去字幕中间视频失败：{exc}"
         self.subtitleEffectPreviewChanged.emit()
+        self._invalidate_render_outputs("去字幕视频已删除，请重新生成预览")
         self.noticeChanged.emit()
 
     @Slot(str)
@@ -4591,22 +4926,12 @@ class AppController(QObject):
             result = import_narration_audio(source, original, self._config, self._root)
             shutil.copy2(original, destination)
             self._narration_speed = 1.0
-            working_srt = audio_dir / "narration.srt"
-            original_srt = audio_dir / "narration_original.srt"
-            if working_srt.exists():
-                if not original_srt.exists():
-                    shutil.copy2(working_srt, original_srt)
-                scale_srt_timeline(original_srt, working_srt, 1.0)
             self._narration_audio_path = str(destination)
+            # A newly imported waveform cannot safely reuse timing from the
+            # previous SRT, even when the old files are kept for recovery.
+            self._synced_srt_path = ""
             self._narration_duration_sec = float(result["duration_sec"])
             synced_segments = None
-            if working_srt.exists():
-                try:
-                    synced_segments = parse_srt_timings(
-                        working_srt.read_text(encoding="utf-8-sig")
-                    )
-                except (OSError, ValueError, TypeError):
-                    synced_segments = None
             self._calibrate_story_with_voice(
                 self._narration_duration_sec,
                 synced_segments,
@@ -4626,8 +4951,19 @@ class AppController(QObject):
                 + "；故事时长已更新为真实配音"
             )
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
-            payload.setdefault("artifacts", {})["narration_audio"] = "audio/narration.wav"
-            payload.setdefault("artifacts", {})["narration_audio_original"] = "audio/narration_original.wav"
+            self._update_payload_artifacts(
+                payload,
+                invalidate=(
+                    "narration_srt",
+                    "narration_srt_original",
+                    "narration_whisper",
+                    *self._RENDER_ARTIFACT_KEYS,
+                ),
+                bind={
+                    "narration_audio": "audio/narration.wav",
+                    "narration_audio_original": "audio/narration_original.wav",
+                },
+            )
             payload.setdefault("settings", {}).setdefault("voice", {})["speed"] = 1.0
             payload["settings"]["voice"]["duration_sec"] = self._narration_duration_sec
             payload["settings"]["voice"]["original_duration_sec"] = self._narration_duration_sec
@@ -4669,8 +5005,14 @@ class AppController(QObject):
                 + ("，镜头时间线已按真实配音校准" if self.narrationAudioReady else "，请继续导入英文音频")
             )
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
-            payload.setdefault("artifacts", {})["narration_srt"] = "audio/narration.srt"
-            payload.setdefault("artifacts", {})["narration_srt_original"] = "audio/narration_original.srt"
+            self._update_payload_artifacts(
+                payload,
+                invalidate=self._RENDER_ARTIFACT_KEYS,
+                bind={
+                    "narration_srt": "audio/narration.srt",
+                    "narration_srt_original": "audio/narration_original.srt",
+                },
+            )
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             self.voiceChanged.emit()
@@ -4838,11 +5180,24 @@ class AppController(QObject):
             prepare_tts_srt(story_file, project_dir / "script" / "tts")
 
             payload = json.loads(project_file.read_text(encoding="utf-8"))
+            self._update_payload_artifacts(
+                payload,
+                invalidate=(
+                    *self._VOICE_ARTIFACT_KEYS,
+                    *self._RENDER_ARTIFACT_KEYS,
+                    "duration_revision_proposal",
+                    "fact_review",
+                    "terminology_review",
+                    "content_review",
+                ),
+                bind={
+                    "story": "script/story.json",
+                    "matches": "timeline/matches.json",
+                    "rough_cut": "timeline/rough_cut.json",
+                    "tts_reference_srt": "script/tts/gpt_sovits_reference.srt",
+                },
+            )
             artifacts = payload.setdefault("artifacts", {})
-            artifacts["story"] = "script/story.json"
-            artifacts["matches"] = "timeline/matches.json"
-            artifacts["rough_cut"] = "timeline/rough_cut.json"
-            artifacts["tts_reference_srt"] = "script/tts/gpt_sovits_reference.srt"
             artifacts["duration_revision_archive"] = archive_dir.relative_to(project_dir).as_posix()
             for key in (
                 "narration_audio",
@@ -5113,10 +5468,15 @@ class AppController(QObject):
         self._apply_voice_timing_to_matches(segments if isinstance(segments, list) else None)
         try:
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
-            artifacts = payload.setdefault("artifacts", {})
-            artifacts["narration_srt"] = "audio/narration.srt"
-            artifacts["narration_srt_original"] = "audio/narration_original.srt"
-            artifacts["narration_whisper"] = "audio/narration_whisper.json"
+            self._update_payload_artifacts(
+                payload,
+                invalidate=self._RENDER_ARTIFACT_KEYS,
+                bind={
+                    "narration_srt": "audio/narration.srt",
+                    "narration_srt_original": "audio/narration_original.srt",
+                    "narration_whisper": "audio/narration_whisper.json",
+                },
+            )
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
             self._current_project_file.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -5242,13 +5602,19 @@ class AppController(QObject):
                     self._narration_duration_sec * max(1.0, self._narration_speed),
                 )
                 payload["settings"]["voice"]["audio_size"] = working_audio.stat().st_size
-                artifacts = payload.setdefault("artifacts", {})
-                artifacts["narration_audio"] = "audio/narration.wav"
-                artifacts["narration_audio_original"] = "audio/narration_original.wav"
+                bindings = {
+                    "narration_audio": "audio/narration.wav",
+                    "narration_audio_original": "audio/narration_original.wav",
+                }
                 original_srt = self._current_project_file.parent / "audio" / "narration_original.srt"
                 if original_srt.exists():
-                    artifacts["narration_srt"] = "audio/narration.srt"
-                    artifacts["narration_srt_original"] = "audio/narration_original.srt"
+                    bindings["narration_srt"] = "audio/narration.srt"
+                    bindings["narration_srt_original"] = "audio/narration_original.srt"
+                self._update_payload_artifacts(
+                    payload,
+                    invalidate=self._RENDER_ARTIFACT_KEYS,
+                    bind=bindings,
+                )
                 payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
                 self._current_project_file.write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -5261,10 +5627,8 @@ class AppController(QObject):
             f"英文配音{action}，实际时长 {self._format_time(self._narration_duration_sec)}；"
             + ("仍超过 Shorts 上限，请删减文案" if self.narrationOverShortsLimit else "镜头与字幕时间线已同步校准")
         )
-        self._export_path = ""
-        self._subtitle_test_preview_path = ""
+        self._invalidate_render_outputs("配音速度已更新，请重新生成预览")
         self.voiceChanged.emit()
-        self.exportChanged.emit()
 
     @staticmethod
     def _safe_name(value: str) -> str:
@@ -5494,6 +5858,197 @@ class AppController(QObject):
         self._recent_projects = projects[:8]
         self.recentProjectsChanged.emit()
 
+    @staticmethod
+    def _invalidated_artifacts(payload: dict[str, object]) -> set[str]:
+        state = payload.get("artifact_state", {})
+        state = state if isinstance(state, dict) else {}
+        raw = state.get("invalidated", [])
+        raw = raw if isinstance(raw, (list, tuple, set)) else []
+        return {
+            str(key)
+            for key in raw
+            if str(key).strip()
+        }
+
+    @classmethod
+    def _artifact_is_invalidated(
+        cls, payload: dict[str, object], artifact_key: str
+    ) -> bool:
+        return artifact_key in cls._invalidated_artifacts(payload)
+
+    @staticmethod
+    def _preview_is_older_than_inputs(
+        preview: Path, project_file: Path, *, include_voice: bool
+    ) -> bool:
+        try:
+            preview_mtime = preview.stat().st_mtime_ns
+        except OSError:
+            return True
+        project_dir = project_file.parent
+        inputs = [
+            project_dir / "timeline" / "matches.json",
+            project_dir / "timeline" / "rough_cut.json",
+            project_dir / "media" / "source_without_subtitles.mp4",
+        ]
+        if include_voice:
+            inputs.extend(
+                [
+                    project_dir / "audio" / "narration.wav",
+                    project_dir / "audio" / "narration.srt",
+                ]
+            )
+        for path in inputs:
+            try:
+                if path.exists() and path.stat().st_mtime_ns > preview_mtime:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    @classmethod
+    def _update_payload_artifacts(
+        cls,
+        payload: dict[str, object],
+        *,
+        invalidate: tuple[str, ...] = (),
+        bind: dict[str, str] | None = None,
+    ) -> None:
+        artifacts = payload.setdefault("artifacts", {})
+        if not isinstance(artifacts, dict):
+            artifacts = {}
+            payload["artifacts"] = artifacts
+        invalidated = cls._invalidated_artifacts(payload)
+        for key in invalidate:
+            artifacts.pop(key, None)
+            invalidated.add(key)
+        for key, relative_path in (bind or {}).items():
+            artifacts[key] = relative_path
+            invalidated.discard(key)
+        state = payload.setdefault("artifact_state", {})
+        if not isinstance(state, dict):
+            state = {}
+            payload["artifact_state"] = state
+        state["invalidated"] = sorted(invalidated)
+
+    def _persist_artifact_invalidation(
+        self,
+        artifact_keys: tuple[str, ...],
+        *,
+        stage: str | None = None,
+        clear_voice_settings: bool = False,
+    ) -> None:
+        if not self._current_project_file or not self._current_project_file.exists():
+            return
+        try:
+            payload = json.loads(
+                self._current_project_file.read_text(encoding="utf-8")
+            )
+            self._update_payload_artifacts(payload, invalidate=artifact_keys)
+            if stage:
+                payload["stage"] = stage
+            elif str(payload.get("stage", "")) in {"previewed", "exported"}:
+                artifacts = payload.get("artifacts", {})
+                payload["stage"] = (
+                    "matched"
+                    if isinstance(artifacts, dict) and artifacts.get("rough_cut")
+                    else "scripted"
+                )
+            if clear_voice_settings:
+                settings = payload.setdefault("settings", {})
+                if isinstance(settings, dict):
+                    settings.pop("voice", None)
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            self._current_project_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _invalidate_render_outputs(
+        self,
+        status: str,
+        *,
+        persist: bool = True,
+    ) -> None:
+        # Invalidate running callbacks too. A render that finishes after an input
+        # edit must not rebind itself as the current preview.
+        self._export_job_id += 1
+        self._quality_job_id += 1
+        self._export_busy = False
+        self._quality_busy = False
+        self._export_progress = 0.0
+        self._export_path = ""
+        self._subtitle_test_preview_path = ""
+        self._quality_report = {}
+        self._export_status = status
+        if persist:
+            self._persist_artifact_invalidation(self._RENDER_ARTIFACT_KEYS)
+        self.exportChanged.emit()
+        self.qualityChanged.emit()
+
+    def _invalidate_voice_binding(self, status: str, *, persist: bool = True) -> None:
+        self._voice_job_id += 1
+        self._voice_busy = False
+        self._narration_audio_path = ""
+        self._synced_srt_path = ""
+        self._narration_duration_sec = 0.0
+        self._narration_speed = 1.0
+        self._voice_status = status
+        if persist:
+            self._persist_artifact_invalidation(
+                self._VOICE_ARTIFACT_KEYS,
+                clear_voice_settings=True,
+            )
+        self.voiceChanged.emit()
+
+    def _invalidate_timeline_binding(self, status: str, *, persist: bool = True) -> None:
+        self._matches = []
+        self._matching_status = status
+        if persist:
+            self._persist_artifact_invalidation(self._TIMELINE_ARTIFACT_KEYS)
+        self.matchingChanged.emit()
+
+    def _invalidate_story_downstream_after_analysis(self) -> None:
+        keys = (
+            "story",
+            "storyboard",
+            "story_plan",
+            "series_evaluation",
+            "single_story_draft",
+            "tts_reference_srt",
+            "tts_input",
+            "fact_review",
+            "terminology_review",
+            "content_review",
+            "duration_revision_proposal",
+            *self._TIMELINE_ARTIFACT_KEYS,
+            *self._VOICE_ARTIFACT_KEYS,
+            *self._RENDER_ARTIFACT_KEYS,
+        )
+        stage = "understood"
+        if self._current_project_file:
+            try:
+                payload = json.loads(
+                    self._current_project_file.read_text(encoding="utf-8")
+                )
+                if str(payload.get("analysis_state", "")) == "vision_failed":
+                    stage = "analysis_partial"
+            except (OSError, ValueError, TypeError):
+                pass
+        self._persist_artifact_invalidation(keys, stage=stage, clear_voice_settings=True)
+        self._set_story({})
+        self._storyboard = {}
+        self._storyboard_beats = []
+        self._set_fact_review({})
+        self._set_terminology_review({})
+        self._duration_revision_proposal = {}
+        self._duration_revision_status = ""
+        self._invalidate_timeline_binding("原片理解已更新，请重新生成故事和匹配镜头", persist=False)
+        self._invalidate_voice_binding("故事已失效，请重新生成故事后再导入配音", persist=False)
+        self._invalidate_render_outputs("原片理解已更新，请重新生成成片预览", persist=False)
+        self.storyChanged.emit()
+        self.durationRevisionChanged.emit()
+
     def _clear_current_project(self) -> None:
         self._media_job_id += 1
         self._preview_job_id += 1
@@ -5513,9 +6068,12 @@ class AppController(QObject):
         self._video_path = ""
         self._source_manuscript_text = ""
         self._media = {}
+        self._media_busy = False
         self._cover_url = ""
         self._preview_url = ""
         self._preview_position = 0.0
+        self._preview_busy = False
+        self._analysis_busy = False
         self._analysis_progress = 0.0
         self._analysis_content_mode = str(
             self._config.get("analysis", {}).get("content_mode", "speech")
@@ -5527,6 +6085,9 @@ class AppController(QObject):
             self._config.get("series", {}).get("auto_split", False)
         )
         self._analysis_status = "等待开始"
+        self._analysis_complete = False
+        self._analysis_needs_vision_retry = False
+        self._vision_failure_detail = ""
         self._analysis_started_at = 0.0
         self._analysis_eta_seconds = -1.0
         self._analysis_estimated_total = -1.0
@@ -5537,6 +6098,7 @@ class AppController(QObject):
         self._model_download_visible = False
         self._events = []
         self._story_progress = 0.0
+        self._story_busy = False
         self._story_status = "等待组织故事"
         self._story_started_at = 0.0
         self._story_clock.stop()
@@ -5557,6 +6119,7 @@ class AppController(QObject):
         self._terminology_review = {}
         self._terminology_review_issues = []
         self._matching_status = "等待匹配镜头"
+        self._matching_busy = False
         self._matches = []
         self._manuscript_assets = []
         self._stock_search_job_id += 1
@@ -5565,6 +6128,7 @@ class AppController(QObject):
         self._stock_search_progress = 0.0
         self._stock_search_results = []
         self._export_progress = 0.0
+        self._export_busy = False
         self._export_status = "等待生成成片预览"
         self._export_path = ""
         self._subtitle_test_preview_path = ""
@@ -5605,6 +6169,7 @@ class AppController(QObject):
         self._quality_busy = False
         self._subtitle_style = self._default_subtitle_style()
         self._subtitle_effect_preview_url = ""
+        self._subtitle_effect_preview_busy = False
         self._subtitle_cleanup_job_id += 1
         self._subtitle_cleanup_busy = False
         self._subtitle_cleanup_progress = 0.0
@@ -5720,7 +6285,11 @@ class AppController(QObject):
             try:
                 payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
                 relative = Path(output_path).relative_to(self._current_project_file.parent)
-                payload.setdefault("artifacts", {})["subtitle_cleaned_video"] = relative.as_posix()
+                self._update_payload_artifacts(
+                    payload,
+                    invalidate=self._RENDER_ARTIFACT_KEYS,
+                    bind={"subtitle_cleaned_video": relative.as_posix()},
+                )
                 payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
                 self._current_project_file.write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -5728,6 +6297,9 @@ class AppController(QObject):
             except (OSError, ValueError, TypeError):
                 pass
             self._notice = "去字幕视频已生成，后续画布、字幕和合成将使用它"
+            self._invalidate_render_outputs(
+                "去字幕视频已更新，请重新生成预览", persist=False
+            )
         else:
             self._subtitle_cleanup_status = f"去字幕视频生成失败：{status}"
             self._notice = self._subtitle_cleanup_status
@@ -5803,10 +6375,10 @@ class AppController(QObject):
         self._analysis_progress = 1.0 if success else self._analysis_progress
         self._analysis_status = message if success else f"分析失败：{message}"
         self._model_download_visible = False
-        self._notice = self._analysis_status
         if success:
             self._refresh_recent_projects()
             if self._current_project_file:
+                self._invalidate_story_downstream_after_analysis()
                 try:
                     payload = json.loads(
                         self._current_project_file.read_text(encoding="utf-8")
@@ -5823,6 +6395,19 @@ class AppController(QObject):
                 except (OSError, ValueError, TypeError, AttributeError):
                     pass
                 self._load_events(self._current_project_file)
+        if self._current_project_file:
+            try:
+                payload = json.loads(
+                    self._current_project_file.read_text(encoding="utf-8")
+                )
+                self._restore_analysis_state(
+                    payload,
+                    self._current_project_file,
+                    fallback_status=message if success else "",
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+        self._notice = self._analysis_status
         self.analysisChanged.emit()
         self.seriesSplitChanged.emit()
         self.noticeChanged.emit()
@@ -5888,14 +6473,18 @@ class AppController(QObject):
                     pass
             self._set_fact_review({})
             self._set_terminology_review({})
-            self._matches = []
-            self._matching_status = (
+            matching_status = (
                 "分镜已更新，请导入素材后自动匹配"
                 if self._project_type == "manuscript"
                 else "故事已更新，请重新自动匹配镜头"
             )
-            self._export_path = ""
-            self._subtitle_test_preview_path = ""
+            self._invalidate_timeline_binding(matching_status, persist=False)
+            self._invalidate_voice_binding(
+                "故事已更新，请重新生成并导入英文配音", persist=False
+            )
+            self._invalidate_render_outputs(
+                "故事已更新，请重新匹配镜头并生成预览", persist=False
+            )
             self._refresh_recent_projects()
         self.storyChanged.emit()
         self.seriesSplitChanged.emit()
@@ -6068,6 +6657,56 @@ class AppController(QObject):
         self._events = loaded
         self.eventsChanged.emit()
 
+    def _restore_analysis_state(
+        self,
+        payload: dict[str, object],
+        project_file: Path,
+        *,
+        fallback_status: str = "",
+    ) -> None:
+        if self._project_type == "manuscript":
+            self._analysis_complete = bool(self._source_manuscript_text.strip())
+            self._analysis_needs_vision_retry = False
+            self._vision_failure_detail = ""
+            return
+
+        warnings = payload.get("warnings", {})
+        warnings = warnings if isinstance(warnings, dict) else {}
+        vision_warning = str(warnings.get("vision", "")).strip()
+        state = str(payload.get("analysis_state", "")).strip().lower()
+        local_only = state == "local_only" or vision_warning.startswith(
+            "用户选择仅执行本地分析"
+        )
+        has_events = bool(self._events)
+        failed_vision = has_events and bool(vision_warning) and not local_only
+        failed_vision = failed_vision or (has_events and state == "vision_failed")
+
+        self._analysis_needs_vision_retry = failed_vision
+        self._vision_failure_detail = vision_warning if failed_vision else ""
+        self._analysis_complete = has_events and not failed_vision
+        if failed_vision:
+            detail = vision_warning or "视觉接口没有返回完整的关键画面描述"
+            self._analysis_status = (
+                f"画面理解失败：{detail}。语音转写和场景切分已保留，可直接重试画面理解。"
+            )
+            return
+        if not has_events:
+            self._analysis_status = fallback_status or "等待开始"
+            return
+        if local_only:
+            self._analysis_status = "本地结构化已完成；未调用视觉模型"
+            return
+        if fallback_status:
+            self._analysis_status = fallback_status
+            return
+        status_file = project_file.parent / "analysis" / "status.json"
+        try:
+            status_payload = json.loads(status_file.read_text(encoding="utf-8"))
+            saved_status = str(status_payload.get("status", "")).strip()
+        except (OSError, ValueError, TypeError):
+            saved_status = ""
+        self._analysis_status = saved_status or "原片理解完成，可以开始组织故事"
+
     def _load_manuscript_assets(self, project_file: Path) -> None:
         self._manuscript_assets = []
         manifest_file = project_file.parent / "assets" / "manifest.json"
@@ -6133,7 +6772,11 @@ class AppController(QObject):
 
     def _load_story(self, project_file: Path) -> None:
         story_file = project_file.parent / "script" / "story.json"
-        if not story_file.exists():
+        try:
+            project_payload = json.loads(project_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            project_payload = {}
+        if self._artifact_is_invalidated(project_payload, "story") or not story_file.exists():
             self._set_story({})
             self._load_storyboard(project_file)
             self._set_fact_review({})
@@ -6179,7 +6822,14 @@ class AppController(QObject):
     def _load_storyboard(self, project_file: Path) -> None:
         storyboard_file = project_file.parent / "storyboard" / "storyboard.json"
         storyboard: dict[str, object] = {}
-        if storyboard_file.exists():
+        try:
+            project_payload = json.loads(project_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            project_payload = {}
+        if (
+            not self._artifact_is_invalidated(project_payload, "storyboard")
+            and storyboard_file.exists()
+        ):
             try:
                 loaded = json.loads(storyboard_file.read_text(encoding="utf-8"))
                 storyboard = loaded if isinstance(loaded, dict) else {}
@@ -6253,7 +6903,14 @@ class AppController(QObject):
     def _load_matches(self, project_file: Path) -> None:
         matches_file = project_file.parent / "timeline" / "matches.json"
         loaded: list[dict[str, object]] = []
-        if matches_file.exists():
+        try:
+            project_payload = json.loads(project_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            project_payload = {}
+        if (
+            not self._artifact_is_invalidated(project_payload, "matches")
+            and matches_file.exists()
+        ):
             try:
                 payload = json.loads(matches_file.read_text(encoding="utf-8"))
                 for raw_item in payload.get("items", []):
@@ -6301,19 +6958,45 @@ class AppController(QObject):
     def _load_export(self, project_file: Path) -> None:
         output: Path | None = None
         subtitle_test_output: Path | None = None
+        final_invalidated = False
+        subtitle_test_invalidated = False
         try:
             payload = json.loads(project_file.read_text(encoding="utf-8"))
             artifacts = payload.get("artifacts", {})
             artifacts = artifacts if isinstance(artifacts, dict) else {}
+            final_invalidated = self._artifact_is_invalidated(payload, "rough_preview")
+            subtitle_test_invalidated = self._artifact_is_invalidated(
+                payload, "subtitle_test_preview"
+            )
             relative = str(artifacts.get("rough_preview", ""))
             candidate = project_file.parent / relative if relative else None
-            if candidate and candidate.exists():
+            if not final_invalidated and candidate and candidate.exists():
                 if "subtitle_test" in candidate.name.lower():
                     # 旧版本把仅字幕测试误记成了最终成片预览；打开项目时纠正。
-                    subtitle_test_output = candidate
-                    artifacts.pop("rough_preview", None)
-                    artifacts["subtitle_test_preview"] = relative
-                    payload["artifacts"] = artifacts
+                    self._update_payload_artifacts(
+                        payload,
+                        invalidate=("rough_preview",),
+                        bind=(
+                            {"subtitle_test_preview": relative}
+                            if not subtitle_test_invalidated
+                            else None
+                        ),
+                    )
+                    if not subtitle_test_invalidated:
+                        subtitle_test_output = candidate
+                    project_file.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                elif self._preview_is_older_than_inputs(
+                    candidate, project_file, include_voice=True
+                ):
+                    final_invalidated = True
+                    self._update_payload_artifacts(
+                        payload, invalidate=("rough_preview",)
+                    )
+                    if str(payload.get("stage", "")) in {"previewed", "exported"}:
+                        payload["stage"] = "matched"
+                    payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
                     project_file.write_text(
                         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
                     )
@@ -6321,17 +7004,33 @@ class AppController(QObject):
                     output = candidate
             test_relative = str(artifacts.get("subtitle_test_preview", ""))
             test_candidate = project_file.parent / test_relative if test_relative else None
-            if test_candidate and test_candidate.exists():
-                subtitle_test_output = test_candidate
+            if (
+                not subtitle_test_invalidated
+                and test_candidate
+                and test_candidate.exists()
+            ):
+                if self._preview_is_older_than_inputs(
+                    test_candidate, project_file, include_voice=False
+                ):
+                    subtitle_test_invalidated = True
+                    self._update_payload_artifacts(
+                        payload, invalidate=("subtitle_test_preview",)
+                    )
+                    payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                    project_file.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                else:
+                    subtitle_test_output = test_candidate
         except (OSError, ValueError, TypeError):
             pass
-        if output is None:
+        if output is None and not final_invalidated:
             legacy_candidates = (
                 project_file.parent / "export" / "storycut_final_preview.mp4",
                 project_file.parent / "exports" / "rough_preview.mp4",
             )
             output = next((path for path in legacy_candidates if path.exists()), None)
-        if subtitle_test_output is None:
+        if subtitle_test_output is None and not subtitle_test_invalidated:
             legacy_test_candidates = (
                 project_file.parent / "export" / "storycut_subtitle_test.mp4",
                 project_file.parent / "exports" / "storycut_subtitle_test.mp4",
@@ -6344,7 +7043,12 @@ class AppController(QObject):
             str(subtitle_test_output) if subtitle_test_output else ""
         )
         self._export_progress = 1.0 if output else 0.0
-        self._export_status = "成片预览已生成，可使用系统播放器查看" if output else "等待生成成片预览"
+        if output:
+            self._export_status = "成片预览已生成，可使用系统播放器查看"
+        elif final_invalidated or subtitle_test_invalidated:
+            self._export_status = "项目内容已更新，请重新生成预览"
+        else:
+            self._export_status = "等待生成成片预览"
         self.exportChanged.emit()
 
     def _load_voice(self, project_file: Path) -> None:
@@ -6356,8 +7060,12 @@ class AppController(QObject):
         self._narration_speed = 1.0
         cached_duration = 0.0
         cached_audio_size = 0
+        audio_invalidated = False
+        srt_invalidated = False
         try:
             payload = json.loads(project_file.read_text(encoding="utf-8"))
+            audio_invalidated = self._artifact_is_invalidated(payload, "narration_audio")
+            srt_invalidated = self._artifact_is_invalidated(payload, "narration_srt")
             voice_settings = payload.get("settings", {}).get("voice", {})
             voice_settings = voice_settings if isinstance(voice_settings, dict) else {}
             self._narration_speed = max(
@@ -6368,10 +7076,12 @@ class AppController(QObject):
             cached_audio_size = max(0, int(voice_settings.get("audio_size", 0) or 0))
         except (OSError, ValueError, TypeError):
             self._narration_speed = 1.0
-        self._narration_audio_path = str(audio) if audio.exists() else ""
-        self._synced_srt_path = str(srt) if srt.exists() else ""
+        self._narration_audio_path = (
+            str(audio) if not audio_invalidated and audio.exists() else ""
+        )
+        self._synced_srt_path = str(srt) if not srt_invalidated and srt.exists() else ""
         self._narration_duration_sec = 0.0
-        if audio.exists():
+        if self._narration_audio_path:
             actual_size = audio.stat().st_size
             if cached_duration > 0 and cached_audio_size == actual_size:
                 self._narration_duration_sec = cached_duration
@@ -6392,7 +7102,7 @@ class AppController(QObject):
                 return
         if self._narration_duration_sec > 0:
             segments = None
-            if srt.exists():
+            if self._synced_srt_path:
                 try:
                     segments = parse_srt_timings(srt.read_text(encoding="utf-8-sig"))
                 except (OSError, ValueError, TypeError):
@@ -6402,24 +7112,41 @@ class AppController(QObject):
                 segments,
                 timing_source="loaded_audio",
             )
-        self._update_loaded_voice_status(audio, srt, project_file)
+        self._update_loaded_voice_status(
+            audio if self._narration_audio_path else None,
+            srt if self._synced_srt_path else None,
+            project_file,
+        )
         self.voiceChanged.emit()
 
-    def _update_loaded_voice_status(self, audio: Path, srt: Path, project_file: Path) -> None:
-        if audio.exists() and srt.exists():
+    def _update_loaded_voice_status(
+        self, audio: Path | None, srt: Path | None, project_file: Path
+    ) -> None:
+        if audio and audio.exists() and srt and srt.exists():
             self._voice_status = (
                 f"英文配音与同步字幕已就绪，时长 {self._format_time(self._narration_duration_sec)}"
                 f" · {self._narration_speed:.2f}x"
             )
-        elif audio.exists():
+        elif audio and audio.exists():
             self._voice_status = (
                 f"英文配音已就绪，时长 {self._format_time(self._narration_duration_sec)}"
                 f" · {self._narration_speed:.2f}x；建议导入同步 SRT"
             )
-        elif (project_file.parent / "script" / "tts" / "gpt_sovits_reference.srt").exists():
-            self._voice_status = "GPT-SoVITS SRT 已准备，请生成并导入英文配音"
         else:
-            self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
+            tts_ready = (
+                project_file.parent / "script" / "tts" / "gpt_sovits_reference.srt"
+            ).exists()
+            try:
+                payload = json.loads(project_file.read_text(encoding="utf-8"))
+                tts_ready = tts_ready and not self._artifact_is_invalidated(
+                    payload, "tts_reference_srt"
+                )
+            except (OSError, ValueError, TypeError):
+                pass
+            if tts_ready:
+                self._voice_status = "GPT-SoVITS SRT 已准备，请生成并导入英文配音"
+            else:
+                self._voice_status = "等待导出 SRT 到 GPT-SoVITS"
 
     @Slot(float, str, int)
     def _apply_voice_duration(self, duration: float, project_path: str, job_id: int) -> None:
@@ -6593,7 +7320,7 @@ class AppController(QObject):
                 pass
         self._export_status = "字幕样式已修改，请重新生成预览"
         self.subtitleStyleChanged.emit()
-        self.exportChanged.emit()
+        self._invalidate_render_outputs(self._export_status)
 
     def _config_with_project_style(self) -> dict[str, object]:
         config = deepcopy(self._config)
@@ -6760,7 +7487,28 @@ class AppController(QObject):
             segments = parse_srt_timings(Path(self._synced_srt_path).read_text(encoding="utf-8-sig"))
         apply_voice_timing(matches_file, self._narration_duration_sec, segments)
         build_rough_cut(matches_file, self._current_project_file.parent / "timeline" / "rough_cut.json")
+        try:
+            payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+            self._update_payload_artifacts(
+                payload,
+                invalidate=self._RENDER_ARTIFACT_KEYS,
+                bind={
+                    "matches": "timeline/matches.json",
+                    "rough_cut": "timeline/rough_cut.json",
+                },
+            )
+            if str(payload.get("stage", "")) in {"previewed", "exported"}:
+                payload["stage"] = "matched"
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            self._current_project_file.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except (OSError, ValueError, TypeError):
+            pass
         self._load_matches(self._current_project_file)
+        self._invalidate_render_outputs(
+            "配音或字幕时间线已更新，请重新生成预览", persist=False
+        )
 
     def _set_story(self, story: dict[str, object]) -> None:
         self._story = dict(story)
@@ -6888,7 +7636,7 @@ class AppController(QObject):
         except (OSError, ValueError, TypeError):
             self._set_terminology_review({})
 
-    def _ensure_source_video(self) -> bool:
+    def _ensure_source_video(self, allow_cleaned_video: bool = False) -> bool:
         source = Path(self._video_path) if self._video_path else None
         if source and source.exists():
             return True
@@ -6913,6 +7661,13 @@ class AppController(QObject):
                     return True
                 except OSError:
                     continue
+        if allow_cleaned_video and self.subtitleCleanedVideoReady:
+            self._notice = (
+                "原视频路径来自另一台电脑；当前使用项目内的去字幕视频继续预览和导出。"
+                "重新理解原片或重新生成去字幕视频时仍需关联原视频。"
+            )
+            self.noticeChanged.emit()
+            return True
         self._notice = "原视频已被移动或删除，请重新选择同一个原视频后继续"
         self.noticeChanged.emit()
         self.sourceVideoRelinkRequested.emit()

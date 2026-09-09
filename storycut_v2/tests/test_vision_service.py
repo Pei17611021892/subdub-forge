@@ -91,6 +91,32 @@ class VisionServiceTests(unittest.TestCase):
             self.assertEqual(result["events"][0]["technical_visual"]["type"], "chart")
             self.assertEqual(result["events"][0]["screen_text"][0]["text"], "Temperature (°C)")
 
+    def test_missing_event_in_vision_response_is_a_failure(self) -> None:
+        class FakeCompletions:
+            def create(self, **_kwargs):  # type: ignore[no-untyped-def]
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content=json.dumps([]))
+                        )
+                    ]
+                )
+
+        client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            events, _source = self._project(root)
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "openai.OpenAI", return_value=client
+            ):
+                with self.assertRaisesRegex(RuntimeError, "视觉接口未返回"):
+                    describe_event_keyframes(
+                        events,
+                        {"shared": {"env_file": ".missing"}, "vision": {"batch_size": 4}},
+                        root,
+                        lambda _value, _status: None,
+                    )
+
     def test_high_detail_review_is_conditional_and_batched(self) -> None:
         responses = iter(
             [

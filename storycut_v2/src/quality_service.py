@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +28,22 @@ def inspect_project_for_export(
         add("error", "项目文件缺失", "找不到当前项目的 project.json。")
         return _report(checks)
 
+    try:
+        project_payload = json.loads(project_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        project_payload = {}
+    artifact_state = project_payload.get("artifact_state", {})
+    artifact_state = artifact_state if isinstance(artifact_state, dict) else {}
+    raw_invalidated = artifact_state.get("invalidated", [])
+    raw_invalidated = (
+        raw_invalidated if isinstance(raw_invalidated, (list, tuple, set)) else []
+    )
+    invalidated_artifacts = {
+        str(key)
+        for key in raw_invalidated
+        if str(key).strip()
+    }
+
     if not source_video or not source_video.exists():
         add("error", "原视频不可用", "请重新关联创建项目时使用的原视频。")
     else:
@@ -40,23 +55,45 @@ def inspect_project_for_export(
 
     project_dir = project_file.parent
     required = {
-        "故事稿": project_dir / "script" / "story.json",
-        "镜头匹配": project_dir / "timeline" / "matches.json",
-        "粗剪时间线": project_dir / "timeline" / "rough_cut.json",
+        "故事稿": ("story", project_dir / "script" / "story.json"),
+        "镜头匹配": ("matches", project_dir / "timeline" / "matches.json"),
+        "粗剪时间线": ("rough_cut", project_dir / "timeline" / "rough_cut.json"),
     }
-    for label, path in required.items():
-        if path.exists():
+    for label, (artifact_key, path) in required.items():
+        if artifact_key not in invalidated_artifacts and path.exists():
             add("pass", label, "文件已准备。")
         else:
             add("error", f"{label}缺失", f"请先完成对应步骤，缺少 {path.name}。")
 
-    rough_cut_file = required["粗剪时间线"]
-    if rough_cut_file.exists():
+    rough_cut_file = required["粗剪时间线"][1]
+    if "rough_cut" not in invalidated_artifacts and rough_cut_file.exists():
         try:
             timeline = json.loads(rough_cut_file.read_text(encoding="utf-8"))
             _inspect_timeline(timeline, float(media.get("duration_sec", 0) or 0), add)
         except (OSError, ValueError, TypeError) as exc:
             add("error", "粗剪时间线损坏", str(exc))
+
+    story_file = required["故事稿"][1]
+    if "story" not in invalidated_artifacts and story_file.exists():
+        try:
+            story = json.loads(story_file.read_text(encoding="utf-8"))
+            _inspect_story_shot_bindings(story, add)
+        except (OSError, ValueError, TypeError):
+            pass
+
+    matches_file = required["镜头匹配"][1]
+    if "matches" not in invalidated_artifacts and matches_file.exists():
+        try:
+            matches = json.loads(matches_file.read_text(encoding="utf-8"))
+            warnings = [
+                str(item).strip()
+                for item in matches.get("matching_warnings", [])
+                if str(item).strip()
+            ]
+            if warnings:
+                add("warning", "画面语义依据不足", "；".join(warnings))
+        except (OSError, ValueError, TypeError):
+            pass
 
     if not narration_audio or not narration_audio.exists():
         add("error", "英文配音缺失", "请导入 GPT-SoVITS 生成的英文配音。")
@@ -404,6 +441,7 @@ def _inspect_timeline(timeline: dict[str, Any], source_duration: float, add) -> 
     very_short = 0
     previous_end = 0.0
     signatures: list[tuple[int, int, int]] = []
+    source_ranges_by_event: dict[int, list[tuple[float, float]]] = {}
     for clip in ordered:
         output_start = float(clip.get("output_start", 0) or 0)
         output_end = float(clip.get("output_end", 0) or 0)
@@ -418,34 +456,73 @@ def _inspect_timeline(timeline: dict[str, Any], source_duration: float, add) -> 
             invalid_source += 1
         if output_end - output_start < 0.25:
             very_short += 1
-        signatures.append((int(clip.get("event_id", 0) or 0), round(source_start * 10), round(source_end * 10)))
+        event_id = int(clip.get("event_id", 0) or 0)
+        signatures.append((event_id, round(source_start * 10), round(source_end * 10)))
+        source_ranges_by_event.setdefault(event_id, []).append((source_start, source_end))
     if gaps or overlaps:
         add("error", "镜头时间线不连续", f"检测到 {gaps} 处空隙、{overlaps} 处重叠。")
     if invalid_source:
         add("error", "镜头源时间无效", f"有 {invalid_source} 个镜头超出原视频或起止时间错误。")
     if very_short:
         add("warning", "存在闪切镜头", f"有 {very_short} 个镜头短于 0.25 秒，建议检查观看感受。")
-    repeated = sum(count - 1 for count in Counter(signatures).values() if count > 1)
     adjacent_replays = sum(
         signatures[index] == signatures[index - 1] for index in range(1, len(signatures))
     )
-    if adjacent_replays:
+    source_replays = 0
+    for ranges in source_ranges_by_event.values():
+        furthest_end = -1.0
+        for source_start, source_end in sorted(ranges):
+            if source_start < furthest_end - 0.05:
+                source_replays += 1
+            furthest_end = max(furthest_end, source_end)
+    if source_replays:
         add(
-            "warning",
-            "相邻镜头重复播放",
-            f"有 {adjacent_replays} 处连续解说重复使用完全相同的原片区间。"
-            "这可能是自动匹配的正常复用；请先看预览，只有画面跳回感明显时才需要在高级调整中替换镜头。",
-        )
-    elif repeated:
-        add(
-            "info",
-            "镜头复用说明",
-            f"有 {repeated} 个非相邻镜头复用了相同原片区间。多个文案共用合适画面属于正常情况，通常无需手动处理。",
+            "error",
+            "原片区间重复播放",
+            f"有 {source_replays} 处镜头与先前使用的原片范围重叠"
+            + (f"，其中 {adjacent_replays} 处是相邻镜头直接跳回" if adjacent_replays else "")
+            + "。请重新匹配镜头；同一事件可以连续顺播，但不能回头重放已用区间。",
         )
     else:
-        add("pass", "镜头复用", "没有发现完全相同的原片区间被重复播放。")
+        add("pass", "镜头复用", "没有发现原片区间被重叠或倒回播放。")
     if not gaps and not overlaps and not invalid_source:
         add("pass", "镜头时间线", "起止范围连续且都在原视频范围内。")
+
+
+def _inspect_story_shot_bindings(story: dict[str, Any], add) -> None:
+    previous_signature: tuple[tuple[int, ...], str] | None = None
+    run_length = 0
+    broad_runs = 0
+    for item in story.get("narration", []):
+        if not isinstance(item, dict):
+            continue
+        event_ids = tuple(
+            sorted(
+                {
+                    int(value)
+                    for value in item.get("event_ids", [])
+                    if str(value).isdigit()
+                }
+            )
+        )
+        visual_query = " ".join(str(item.get("visual_query", "")).casefold().split())
+        signature = (event_ids, visual_query)
+        if signature == previous_signature and event_ids:
+            run_length += 1
+        else:
+            if run_length >= 3:
+                broad_runs += 1
+            run_length = 1
+            previous_signature = signature
+    if run_length >= 3:
+        broad_runs += 1
+    if broad_runs:
+        add(
+            "warning",
+            "故事镜头绑定过宽",
+            f"发现 {broad_runs} 组连续三句以上共用完全相同的事件和画面要求。"
+            "建议重新生成故事，让每句的 visual_query 明确人物、物体和动作，再重新匹配镜头。",
+        )
 
 
 def _inspect_subtitles(segments: list[dict[str, Any]], audio_duration: float, add) -> None:

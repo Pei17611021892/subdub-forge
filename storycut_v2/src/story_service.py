@@ -303,11 +303,13 @@ def generate_story_script(
                 1.0, float(normalized.get("estimated_duration_sec", 0) or 0)
             )
             broad_bindings = _overbroad_narration_bindings(normalized)
+            repeated_bindings = _repeated_narration_binding_ids(normalized)
             missing_critical = _missing_critical_event_ids(normalized, layered_structure)
             broken_tts_units = _problematic_tts_unit_ids(normalized)
             if (
                 draft_duration <= safe_duration
                 and not broad_bindings
+                and not repeated_bindings
                 and not missing_critical
                 and not broken_tts_units
             ):
@@ -327,6 +329,8 @@ def generate_story_script(
                 reason_parts.append(f"预计 {draft_duration:.0f} 秒，超过 {safe_duration:.0f} 秒安全预算")
             if broad_bindings:
                 reason_parts.append("部分解说绑定了过多镜头事件")
+            if repeated_bindings:
+                reason_parts.append("连续多句复用了相同的宽泛画面要求")
             if missing_critical:
                 reason_parts.append(
                     "遗漏关键事件 " + ", ".join(str(item) for item in missing_critical)
@@ -347,7 +351,8 @@ def generate_story_script(
                 safe_duration,
                 layered_structure,
                 missing_critical_event_ids=missing_critical,
-                fix_binding_precision=bool(broad_bindings),
+                fix_binding_precision=bool(broad_bindings or repeated_bindings),
+                repeated_binding_ids=repeated_bindings,
                 problematic_tts_unit_ids=broken_tts_units,
             )
             result = _chat_json(
@@ -502,6 +507,7 @@ def generate_story_script(
     progress(0.88, "正在整理解说断句与镜头绑定…")
     final_duration = float(normalized.get("estimated_duration_sec", 0))
     final_broad_bindings = _overbroad_narration_bindings(normalized)
+    final_repeated_bindings = _repeated_narration_binding_ids(normalized)
     final_missing_critical = _missing_critical_event_ids(normalized, layered_structure)
     final_broken_tts_units = _problematic_tts_unit_ids(normalized)
     if final_duration >= SHORTS_MAX_DURATION_SEC and not allow_overlong_for_series_evaluation:
@@ -522,12 +528,18 @@ def generate_story_script(
             final_broad_bindings
             and not bool(normalized.get("forced_single_short_trim", False))
         )
+        or final_repeated_bindings
         or blocking_missing_critical
         or final_broken_tts_units
     ):
         details = []
         if final_broad_bindings:
             details.append("部分解说仍绑定超过 4 个事件")
+        if final_repeated_bindings:
+            details.append(
+                "连续解说仍共用宽泛画面要求："
+                + ", ".join(str(item) for item in final_repeated_bindings[:8])
+            )
         if blocking_missing_critical:
             details.append(
                 "仍遗漏关键事件 " + ", ".join(str(item) for item in blocking_missing_critical)
@@ -756,6 +768,8 @@ OUTPUT
 - Draft the narration as a coherent whole, then divide it into semantic beats for editing.
 - Each narration beat must bind to the event IDs that support it and include a concise Chinese visual_query.
 - Bind each beat to only 1-4 event IDs that directly support that exact line; never attach an entire stage or chapter to every sentence.
+- visual_query must name the exact visible subject, object, and action needed for that line, not a broad chapter label copied across several lines.
+- Shot rhythm is not one-sentence-one-shot. Adjacent beats may deliberately share an event only when that event visibly supports both; the editor will play its source range continuously instead of restarting it.
 - event_ids are evidence references, not decoration. Do not bind a line to an unrelated highlight.
 - Return exactly one JSON object and no Markdown:
 {{
@@ -819,6 +833,8 @@ NON-NEGOTIABLE ACCEPTANCE RULES
 - Colons, semicolons, periods, question marks, and exclamation marks are also GPT-SoVITS boundaries. Every resulting unit must be a complete independently speakable thought.
 - Never leave a colon-ended setup or a dependent opening such as "After the first attempt," "If space is limited," or "Where failure is dangerous," as its own unit.
 - Bind every narration beat to only 1-4 directly supporting event IDs. Do not reuse an outline stage's full event list on each line.
+- Give every narration beat a line-specific Chinese visual_query naming the visible subject, object, and action. Never copy one broad topic label across a paragraph.
+- Multiple adjacent narration beats may share one event only when its continuous footage visibly supports every line; otherwise distribute them to different directly relevant events.
 
 {layered_guidance}
 
@@ -864,6 +880,8 @@ SOURCE AND FACTS
 - Never invent facts, causes, results, quotations, or unseen actions.
 - Every sentence must add information, explain a mechanism, or create a necessary transition.
 - Bind each narration beat to only 1-4 event IDs that directly support that exact line. Never copy an outline or chapter's entire event list onto every sentence.
+- visual_query must describe the exact visible subject, object, and action for this line. Do not repeat one broad chapter label across several narration beats.
+- Do not force one shot per sentence. Reuse an event across adjacent beats only when its continuous footage supports both; otherwise choose distinct directly relevant events.
 
 VOICE
 - Write natural spoken English with varied rhythm, not literal translation or generic AI prose.
@@ -900,6 +918,7 @@ def _build_speech_rewrite_prompt(
     layered_structure: dict[str, Any] | None = None,
     missing_critical_event_ids: list[int] | None = None,
     fix_binding_precision: bool = False,
+    repeated_binding_ids: list[int] | None = None,
     problematic_tts_unit_ids: list[int] | None = None,
 ) -> str:
     layered_guidance = _layered_structure_prompt(layered_structure)
@@ -912,7 +931,13 @@ def _build_speech_rewrite_prompt(
         )
     if fix_binding_precision:
         correction_guidance.append(
-            "Repair evidence binding: every narration beat must reference only 1-4 directly supporting event IDs."
+            "Repair evidence binding: every narration beat must reference only 1-4 directly supporting event IDs and use a line-specific visual_query naming the visible subject, object, and action."
+        )
+    if repeated_binding_ids:
+        correction_guidance.append(
+            "Reassess narration beats "
+            + ", ".join(str(item) for item in repeated_binding_ids)
+            + ": they copied the same event list and visual query across three or more consecutive lines. Keep shared events only when continuous footage truly supports every line; otherwise narrow or redistribute them."
         )
     if problematic_tts_unit_ids:
         correction_guidance.append(
@@ -940,6 +965,8 @@ NON-NEGOTIABLE DELIVERY RULES
 - A comma-ended unit must normally contain at least five English words. Prefer short complete sentences with periods when in doubt.
 - Keep valid event_ids on every narration beat and provide a concise Chinese visual_query.
 - Every narration beat must bind to only 1-4 event IDs that directly support that exact line. Never paste a chapter or outline's full event list onto multiple lines.
+- Every visual_query must name the exact visible subject, object, and action for its own narration beat, not a generic paragraph topic.
+- Do not force one shot per sentence. Adjacent beats may share an event only when the same continuous source passage visibly supports both.
 {correction_text}
 
 {layered_guidance}
@@ -1486,6 +1513,43 @@ def _overbroad_narration_bindings(story: dict[str, Any], limit: int = 4) -> list
         )
         > limit
     ]
+
+
+def _repeated_narration_binding_ids(
+    story: dict[str, Any],
+    minimum_run: int = 3,
+) -> list[int]:
+    """Find paragraph-level bindings copied across too many consecutive beats."""
+    repeated: list[int] = []
+    run: list[int] = []
+    previous_signature: tuple[tuple[int, ...], str] | None = None
+    for index, item in enumerate(story.get("narration", []), start=1):
+        if not isinstance(item, dict):
+            continue
+        event_ids = tuple(
+            sorted(
+                {
+                    int(value)
+                    for value in item.get("event_ids", [])
+                    if str(value).isdigit()
+                }
+            )
+        )
+        visual_query = " ".join(
+            str(item.get("visual_query", "")).casefold().split()
+        )
+        signature = (event_ids, visual_query)
+        item_id = int(item.get("id", index) or index)
+        if signature == previous_signature and event_ids:
+            run.append(item_id)
+        else:
+            if len(run) >= minimum_run:
+                repeated.extend(run)
+            run = [item_id]
+            previous_signature = signature
+    if len(run) >= minimum_run:
+        repeated.extend(run)
+    return repeated
 
 
 _DEPENDENT_TTS_OPENING = re.compile(

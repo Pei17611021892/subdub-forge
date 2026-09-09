@@ -13,6 +13,7 @@ from src.story_service import (
     _chat_json,
     _normalize_story,
     _problematic_tts_unit_ids,
+    _repeated_narration_binding_ids,
     _repair_problematic_tts_units,
     _trim_narration_to_duration,
     calibrate_story_timing_from_voice,
@@ -24,6 +25,23 @@ from src.story_service import (
 
 
 class StoryServiceTests(unittest.TestCase):
+    def test_repeated_paragraph_level_bindings_are_detected(self) -> None:
+        story = {
+            "narration": [
+                {
+                    "id": index,
+                    "event_ids": [3, 5, 7],
+                    "visual_query": "拥挤下行扶梯负载上升",
+                }
+                for index in range(1, 4)
+            ]
+        }
+
+        self.assertEqual(_repeated_narration_binding_ids(story), [1, 2, 3])
+
+        story["narration"][2]["visual_query"] = "制动器近景"
+        self.assertEqual(_repeated_narration_binding_ids(story), [])
+
     def test_narrative_strategy_auto_and_none_keep_one_request_workflow(self) -> None:
         options = {item["value"] for item in narrative_strategy_options()}
         self.assertIn("auto", options)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import json
+import os
 import time
 from threading import Event
 from datetime import datetime
@@ -316,6 +317,22 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertEqual(controller._subtitle_style_preview_video_path(), source)
             self.assertEqual(controller.subtitleStylePreviewSourceName, source.name)
 
+    def test_copied_project_can_preview_from_its_cleaned_video_when_original_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            missing_source = root / "home-computer-source.mp4"
+            cleaned = root / "projects" / "demo" / "media" / "source_without_subtitles.mp4"
+            cleaned.parent.mkdir(parents=True)
+            cleaned.write_bytes(b"portable-cleaned-source")
+            controller = self._controller(root)
+            controller._video_path = str(missing_source)
+            controller._subtitle_cleaned_video_path = str(cleaned)
+
+            self.assertTrue(controller._ensure_source_video(allow_cleaned_video=True))
+            self.assertEqual(controller._available_video_source(), cleaned)
+            self.assertIn("另一台电脑", controller.notice)
+            self.assertFalse(controller._ensure_source_video())
+
     def test_text_style_edits_keep_preview_image_and_background_mode_is_exported(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             controller = self._controller(Path(temporary_dir))
@@ -362,6 +379,236 @@ class AppControllerProjectNameTests(unittest.TestCase):
             saved = json.loads(project_file.read_text(encoding="utf-8"))
             self.assertNotIn("rough_preview", saved["artifacts"])
             self.assertEqual(saved["artifacts"]["subtitle_test_preview"], relative.as_posix())
+
+    def test_render_setting_change_unbinds_previews_without_deleting_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            project.mkdir(parents=True)
+            final_preview = root / "export" / "demo_final.mp4"
+            subtitle_preview = root / "export" / "demo_subtitle_test.mp4"
+            final_preview.parent.mkdir(parents=True)
+            final_preview.write_bytes(b"final")
+            subtitle_preview.write_bytes(b"subtitle")
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "stage": "previewed",
+                        "settings": {},
+                        "artifacts": {
+                            "rough_preview": "../../export/demo_final.mp4",
+                            "subtitle_test_preview": "../../export/demo_subtitle_test.mp4",
+                            "rough_cut": "timeline/rough_cut.json",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            controller = self._controller(root)
+            controller.openProject(str(project_file))
+            self.assertTrue(controller.previewVideoReady)
+            self.assertTrue(controller.subtitleTestPreviewReady)
+
+            controller.setCanvasAspectRatio("9:16")
+
+            self.assertFalse(controller.previewVideoReady)
+            self.assertFalse(controller.subtitleTestPreviewReady)
+            self.assertTrue(final_preview.exists())
+            self.assertTrue(subtitle_preview.exists())
+            saved = json.loads(project_file.read_text(encoding="utf-8"))
+            self.assertNotIn("rough_preview", saved["artifacts"])
+            self.assertNotIn("subtitle_test_preview", saved["artifacts"])
+            self.assertIn("rough_preview", saved["artifact_state"]["invalidated"])
+            self.assertEqual(saved["stage"], "matched")
+
+            reopened = self._controller(root)
+            reopened.openProject(str(project_file))
+            self.assertFalse(reopened.previewVideoReady)
+            self.assertFalse(reopened.subtitleTestPreviewReady)
+
+    def test_opening_another_project_clears_previous_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "second"
+            project.mkdir(parents=True)
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps({"name": "second", "settings": {}}), encoding="utf-8"
+            )
+            controller = self._controller(root)
+            controller._export_path = str(root / "old-preview.mp4")
+            controller._subtitle_test_preview_path = str(root / "old-test.mp4")
+            controller._quality_report = {
+                "passed": False,
+                "error_count": 1,
+                "checks": [{"level": "error", "title": "旧项目", "detail": "旧状态"}],
+            }
+            controller._narration_audio_path = str(root / "old.wav")
+            controller._analysis_busy = True
+            controller._export_busy = True
+
+            controller.openProject(str(project_file))
+
+            self.assertEqual(controller.projectName, "second")
+            self.assertFalse(controller.previewVideoReady)
+            self.assertFalse(controller.subtitleTestPreviewReady)
+            self.assertFalse(controller.qualityCheckPassed)
+            self.assertEqual(controller.qualityCheckItems, [])
+            self.assertFalse(controller.analysisBusy)
+            self.assertFalse(controller.exportBusy)
+            self.assertFalse(controller.narrationAudioReady)
+
+    def test_reimporting_audio_unbinds_previous_srt_and_previews(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            audio_dir = project / "audio"
+            audio_dir.mkdir(parents=True)
+            old_srt = audio_dir / "narration.srt"
+            old_original_srt = audio_dir / "narration_original.srt"
+            old_srt.write_text("old timing", encoding="utf-8")
+            old_original_srt.write_text("old timing", encoding="utf-8")
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "settings": {"voice": {}},
+                        "artifacts": {
+                            "narration_srt": "audio/narration.srt",
+                            "narration_srt_original": "audio/narration_original.srt",
+                            "rough_preview": "../../export/old.mp4",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            source = root / "replacement.wav"
+            source.write_bytes(b"replacement")
+            controller = self._controller(root)
+            controller._current_project_file = project_file
+            controller._export_path = str(root / "export" / "old.mp4")
+            controller._synced_srt_path = str(old_srt)
+
+            def fake_import(_source, original, *_args):  # type: ignore[no-untyped-def]
+                original.write_bytes(b"new audio")
+                return {"duration_sec": 12.5}
+
+            with patch("src.app_controller.import_narration_audio", side_effect=fake_import), patch.object(
+                controller, "_apply_voice_timing_to_matches"
+            ):
+                controller.importNarrationAudio(source.as_uri())
+
+            self.assertTrue(controller.narrationAudioReady)
+            self.assertFalse(controller.syncedSrtReady)
+            self.assertFalse(controller.previewVideoReady)
+            self.assertTrue(old_srt.exists())
+            saved = json.loads(project_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved["artifacts"]["narration_audio"], "audio/narration.wav")
+            self.assertNotIn("narration_srt", saved["artifacts"])
+            self.assertIn("narration_srt", saved["artifact_state"]["invalidated"])
+
+            reopened = self._controller(root)
+            reopened.openProject(str(project_file))
+            self.assertTrue(reopened.narrationAudioReady)
+            self.assertFalse(reopened.syncedSrtReady)
+
+    def test_rematching_reapplies_existing_audio_and_srt_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            (project / "script").mkdir(parents=True)
+            (project / "analysis").mkdir()
+            (project / "timeline").mkdir()
+            (project / "audio").mkdir()
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps({"name": "demo", "settings": {}, "artifacts": {}}),
+                encoding="utf-8",
+            )
+            (project / "script" / "story.json").write_text("{}", encoding="utf-8")
+            (project / "analysis" / "events.json").write_text("{}", encoding="utf-8")
+            audio = project / "audio" / "narration.wav"
+            audio.write_bytes(b"audio")
+            srt = project / "audio" / "narration.srt"
+            srt.write_text(
+                "1\n00:00:00,000 --> 00:00:12,000\nVoice line.\n",
+                encoding="utf-8",
+            )
+            controller = self._controller(root)
+            controller._current_project_file = project_file
+            controller._narration_audio_path = str(audio)
+            controller._synced_srt_path = str(srt)
+            controller._narration_duration_sec = 12.0
+
+            with patch(
+                "src.app_controller.generate_shot_matches",
+                return_value={"items": [], "matching_warnings": []},
+            ), patch(
+                "src.app_controller.apply_voice_timing",
+                return_value={"items": [], "matching_warnings": []},
+            ) as retime, patch("src.app_controller.build_rough_cut"):
+                controller.generateMatches()
+
+            self.assertEqual(retime.call_args.args[1], 12.0)
+            self.assertEqual(len(retime.call_args.args[2]), 1)
+
+    def test_open_project_unbinds_a_preview_older_than_its_timeline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            timeline = project / "timeline"
+            timeline.mkdir(parents=True)
+            preview = root / "export" / "demo_final.mp4"
+            preview.parent.mkdir(parents=True)
+            preview.write_bytes(b"old preview")
+            old_time = time.time() - 20
+            preview.touch()
+            os.utime(preview, (old_time, old_time))
+            rough_cut = timeline / "rough_cut.json"
+            rough_cut.write_text(json.dumps({"duration_sec": 10}), encoding="utf-8")
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "stage": "previewed",
+                        "settings": {},
+                        "artifacts": {
+                            "rough_cut": "timeline/rough_cut.json",
+                            "rough_preview": "../../export/demo_final.mp4",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            controller = self._controller(root)
+            controller.openProject(str(project_file))
+
+            self.assertFalse(controller.previewVideoReady)
+            self.assertTrue(preview.exists())
+            saved = json.loads(project_file.read_text(encoding="utf-8"))
+            self.assertIn("rough_preview", saved["artifact_state"]["invalidated"])
+            self.assertEqual(saved["stage"], "matched")
+
+    def test_render_preflight_does_not_check_the_previous_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            controller = self._controller(Path(temporary_dir))
+            report = {
+                "passed": True,
+                "pass_count": 1,
+                "info_count": 0,
+                "warning_count": 0,
+                "error_count": 0,
+                "checks": [],
+            }
+            with patch.object(controller, "_collect_quality_report", return_value=report) as collect:
+                self.assertTrue(controller._run_quality_check())
+
+            collect.assert_called_once_with(deep_scan=False, include_render=False)
 
     def test_subtitle_test_completion_does_not_replace_final_preview(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -935,6 +1182,125 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertEqual(controller.projectName, "demo")
             self.assertIn("项目已恢复", controller.notice)
             self.assertEqual(controller.voiceStatus, "等待导出 SRT 到 GPT-SoVITS")
+
+    def test_open_project_restores_persistent_vision_failure_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "vision-failed"
+            analysis = project / "analysis"
+            analysis.mkdir(parents=True)
+            (analysis / "events.json").write_text(
+                json.dumps(
+                    {
+                        "events": [
+                            {
+                                "id": 1,
+                                "start": 0,
+                                "end": 3,
+                                "keyframe": "keyframes/scene_0001.jpg",
+                                "visual_description": "",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "vision-failed",
+                        "project_type": "video",
+                        "analysis_state": "vision_failed",
+                        "stage": "analysis_partial",
+                        "settings": {},
+                        "warnings": {"vision": "content_policy_violation"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            controller = self._controller(root)
+            controller.openProject(str(project_file))
+
+            self.assertFalse(controller.analysisComplete)
+            self.assertTrue(controller.analysisNeedsVisionRetry)
+            self.assertIn("content_policy_violation", controller.visionFailureDetail)
+            self.assertIn("可直接重试画面理解", controller.analysisStatus)
+
+    def test_retry_vision_preserves_local_analysis_and_invalidates_old_story(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "vision-retry"
+            analysis = project / "analysis"
+            keyframes = analysis / "keyframes"
+            keyframes.mkdir(parents=True)
+            (keyframes / "scene_0001.jpg").write_bytes(b"frame")
+            transcript = analysis / "transcript.json"
+            transcript.write_text('{"kept": true}', encoding="utf-8")
+            events_file = analysis / "events.json"
+            events_file.write_text(
+                json.dumps(
+                    {
+                        "events": [
+                            {
+                                "id": 1,
+                                "start": 0,
+                                "end": 3,
+                                "keyframe": "keyframes/scene_0001.jpg",
+                                "visual_description": "",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (project / "script").mkdir()
+            (project / "script" / "story.json").write_text("{}", encoding="utf-8")
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "vision-retry",
+                        "project_type": "video",
+                        "analysis_state": "vision_failed",
+                        "stage": "analysis_partial",
+                        "settings": {},
+                        "artifacts": {"story": "script/story.json"},
+                        "warnings": {"vision": "temporary failure"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            controller = self._controller(root)
+            controller.openProject(str(project_file))
+            controller._layered_analysis_enabled = False
+
+            def fake_describe(path, *_args):  # type: ignore[no-untyped-def]
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["events"][0]["visual_description"] = "人物站在扶梯入口。"
+                path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                return payload
+
+            class ImmediateThread:
+                def __init__(self, target, **_kwargs):  # type: ignore[no-untyped-def]
+                    self.target = target
+
+                def start(self) -> None:
+                    self.target()
+
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "src.app_controller.describe_event_keyframes", side_effect=fake_describe
+            ), patch("src.app_controller.threading.Thread", ImmediateThread):
+                controller.retryVisionUnderstanding()
+
+            saved = json.loads(project_file.read_text(encoding="utf-8"))
+            self.assertEqual(transcript.read_text(encoding="utf-8"), '{"kept": true}')
+            self.assertEqual(saved["analysis_state"], "complete")
+            self.assertNotIn("vision", saved.get("warnings", {}))
+            self.assertIn("story", saved["artifact_state"]["invalidated"])
+            self.assertTrue(controller.analysisComplete)
+            self.assertFalse(controller.analysisNeedsVisionRetry)
 
     def test_voice_speed_completion_saves_working_audio_and_clears_busy_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

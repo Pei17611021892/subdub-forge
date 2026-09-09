@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
+_MIN_USEFUL_CLIP_SEC = 0.75
+
+
 def generate_shot_matches(
     story_json: Path,
     events_json: Path,
@@ -50,11 +53,8 @@ def generate_shot_matches(
         candidates.sort(key=lambda item: (-float(item["score"]), float(item["start"])))
         candidates = candidates[: min(5, len(candidates))]
         selected = candidates[0]
-        selected_clips = _fit_clips(candidates, int(selected["event_id"]), float(narration.get("estimated_duration_sec", 0) or 0))
         last_selected_start = float(selected["start"])
-        for clip in selected_clips:
-            event_id = int(clip.get("event_id", 0))
-            used_counts[event_id] = used_counts.get(event_id, 0) + 1
+        used_counts[int(selected["event_id"])] = used_counts.get(int(selected["event_id"]), 0) + 1
         matches.append(
             {
                 "narration_id": int(narration.get("id", len(matches) + 1)),
@@ -63,18 +63,30 @@ def generate_shot_matches(
                 "narration_duration_sec": float(narration.get("estimated_duration_sec", 0) or 0),
                 "selected_event_id": int(selected["event_id"]),
                 "selected_start": float(selected["start"]),
-                "selected_end": float(selected_clips[0]["end"]),
-                "selected_clips": selected_clips,
-                "coverage_sec": round(sum(float(clip["end"]) - float(clip["start"]) for clip in selected_clips), 3),
+                "selected_end": float(selected["start"]),
+                "selected_clips": [],
+                "coverage_sec": 0.0,
+                "selection_mode": "automatic",
                 "candidates": candidates,
             }
         )
 
+    _allocate_match_items(matches, reselect_automatic=True)
+
     payload = {
-        "schema_version": 1,
-        "strategy": "automatic story binding + visual similarity + chronology + reuse control",
+        "schema_version": 2,
+        "strategy": "global story binding + visual similarity + chronology + non-repeating source allocation",
         "items": matches,
     }
+    described_events = sum(bool(str(event.get("visual_description", "")).strip()) for event in events)
+    payload["visual_description_coverage"] = {
+        "described": described_events,
+        "total": len(events),
+    }
+    if described_events == 0:
+        payload["matching_warnings"] = [
+            "本项目没有可用的关键帧视觉描述；当前匹配只能依赖故事事件绑定和原片转写，人物、物体与动作的画面语义精度会受限。"
+        ]
     matches_json.parent.mkdir(parents=True, exist_ok=True)
     matches_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
@@ -82,6 +94,7 @@ def generate_shot_matches(
 
 def select_shot_match(matches_json: Path, narration_id: int, event_id: int) -> dict[str, Any]:
     payload = json.loads(matches_json.read_text(encoding="utf-8"))
+    found = False
     for item in payload.get("items", []):
         if int(item.get("narration_id", 0)) != narration_id:
             continue
@@ -96,18 +109,16 @@ def select_shot_match(matches_json: Path, narration_id: int, event_id: int) -> d
         if selected is None:
             raise ValueError("所选镜头不在候选列表中")
         item["selected_event_id"] = event_id
-        item["selected_start"] = float(selected.get("start", 0))
-        clips = _fit_clips(
-            list(item.get("candidates", [])),
-            event_id,
-            float(item.get("narration_duration_sec", 0) or 0),
-        )
-        item["selected_end"] = float(clips[0]["end"])
-        item["selected_clips"] = clips
-        item["coverage_sec"] = round(sum(float(clip["end"]) - float(clip["start"]) for clip in clips), 3)
+        item["selection_mode"] = "manual"
+        found = True
         break
-    else:
+    if not found:
         raise ValueError("找不到对应的解说句")
+    _allocate_match_items(
+        [item for item in payload.get("items", []) if isinstance(item, dict)],
+        reselect_automatic=False,
+    )
+    payload["schema_version"] = max(2, int(payload.get("schema_version", 1) or 1))
     matches_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
 
@@ -234,25 +245,22 @@ def apply_voice_timing(
         estimate_total = sum(estimates)
         durations = [total * value / estimate_total for value in estimates]
 
+    durations = [round(value, 3) for value in durations]
+    if durations and total >= 0.2 * len(durations):
+        durations[-1] = round(max(0.2, total - sum(durations[:-1])), 3)
+
     voice_cursor = 0.0
     for item, duration in zip(items, durations):
-        duration = round(duration, 3)
         item["estimated_narration_duration_sec"] = float(item.get("narration_duration_sec", 0) or 0)
         item["narration_duration_sec"] = duration
         item["voice_start"] = round(voice_cursor, 3)
         voice_cursor += duration
         item["voice_end"] = round(voice_cursor, 3)
-        clips = _fit_clips(
-            list(item.get("candidates", [])),
-            int(item.get("selected_event_id", 0)),
-            duration,
-        )
-        item["selected_clips"] = clips
-        item["selected_start"] = float(clips[0]["start"])
-        item["selected_end"] = float(clips[0]["end"])
-        item["coverage_sec"] = round(sum(float(clip["end"]) - float(clip["start"]) for clip in clips), 3)
+    _allocate_match_items(items, reselect_automatic=True)
     payload["voice_timing_applied"] = True
     payload["voice_duration_sec"] = round(total, 3)
+    payload["schema_version"] = max(2, int(payload.get("schema_version", 1) or 1))
+    payload["allocation_strategy"] = "global_non_repeating_v2"
     matches_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
 
@@ -307,8 +315,13 @@ def _score_candidate(
     score = (0.78 if directly_bound else 0.12) + similarity * (0.21 if directly_bound else 0.68)
     start = float(event.get("start", 0) or 0)
     if last_selected_start >= 0:
-        score += 0.06 if start >= last_selected_start else -0.08
-    score -= min(0.32, used_count * 0.14)
+        if start > last_selected_start + 0.05:
+            score += 0.05
+        elif start < last_selected_start - 0.05:
+            score -= 0.10
+        else:
+            score -= 0.06
+    score -= min(0.40, used_count * 0.20)
     score = min(0.99, max(0.01, score))
     reason = "故事稿已绑定此事件" if directly_bound else ("画面描述较相关" if similarity >= 0.18 else "备用原片场景")
     if used_count:
@@ -323,6 +336,8 @@ def _score_candidate(
         ),
         "keyframe": str(event.get("keyframe", "")),
         "score": round(score, 3),
+        "semantic_similarity": round(similarity, 3),
+        "directly_bound": directly_bound,
         "reason": reason,
     }
 
@@ -357,6 +372,137 @@ def _fit_clips(candidates: list[dict[str, Any]], selected_event_id: int, target_
         if needed <= 0.05:
             break
     return clips
+
+
+def _allocate_match_items(
+    items: list[dict[str, Any]],
+    *,
+    reselect_automatic: bool,
+) -> None:
+    """Allocate source ranges across the whole edit instead of restarting per line.
+
+    An event may cover multiple adjacent narration beats, but its source cursor always
+    moves forward. Automatic choices can switch to another strong candidate when a
+    range is exhausted or overused; explicit user choices remain the first choice.
+    """
+    source_cursors: dict[int, float] = {}
+    selected_counts: dict[int, int] = {}
+    previous_event_id = 0
+    previous_source_start = -1.0
+
+    for item in items:
+        candidates = [
+            dict(candidate)
+            for candidate in item.get("candidates", [])
+            if isinstance(candidate, dict)
+            and float(candidate.get("end", 0) or 0)
+            > float(candidate.get("start", 0) or 0)
+        ]
+        if not candidates:
+            item["selected_clips"] = []
+            item["coverage_sec"] = 0.0
+            continue
+
+        target_sec = max(0.2, float(item.get("narration_duration_sec", 0) or 0))
+        requested_event_id = int(item.get("selected_event_id", 0) or 0)
+        manual = str(item.get("selection_mode", "automatic")) == "manual"
+
+        def available(candidate: dict[str, Any]) -> float:
+            event_id = int(candidate.get("event_id", 0) or 0)
+            start = max(
+                float(candidate.get("start", 0) or 0),
+                source_cursors.get(event_id, float(candidate.get("start", 0) or 0)),
+            )
+            return max(0.0, float(candidate.get("end", 0) or 0) - start)
+
+        def allocation_score(candidate: dict[str, Any]) -> tuple[float, float]:
+            event_id = int(candidate.get("event_id", 0) or 0)
+            score = float(candidate.get("score", 0) or 0)
+            uses = selected_counts.get(event_id, 0)
+            score -= min(0.30, uses * 0.12)
+            if event_id == previous_event_id and available(candidate) >= min(target_sec, 1.0):
+                score += 0.07
+            start = float(candidate.get("start", 0) or 0)
+            if previous_source_start >= 0:
+                if start < previous_source_start - 0.05:
+                    score -= 0.08
+                elif start > previous_source_start + 0.05:
+                    score += 0.03
+            return score, -start
+
+        usable = [candidate for candidate in candidates if available(candidate) > 0.05]
+        if not usable:
+            item["selected_clips"] = []
+            item["coverage_sec"] = 0.0
+            continue
+
+        requested = next(
+            (
+                candidate
+                for candidate in usable
+                if int(candidate.get("event_id", 0) or 0) == requested_event_id
+            ),
+            None,
+        )
+        if manual and requested is not None:
+            primary = requested
+        elif reselect_automatic or requested is None:
+            primary = max(usable, key=allocation_score)
+        else:
+            primary = requested
+
+        ordered = [primary]
+        ordered.extend(
+            sorted(
+                (
+                    candidate
+                    for candidate in usable
+                    if int(candidate.get("event_id", 0) or 0)
+                    != int(primary.get("event_id", 0) or 0)
+                ),
+                key=allocation_score,
+                reverse=True,
+            )
+        )
+
+        clips: list[dict[str, Any]] = []
+        needed = target_sec
+        for candidate in ordered:
+            event_id = int(candidate.get("event_id", 0) or 0)
+            event_start = float(candidate.get("start", 0) or 0)
+            start = max(event_start, source_cursors.get(event_id, event_start))
+            remaining = max(0.0, float(candidate.get("end", 0) or 0) - start)
+            if remaining <= 0.05:
+                continue
+            if remaining < _MIN_USEFUL_CLIP_SEC and needed > remaining + 0.05:
+                continue
+            take = min(remaining, needed)
+            clips.append(
+                {
+                    "event_id": event_id,
+                    "start": round(start, 3),
+                    "end": round(start + take, 3),
+                }
+            )
+            source_cursors[event_id] = start + take
+            selected_counts[event_id] = selected_counts.get(event_id, 0) + 1
+            needed -= take
+            if needed <= 0.05:
+                break
+
+        item["selected_clips"] = clips
+        item["coverage_sec"] = round(
+            sum(float(clip["end"]) - float(clip["start"]) for clip in clips),
+            3,
+        )
+        if clips:
+            first = clips[0]
+            item["selected_event_id"] = int(first["event_id"])
+            item["selected_start"] = float(first["start"])
+            item["selected_end"] = float(first["end"])
+            last = clips[-1]
+            previous_event_id = int(last["event_id"])
+            previous_source_start = float(last["start"])
 
 
 def _text_similarity(left: str, right: str) -> float:

@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "version": "2.1.0",
+  "version": "2.1.1",
   "files": [
     "config.default.yaml",
     "main.py",
@@ -31,6 +31,7 @@
     "tests/test_fact_review_service.py",
     "tests/test_layered_analysis_service.py",
     "tests/test_manuscript_service.py",
+    "tests/test_matching_service.py",
     "tests/test_stock_media_service.py",
     "tests/test_quality_service.py",
     "tests/test_repository_updater.py",

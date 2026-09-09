@@ -57,6 +57,65 @@ class QualityServiceTests(unittest.TestCase):
             self.assertTrue(report["passed"])
             self.assertEqual(report["error_count"], 0)
 
+    def test_invalidated_timeline_files_are_not_accepted_as_current(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project, source, audio, srt = self._project(root)
+            project.write_text(
+                json.dumps(
+                    {
+                        "artifact_state": {
+                            "invalidated": ["matches", "rough_cut"]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = inspect_project_for_export(
+                project, source, audio, 12.0, srt, {"duration_sec": 20, "file_size": 5}
+            )
+
+            titles = {item["title"] for item in report["checks"] if item["level"] == "error"}
+            self.assertIn("镜头匹配缺失", titles)
+            self.assertIn("粗剪时间线缺失", titles)
+
+    def test_quality_report_warns_about_broad_bindings_and_missing_visual_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project, source, audio, srt = self._project(root)
+            repeated = [
+                {
+                    "id": index,
+                    "event_ids": [1, 2, 3],
+                    "visual_query": "扶梯事故过程",
+                }
+                for index in range(1, 4)
+            ]
+            (root / "script" / "story.json").write_text(
+                json.dumps({"narration": repeated}), encoding="utf-8"
+            )
+            (root / "timeline" / "matches.json").write_text(
+                json.dumps(
+                    {
+                        "matching_warnings": [
+                            "本项目没有可用的关键帧视觉描述。"
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = inspect_project_for_export(
+                project, source, audio, 12.0, srt, {"duration_sec": 20, "file_size": 5}
+            )
+
+            warning_titles = {
+                item["title"] for item in report["checks"] if item["level"] == "warning"
+            }
+            self.assertIn("故事镜头绑定过宽", warning_titles)
+            self.assertIn("画面语义依据不足", warning_titles)
+
     def test_overlong_and_missing_audio_are_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
@@ -129,7 +188,7 @@ class QualityServiceTests(unittest.TestCase):
         self.assertIn("成片超过 Shorts 上限", titles)
         self.assertIn("输出缺少声音", titles)
 
-    def test_non_adjacent_reused_shot_is_informational(self) -> None:
+    def test_non_adjacent_reused_source_range_is_blocking(self) -> None:
         checks: list[dict[str, str]] = []
 
         def add(level: str, title: str, detail: str) -> None:
@@ -149,11 +208,11 @@ class QualityServiceTests(unittest.TestCase):
             10.0,
             add,
         )
-        reused = next(item for item in checks if item["title"] == "镜头复用说明")
-        self.assertEqual(reused["level"], "info")
-        self.assertIn("无需手动处理", reused["detail"])
+        reused = next(item for item in checks if item["title"] == "原片区间重复播放")
+        self.assertEqual(reused["level"], "error")
+        self.assertIn("不能回头重放", reused["detail"])
 
-    def test_adjacent_exact_replay_is_only_a_preview_warning(self) -> None:
+    def test_adjacent_exact_replay_is_blocking(self) -> None:
         checks: list[dict[str, str]] = []
 
         def add(level: str, title: str, detail: str) -> None:
@@ -172,9 +231,32 @@ class QualityServiceTests(unittest.TestCase):
             10.0,
             add,
         )
-        repeated = next(item for item in checks if item["title"] == "相邻镜头重复播放")
-        self.assertEqual(repeated["level"], "warning")
-        self.assertIn("只有画面跳回感明显", repeated["detail"])
+        repeated = next(item for item in checks if item["title"] == "原片区间重复播放")
+        self.assertEqual(repeated["level"], "error")
+        self.assertIn("相邻镜头直接跳回", repeated["detail"])
+
+    def test_contiguous_ranges_from_same_event_are_allowed(self) -> None:
+        checks: list[dict[str, str]] = []
+
+        def add(level: str, title: str, detail: str) -> None:
+            checks.append({"level": level, "title": title, "detail": detail})
+
+        _inspect_timeline(
+            {
+                "duration_sec": 4.0,
+                "all_narration_covered": True,
+                "narration": [{"covered": True}],
+                "clips": [
+                    {"event_id": 1, "source_start": 0, "source_end": 2, "output_start": 0, "output_end": 2},
+                    {"event_id": 1, "source_start": 2, "source_end": 4, "output_start": 2, "output_end": 4},
+                ],
+            },
+            10.0,
+            add,
+        )
+
+        reused = next(item for item in checks if item["title"] == "镜头复用")
+        self.assertEqual(reused["level"], "pass")
 
     def test_deep_scan_reports_black_silence_and_low_volume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
