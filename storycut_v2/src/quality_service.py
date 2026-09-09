@@ -44,7 +44,10 @@ def inspect_project_for_export(
         if str(key).strip()
     }
 
-    if not source_video or not source_video.exists():
+    manuscript_project = str(project_payload.get("project_type", "video")) == "manuscript"
+    if manuscript_project:
+        add("pass", "多素材项目", "纯文稿项目将按粗剪时间线逐个读取素材文件。")
+    elif not source_video or not source_video.exists():
         add("error", "原视频不可用", "请重新关联创建项目时使用的原视频。")
     else:
         expected_size = int(media.get("file_size", 0) or 0)
@@ -70,6 +73,8 @@ def inspect_project_for_export(
         try:
             timeline = json.loads(rough_cut_file.read_text(encoding="utf-8"))
             _inspect_timeline(timeline, float(media.get("duration_sec", 0) or 0), add)
+            if manuscript_project:
+                _inspect_timeline_sources(timeline, add)
         except (OSError, ValueError, TypeError) as exc:
             add("error", "粗剪时间线损坏", str(exc))
 
@@ -122,6 +127,36 @@ def inspect_project_for_export(
         )
 
     return _report(checks)
+
+
+def _inspect_timeline_sources(timeline: dict[str, Any], add) -> None:
+    clips = [dict(item) for item in timeline.get("clips", []) if isinstance(item, dict)]
+    missing: list[str] = []
+    video_count = 0
+    image_count = 0
+    unique_paths: set[str] = set()
+    for clip in clips:
+        raw_path = str(clip.get("source_path", "")).strip()
+        if not raw_path or not Path(raw_path).is_file():
+            missing.append(raw_path or "未记录路径")
+            continue
+        unique_paths.add(str(Path(raw_path).resolve()).casefold())
+        if str(clip.get("media_kind", "video")).lower() == "image":
+            image_count += 1
+        else:
+            video_count += 1
+    if missing:
+        add(
+            "error",
+            "时间线素材缺失",
+            f"有 {len(missing)} 个镜头找不到素材文件；首个缺失项：{missing[0]}。",
+        )
+    else:
+        add(
+            "pass",
+            "时间线素材",
+            f"{len(unique_paths)} 个素材文件均可用，共 {video_count} 个视频镜头、{image_count} 个图片镜头。",
+        )
 
 
 def inspect_rendered_video(

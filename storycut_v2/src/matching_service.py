@@ -188,6 +188,11 @@ def build_rough_cut(matches_json: Path, rough_cut_json: Path) -> dict[str, Any]:
                     "id": len(clips) + 1,
                     "narration_id": int(item.get("narration_id", 0)),
                     "event_id": int(source.get("event_id", 0)),
+                    **{
+                        key: source[key]
+                        for key in ("scene_id", "asset_id", "source_path", "media_kind", "keyframe", "width", "height")
+                        if key in source
+                    },
                     "source_start": round(float(source.get("start", 0)), 3),
                     "source_end": round(float(source.get("end", 0)), 3),
                     "output_start": round(output_cursor, 3),
@@ -364,6 +369,11 @@ def _fit_clips(candidates: list[dict[str, Any]], selected_event_id: int, target_
         clips.append(
             {
                 "event_id": int(candidate.get("event_id", 0)),
+                **{
+                    key: candidate[key]
+                    for key in ("scene_id", "asset_id", "source_path", "media_kind", "keyframe", "width", "height")
+                    if key in candidate
+                },
                 "start": round(start, 3),
                 "end": round(start + take, 3),
             }
@@ -480,6 +490,11 @@ def _allocate_match_items(
             clips.append(
                 {
                     "event_id": event_id,
+                    **{
+                        key: candidate[key]
+                        for key in ("scene_id", "asset_id", "source_path", "media_kind", "keyframe", "width", "height")
+                        if key in candidate
+                    },
                     "start": round(start, 3),
                     "end": round(start + take, 3),
                 }

@@ -1,6 +1,6 @@
 {
   "format": 2,
-  "version": "2.1.1",
+  "version": "2.1.2",
   "scope": "repository",
   "files": [
     ".env.example",
@@ -11,7 +11,7 @@
     "MODEL_DOWNLOAD.md",
     "README.md",
     "docs/archive/DEVELOPMENT_HISTORY.md",
-    "docs/phases/3.0-manuscript.md",
+    "docs/phases/manuscript-workflow.md",
     "repository_updater.py",
     "requirements.txt",
     "storycut_v2/config.default.yaml",
@@ -26,6 +26,7 @@
     "storycut_v2/src/fact_review_service.py",
     "storycut_v2/src/layered_analysis_service.py",
     "storycut_v2/src/manuscript_service.py",
+    "storycut_v2/src/manuscript_media_service.py",
     "storycut_v2/src/stock_media_service.py",
     "storycut_v2/src/matching_service.py",
     "storycut_v2/src/media_service.py",
@@ -43,6 +44,7 @@
     "storycut_v2/tests/test_fact_review_service.py",
     "storycut_v2/tests/test_layered_analysis_service.py",
     "storycut_v2/tests/test_manuscript_service.py",
+    "storycut_v2/tests/test_manuscript_media_service.py",
     "storycut_v2/tests/test_matching_service.py",
     "storycut_v2/tests/test_stock_media_service.py",
     "storycut_v2/tests/test_quality_service.py",

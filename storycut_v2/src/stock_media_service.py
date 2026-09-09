@@ -6,6 +6,8 @@ from typing import Any, Callable
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from . import __version__
+
 
 ProgressCallback = Callable[[float, str], None]
 
@@ -116,7 +118,7 @@ def download_selected_stock_media(
         target = destination_dir / f"{candidate_id}{suffix}"
         if not target.exists() or target.stat().st_size == 0:
             temporary = target.with_suffix(target.suffix + ".part")
-            request = Request(url, headers={"User-Agent": "StoryCut/3.0"})
+            request = Request(url, headers={"User-Agent": f"StoryCut/{__version__}"})
             try:
                 with urlopen(request, timeout=90) as response, temporary.open("wb") as output:
                     while True:
@@ -214,7 +216,7 @@ def _search_pixabay(query: str, api_key: str, count: int) -> list[dict[str, Any]
 
 
 def _request_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
-    request = Request(url, headers={"User-Agent": "StoryCut/3.0", **headers})
+    request = Request(url, headers={"User-Agent": f"StoryCut/{__version__}", **headers})
     with urlopen(request, timeout=25) as response:
         value = json.loads(response.read().decode("utf-8"))
     if not isinstance(value, dict):

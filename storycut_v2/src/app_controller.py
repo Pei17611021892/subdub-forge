@@ -42,6 +42,13 @@ from .manuscript_service import (
     split_overlong_manuscript_result,
 )
 from .stock_media_service import download_selected_stock_media, search_stock_media
+from .manuscript_media_service import (
+    analyze_manuscript_assets,
+    generate_manuscript_matches,
+    merge_downloaded_stock_assets,
+    set_manuscript_match_lock,
+    stable_asset_id,
+)
 from .series_service import (
     build_part_events_payload,
     collapse_story_series,
@@ -96,6 +103,7 @@ class AppController(QObject):
     _TIMELINE_ARTIFACT_KEYS = ("matches", "rough_cut")
 
     projectChanged = Signal()
+    projectLoaded = Signal()
     noticeChanged = Signal()
     recentProjectsChanged = Signal()
     mediaChanged = Signal()
@@ -131,6 +139,8 @@ class AppController(QObject):
     _storyFinished = Signal(bool, str, object, int)
     _stockSearchProgressReady = Signal(float, str, int)
     _stockSearchFinished = Signal(bool, str, object, int)
+    _manuscriptMediaProgressReady = Signal(float, str, int)
+    _manuscriptMediaFinished = Signal(bool, str, object, int)
     _factReviewFinished = Signal(bool, str, object, int)
     _exportProgressReady = Signal(float, str, int)
     _exportFinished = Signal(bool, str, object, int)
@@ -166,6 +176,11 @@ class AppController(QObject):
         self._preview_url = ""
         self._preview_busy = False
         self._preview_position = 0.0
+        self._preview_source_path = ""
+        self._preview_source_start = 0.0
+        self._preview_duration_sec = 0.0
+        self._preview_source_name = ""
+        self._preview_static = False
         self._current_project_file: Path | None = None
         self._analysis_job_id = 0
         self._analysis_content_mode = str(
@@ -222,6 +237,8 @@ class AppController(QObject):
         self._terminology_review: dict[str, object] = {}
         self._terminology_review_issues: list[dict[str, object]] = []
         self._matching_busy = False
+        self._matching_job_id = 0
+        self._matching_progress = 0.0
         self._matching_status = "等待匹配镜头"
         self._matches: list[dict[str, object]] = []
         self._manuscript_assets: list[dict[str, object]] = []
@@ -285,9 +302,9 @@ class AppController(QObject):
         self._subtitle_cleaned_video_path = ""
         self._subtitle_cleaned_preview_url = ""
         try:
-            self._app_version = str(read_version().get("version", "2.1.1"))
+            self._app_version = str(read_version().get("version", "2.1.2"))
         except Exception:
-            self._app_version = "2.1.1"
+            self._app_version = "2.1.2"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -309,6 +326,8 @@ class AppController(QObject):
         self._storyFinished.connect(self._apply_story_finished)
         self._stockSearchProgressReady.connect(self._apply_stock_search_progress)
         self._stockSearchFinished.connect(self._apply_stock_search_finished)
+        self._manuscriptMediaProgressReady.connect(self._apply_manuscript_media_progress)
+        self._manuscriptMediaFinished.connect(self._apply_manuscript_media_finished)
         self._factReviewFinished.connect(self._apply_fact_review_finished)
         self._exportProgressReady.connect(self._apply_export_progress)
         self._exportFinished.connect(self._apply_export_finished)
@@ -427,6 +446,18 @@ class AppController(QObject):
     @Property(str, notify=previewChanged)
     def previewPositionText(self) -> str:
         return self._format_time(self._preview_position)
+
+    @Property(float, notify=previewChanged)
+    def previewDurationSeconds(self) -> float:
+        return self._preview_duration_sec if self._preview_source_path else self.durationSeconds
+
+    @Property(str, notify=previewChanged)
+    def previewDurationText(self) -> str:
+        return self._format_time(self.previewDurationSeconds)
+
+    @Property(str, notify=previewChanged)
+    def previewSourceName(self) -> str:
+        return self._preview_source_name or self._project_name
 
     @Property(bool, notify=analysisChanged)
     def analysisBusy(self) -> bool:
@@ -740,8 +771,16 @@ class AppController(QObject):
             applied_count = sum(
                 bool(item.get("applied", False)) for item in self.contentReviewIssues
             )
+            unapplied_count = sum(
+                not bool(item.get("applied", False)) for item in self.contentReviewIssues
+            )
             if applied_count:
-                return f"已应用 {applied_count} 条建议；文案已更新，建议重新审查"
+                remaining = (
+                    f"，仍保留 {unapplied_count} 条未应用建议"
+                    if unapplied_count
+                    else ""
+                )
+                return f"已应用 {applied_count} 条建议{remaining}；文案已更新，建议重新审查"
             return "英文解说已修改，旧文案审查结果需要重新检查"
         all_issues = self.contentReviewIssues
         applied_count = sum(bool(item.get("applied", False)) for item in all_issues)
@@ -820,6 +859,12 @@ class AppController(QObject):
             == 1
         )
 
+    @Property(bool, notify=terminologyReviewChanged)
+    def contentReviewHasAppliedSuggestions(self) -> bool:
+        return any(
+            bool(item.get("applied", False)) for item in self.contentReviewIssues
+        )
+
     @Property("QVariantList", notify=terminologyReviewChanged)
     def contentReviewCanonicalTerms(self) -> list[dict[str, object]]:
         return self.terminologyCanonicalTerms
@@ -838,6 +883,10 @@ class AppController(QObject):
     @Property(str, notify=matchingChanged)
     def matchingStatus(self) -> str:
         return self._matching_status
+
+    @Property(float, notify=matchingChanged)
+    def matchingProgress(self) -> float:
+        return self._matching_progress
 
     @Property(int, notify=matchingChanged)
     def manuscriptAssetCount(self) -> int:
@@ -966,6 +1015,8 @@ class AppController(QObject):
     @Property(int, notify=exportChanged)
     def subtitleCanvasWidth(self) -> int:
         if self._export_fit_mode == "original":
+            if self._project_type == "manuscript":
+                return self._primary_timeline_dimensions()[0]
             return max(1, int(self._media.get("width", 1920) or 1920))
         if self._export_fit_mode == "crop_stretch":
             return self._canvas_dimensions()[0]
@@ -974,6 +1025,8 @@ class AppController(QObject):
     @Property(int, notify=exportChanged)
     def subtitleCanvasHeight(self) -> int:
         if self._export_fit_mode == "original":
+            if self._project_type == "manuscript":
+                return self._primary_timeline_dimensions()[1]
             return max(1, int(self._media.get("height", 1080) or 1080))
         if self._export_fit_mode == "crop_stretch":
             return self._canvas_dimensions()[1]
@@ -1262,7 +1315,39 @@ class AppController(QObject):
     def _subtitle_style_preview_video_path(self) -> Path | None:
         if self.subtitleCleanedVideoReady:
             return Path(self._subtitle_cleaned_video_path)
+        if self._project_type == "manuscript":
+            visual = self._primary_timeline_visual()
+            return visual[0] if visual else None
         return Path(self._video_path) if self._video_path else None
+
+    def _primary_timeline_visual(self) -> tuple[Path, int, int, float] | None:
+        if not self._current_project_file:
+            return None
+        rough_cut = self._current_project_file.parent / "timeline" / "rough_cut.json"
+        try:
+            payload = json.loads(rough_cut.read_text(encoding="utf-8"))
+            for clip in payload.get("clips", []):
+                if not isinstance(clip, dict):
+                    continue
+                path = Path(str(clip.get("source_path", "")))
+                if not path.is_file():
+                    continue
+                start = float(clip.get("source_start", 0) or 0)
+                end = float(clip.get("source_end", start) or start)
+                timestamp = 0.0 if str(clip.get("media_kind", "video")) == "image" else (start + end) / 2
+                return (
+                    path,
+                    max(1, int(clip.get("width", 0) or 1920)),
+                    max(1, int(clip.get("height", 0) or 1080)),
+                    timestamp,
+                )
+        except (OSError, ValueError, TypeError):
+            pass
+        return None
+
+    def _primary_timeline_dimensions(self) -> tuple[int, int]:
+        visual = self._primary_timeline_visual()
+        return (visual[1], visual[2]) if visual else (1920, 1080)
 
     def _available_video_source(self, allow_cleaned_video: bool = True) -> Path | None:
         original = Path(self._video_path) if self._video_path else None
@@ -1678,7 +1763,7 @@ class AppController(QObject):
         self._clear_current_project()
         self._project_type = "manuscript"
         self._source_manuscript_text = manuscript
-        self._project_name = self._next_project_name("v3")
+        self._project_name = self._next_project_name("manuscript")
         project_dir = self._projects_dir / self._project_name
         for child in (
             "source",
@@ -2052,6 +2137,7 @@ class AppController(QObject):
                 and Path(self._video_path).exists()
             ):
                 self._start_media_analysis(Path(self._video_path), project_file)
+            self.projectLoaded.emit()
         except Exception as exc:
             self._notice = f"无法打开项目：{exc}"
             self.noticeChanged.emit()
@@ -2146,30 +2232,142 @@ class AppController(QObject):
 
     @Slot(float)
     def requestPreviewFrame(self, seconds: float) -> None:
-        if not self._video_path or not self._current_project_file:
+        if not self._current_project_file:
             return
-        if not self._ensure_source_video(allow_cleaned_video=True):
-            return
-        duration = self.durationSeconds
+        if self._preview_source_path:
+            video = Path(self._preview_source_path)
+            if not video.is_file():
+                return
+            duration = self._preview_duration_sec
+        else:
+            if not self._video_path or not self._ensure_source_video(allow_cleaned_video=True):
+                return
+            video = self._available_video_source()
+            duration = self.durationSeconds
         timestamp = min(max(float(seconds), 0.0), duration if duration > 0 else float(seconds))
         self._preview_job_id += 1
         job_id = self._preview_job_id
-        self._preview_busy = True
         self._preview_position = timestamp
-        self.previewChanged.emit()
-        video = self._available_video_source()
-        if video is None:
+        if self._preview_static:
+            self._preview_busy = False
+            self._preview_url = video.as_uri()
+            self.previewChanged.emit()
             return
+        self._preview_busy = True
+        self.previewChanged.emit()
+        if video is None:
+            self._preview_busy = False
+            self.previewChanged.emit()
+            return
+        source_timestamp = self._preview_source_start + timestamp if self._preview_source_path else timestamp
         output = self._current_project_file.parent / "cache" / f"preview_{job_id % 2}.jpg"
 
         def worker() -> None:
             try:
-                backend = extract_preview_frame(video, output, timestamp, self._config, self._root)
+                backend = extract_preview_frame(video, output, source_timestamp, self._config, self._root)
                 self._previewReady.emit(output.as_uri() + f"?v={job_id}", backend, job_id, timestamp)
             except Exception as exc:
                 self._previewReady.emit("", str(exc), job_id, timestamp)
 
         threading.Thread(target=worker, name="storycut-preview-frame", daemon=True).start()
+
+    @Slot(int, int, result=bool)
+    def requestCandidatePreview(self, narration_id: int, event_id: int) -> bool:
+        match_item = next(
+            (
+                item
+                for item in self._matches
+                if int(item.get("narration_id", 0) or 0) == narration_id
+            ),
+            None,
+        )
+        if not match_item:
+            return False
+        candidate = next(
+            (
+                dict(value)
+                for value in match_item.get("candidates", [])
+                if isinstance(value, dict) and int(value.get("event_id", 0) or 0) == event_id
+            ),
+            None,
+        )
+        if not candidate:
+            return False
+        path = Path(str(candidate.get("source_path", "")))
+        if not path.is_file():
+            self._notice = f"候选素材不可用：{path.name or '未记录路径'}"
+            self.noticeChanged.emit()
+            return False
+        self._preview_job_id += 1
+        self._preview_source_path = str(path)
+        self._preview_source_start = float(candidate.get("start", 0) or 0)
+        candidate_duration = float(candidate.get("end", 0) or 0) - self._preview_source_start
+        self._preview_static = str(candidate.get("media_kind", "video")) == "image"
+        if self._preview_static:
+            candidate_duration = float(match_item.get("narration_duration", 0) or candidate_duration)
+        self._preview_duration_sec = max(0.1, candidate_duration)
+        self._preview_source_name = path.name
+        self._preview_position = 0.0
+        self._preview_url = path.as_uri() if self._preview_static else str(candidate.get("keyframeUrl", ""))
+        self.previewChanged.emit()
+        return True
+
+    @Slot(int, int, result=bool)
+    def openCandidateSource(self, narration_id: int, event_id: int) -> bool:
+        candidate = next(
+            (
+                value
+                for item in self._matches
+                if int(item.get("narration_id", 0) or 0) == narration_id
+                for value in item.get("candidates", [])
+                if isinstance(value, dict) and int(value.get("event_id", 0) or 0) == event_id
+            ),
+            None,
+        )
+        if not candidate:
+            return False
+        path = Path(str(candidate.get("source_path", "")))
+        if not path.is_file():
+            self._notice = f"候选素材不可用：{path.name or '未记录路径'}"
+            self.noticeChanged.emit()
+            return False
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+        if not opened:
+            self._notice = f"无法调用系统播放器打开：{path.name}"
+            self.noticeChanged.emit()
+        return opened
+
+    @Slot()
+    def clearCandidatePreview(self) -> None:
+        if not self._preview_source_path:
+            return
+        self._preview_job_id += 1
+        self._preview_source_path = ""
+        self._preview_source_start = 0.0
+        self._preview_duration_sec = 0.0
+        self._preview_source_name = ""
+        self._preview_static = False
+        self._preview_position = 0.0
+        self._preview_url = ""
+        self._preview_busy = False
+        self.previewChanged.emit()
+
+    @Slot(result=bool)
+    def openCurrentVideoSource(self) -> bool:
+        if self._project_type != "video" or not self._current_project_file:
+            return False
+        if not self._ensure_source_video(allow_cleaned_video=True):
+            return False
+        source = self._available_video_source(allow_cleaned_video=True)
+        if source is None or not source.is_file():
+            self._notice = "当前没有可播放的视频文件"
+            self.noticeChanged.emit()
+            return False
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(source.resolve())))
+        if not opened:
+            self._notice = f"无法调用系统播放器打开：{source.name}"
+            self.noticeChanged.emit()
+        return opened
 
     @Slot()
     def startUnderstanding(self) -> None:
@@ -3350,7 +3548,20 @@ class AppController(QObject):
             try:
                 events_file = self._current_project_file.parent / "analysis" / "events.json"
                 matches_file = self._current_project_file.parent / "timeline" / "matches.json"
-                if events_file.exists():
+                if self._project_type == "manuscript":
+                    generate_manuscript_matches(
+                        self._current_project_file.parent / "storyboard" / "storyboard.json",
+                        self._current_project_file.parent / "assets" / "analysis.json",
+                        matches_file,
+                    )
+                    build_rough_cut(
+                        matches_file,
+                        self._current_project_file.parent / "timeline" / "rough_cut.json",
+                    )
+                    self._load_matches(self._current_project_file)
+                    self._matching_status = "文案已重新断句，素材已按新分镜重新匹配"
+                    self.matchingChanged.emit()
+                elif events_file.exists():
                     generate_shot_matches(story_file, events_file, matches_file)
                     build_rough_cut(
                         matches_file,
@@ -3709,6 +3920,9 @@ class AppController(QObject):
     def generateMatches(self) -> None:
         if self._matching_busy or not self._current_project_file:
             return
+        if self._project_type == "manuscript":
+            self._generate_manuscript_matches()
+            return
         project_file = self._current_project_file
         story_file = project_file.parent / "script" / "story.json"
         events_file = project_file.parent / "analysis" / "events.json"
@@ -3799,18 +4013,20 @@ class AppController(QObject):
             if key in existing:
                 continue
             existing[key] = {
-                "id": f"asset-{len(existing) + 1:04d}",
+                "id": stable_asset_id(source),
                 "name": source.name,
                 "source_path": str(source),
                 "kind": "video" if suffix in supported_video else "image",
                 "size_bytes": source.stat().st_size,
+                "file_status": "available",
+                "source": "local",
                 "analysis_status": "pending",
             }
             added += 1
         self._manuscript_assets = list(existing.values())
         try:
             manifest = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "asset_count": len(self._manuscript_assets),
                 "assets": self._manuscript_assets,
             }
@@ -3822,10 +4038,16 @@ class AppController(QObject):
             payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
             payload["stage"] = "assets_ready"
             payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            payload.setdefault("artifacts", {})["asset_manifest"] = "assets/manifest.json"
+            self._update_payload_artifacts(
+                payload,
+                invalidate=(*self._TIMELINE_ARTIFACT_KEYS, *self._RENDER_ARTIFACT_KEYS),
+                bind={"asset_manifest": "assets/manifest.json"},
+            )
             self._current_project_file.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            self._matches = []
+            self._invalidate_render_outputs("素材清单已更新，请重新分析并匹配", persist=False)
             self._matching_status = (
                 f"已选择 {len(self._manuscript_assets)} 个本地素材"
                 + (f"，本次新增 {added} 个" if added else "；没有新增文件")
@@ -3956,6 +4178,66 @@ class AppController(QObject):
 
         threading.Thread(target=worker, name="storycut-stock-download", daemon=True).start()
 
+    def _generate_manuscript_matches(self) -> None:
+        if not self._current_project_file or not self._manuscript_assets:
+            self._notice = "请先导入或下载至少一个素材文件"
+            self.noticeChanged.emit()
+            return
+        self._matching_job_id += 1
+        job_id = self._matching_job_id
+        self._matching_busy = True
+        self._matching_progress = 0.0
+        self._matching_status = "正在整理素材清单…"
+        self.matchingChanged.emit()
+        project_file = self._current_project_file
+
+        def report(value: float, status: str) -> None:
+            self._manuscriptMediaProgressReady.emit(value * 0.82, status, job_id)
+
+        def worker() -> None:
+            try:
+                project_dir = project_file.parent
+                analysis = analyze_manuscript_assets(
+                    project_dir / "assets" / "manifest.json",
+                    project_dir / "assets" / "analysis.json",
+                    project_dir / "assets" / "thumbnails",
+                    self._config,
+                    self._root,
+                    report,
+                )
+                self._manuscriptMediaProgressReady.emit(0.88, "正在进行全局素材匹配…", job_id)
+                matches_file = project_dir / "timeline" / "matches.json"
+                matches = generate_manuscript_matches(
+                    project_dir / "storyboard" / "storyboard.json",
+                    project_dir / "assets" / "analysis.json",
+                    matches_file,
+                )
+                build_rough_cut(matches_file, project_dir / "timeline" / "rough_cut.json")
+                payload = json.loads(project_file.read_text(encoding="utf-8"))
+                payload["stage"] = "matched"
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._update_payload_artifacts(
+                    payload,
+                    invalidate=self._RENDER_ARTIFACT_KEYS,
+                    bind={
+                        "asset_manifest": "assets/manifest.json",
+                        "asset_analysis": "assets/analysis.json",
+                        "matches": "timeline/matches.json",
+                        "rough_cut": "timeline/rough_cut.json",
+                    },
+                )
+                project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                summary = matches.get("confidence_summary", {})
+                message = (
+                    f"素材分析与全局匹配完成：{analysis.get('scene_count', 0)} 个候选镜头；"
+                    f"高 {summary.get('green', 0)} / 中 {summary.get('yellow', 0)} / 低 {summary.get('red', 0)}"
+                )
+                self._manuscriptMediaFinished.emit(True, message, matches, job_id)
+            except Exception as exc:
+                self._manuscriptMediaFinished.emit(False, str(exc), {}, job_id)
+
+        threading.Thread(target=worker, name="storycut-manuscript-media", daemon=True).start()
+
     @Slot(str)
     def openWebUrl(self, url: str) -> None:
         cleaned = url.strip()
@@ -3971,12 +4253,28 @@ class AppController(QObject):
             return
         try:
             select_shot_match(matches_file, narration_id, event_id)
+            if self._project_type == "manuscript":
+                set_manuscript_match_lock(matches_file, narration_id, True)
             build_rough_cut(matches_file, self._current_project_file.parent / "timeline" / "rough_cut.json")
-            self._matching_status = f"第 {narration_id} 句已改用场景 {event_id}"
             self._load_matches(self._current_project_file)
+            self._matching_status = f"第 {narration_id} 段已改用候选 {event_id} 并锁定"
             self._invalidate_render_outputs("镜头已替换，请重新生成预览")
         except (OSError, ValueError, TypeError) as exc:
             self._notice = f"无法替换镜头：{exc}"
+            self.noticeChanged.emit()
+
+    @Slot(int, bool)
+    def setMatchLocked(self, narration_id: int, locked: bool) -> None:
+        if self._project_type != "manuscript" or not self._current_project_file:
+            return
+        matches_file = self._current_project_file.parent / "timeline" / "matches.json"
+        try:
+            set_manuscript_match_lock(matches_file, narration_id, locked)
+            self._load_matches(self._current_project_file)
+            self._matching_status = f"第 {narration_id} 段素材已{'锁定' if locked else '解除锁定'}"
+            self.matchingChanged.emit()
+        except (OSError, ValueError, TypeError) as exc:
+            self._notice = f"无法更新素材锁定状态：{exc}"
             self.noticeChanged.emit()
 
     @Slot(int, str, float)
@@ -3998,9 +4296,9 @@ class AppController(QObject):
 
     @Slot()
     def generateRoughPreview(self) -> None:
-        if self._export_busy or self._quality_busy or not self._current_project_file or not self._video_path:
+        if self._export_busy or self._quality_busy or not self._current_project_file:
             return
-        if not self._ensure_source_video(allow_cleaned_video=True):
+        if self._project_type != "manuscript" and not self._ensure_source_video(allow_cleaned_video=True):
             return
         if not self._run_quality_check():
             self.qualityDialogRequested.emit()
@@ -4183,9 +4481,9 @@ class AppController(QObject):
 
     @Slot()
     def generateSubtitleOnlyPreview(self) -> None:
-        if self._export_busy or self._quality_busy or not self._current_project_file or not self._video_path:
+        if self._export_busy or self._quality_busy or not self._current_project_file:
             return
-        if not self._ensure_source_video(allow_cleaned_video=True):
+        if self._project_type != "manuscript" and not self._ensure_source_video(allow_cleaned_video=True):
             return
         project_file = self._current_project_file
         matches_file = project_file.parent / "timeline" / "matches.json"
@@ -4230,7 +4528,7 @@ class AppController(QObject):
             subtitle_srt,
             (
                 "仅字幕测试预览已生成（已保留原片声音，字幕时间为估算值）"
-                if self._preserve_original_audio
+                if self._preserve_original_audio and self._project_type != "manuscript"
                 else "仅字幕测试预览已生成（无声音，字幕时间为估算值）"
             ),
             "storycut_subtitle_test.mp4",
@@ -4419,11 +4717,14 @@ class AppController(QObject):
         self.exportChanged.emit()
         output_filename = f"{self._safe_name(self._project_name)}_{output_filename}"
         output = self._export_dir / output_filename
-        source = (
+        source = None if self._project_type == "manuscript" else (
             Path(self._subtitle_cleaned_video_path)
             if self.subtitleCleanedVideoReady
             else Path(self._video_path)
         )
+        timeline_visual = self._primary_timeline_visual() if self._project_type == "manuscript" else None
+        source_width = timeline_visual[1] if timeline_visual else int(self._media.get("width", 0) or 0)
+        source_height = timeline_visual[2] if timeline_visual else int(self._media.get("height", 0) or 0)
         render_config = self._config_with_project_style()
         # 原字幕只在第 3 步处理一次。最终合成若使用中间视频，不再重复套遮罩；
         # 用户跳过第 3 步时则直接使用原视频，不会意外盖住画面。
@@ -4441,8 +4742,8 @@ class AppController(QObject):
                     output,
                     narration_audio,
                     subtitle_srt,
-                    int(self._media.get("width", 0) or 0),
-                    int(self._media.get("height", 0) or 0),
+                    source_width,
+                    source_height,
                     render_config,
                     self._root,
                     report,
@@ -4656,12 +4957,24 @@ class AppController(QObject):
         self._generate_subtitle_effect_preview(cleanup_only=True)
 
     def _generate_subtitle_effect_preview(self, cleanup_only: bool) -> None:
-        if not self._video_path or not self._current_project_file:
-            self._notice = "请先创建并分析视频项目"
+        if not self._current_project_file:
+            return
+        if cleanup_only and self._project_type == "manuscript":
+            self._notice = "纯文稿项目使用独立素材，不需要生成统一的原字幕清理视频"
             self.noticeChanged.emit()
             return
-        width = int(self._media.get("width", 0) or 0)
-        height = int(self._media.get("height", 0) or 0)
+        timeline_visual = self._primary_timeline_visual() if self._project_type == "manuscript" else None
+        video = timeline_visual[0] if timeline_visual else (
+            Path(self._video_path)
+            if cleanup_only
+            else self._subtitle_style_preview_video_path()
+        )
+        if video is None:
+            self._notice = "找不到字幕预览源素材"
+            self.noticeChanged.emit()
+            return
+        width = timeline_visual[1] if timeline_visual else int(self._media.get("width", 0) or 0)
+        height = timeline_visual[2] if timeline_visual else int(self._media.get("height", 0) or 0)
         if width <= 0 or height <= 0:
             self._notice = "缺少视频尺寸信息，无法生成真实预览"
             self.noticeChanged.emit()
@@ -4671,22 +4984,11 @@ class AppController(QObject):
         job_id = self._subtitle_effect_preview_job_id
         self._subtitle_effect_preview_busy = True
         self.subtitleEffectPreviewChanged.emit()
-        video = (
-            Path(self._video_path)
-            if cleanup_only
-            else self._subtitle_style_preview_video_path()
-        )
-        if video is None:
-            self._subtitle_effect_preview_busy = False
-            self._notice = "找不到字幕预览源视频"
-            self.subtitleEffectPreviewChanged.emit()
-            self.noticeChanged.emit()
-            return
         preview_prefix = "subtitle_cleanup_effect" if cleanup_only else "subtitle_style_effect"
         output = self._current_project_file.parent / "cache" / f"{preview_prefix}_{job_id % 2}.jpg"
         style = dict(self._subtitle_style)
         duration = float(self._media.get("duration_sec", 0) or 0)
-        timestamp = min(max(0.0, self._preview_position), max(0.0, duration - 0.1))
+        timestamp = timeline_visual[3] if timeline_visual else min(max(0.0, self._preview_position), max(0.0, duration - 0.1))
         if timestamp <= 0 and duration > 0:
             timestamp = min(duration * 0.2, max(0.0, duration - 0.1))
 
@@ -5144,6 +5446,7 @@ class AppController(QObject):
         events_file = project_dir / "analysis" / "events.json"
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         temporary_story = story_file.with_name("story.duration_revision.tmp.json")
+        temporary_storyboard = project_dir / "storyboard" / "storyboard.duration_revision.tmp.json"
         matches_file = project_dir / "timeline" / "matches.json"
         rough_cut_file = project_dir / "timeline" / "rough_cut.json"
         temporary_matches = matches_file.with_name("matches.duration_revision.tmp.json")
@@ -5152,7 +5455,36 @@ class AppController(QObject):
             temporary_story.write_text(
                 json.dumps(revised, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            generate_shot_matches(temporary_story, events_file, temporary_matches)
+            if self._project_type == "manuscript":
+                storyboard = json.loads(
+                    (project_dir / "storyboard" / "storyboard.json").read_text(encoding="utf-8")
+                )
+                old_beats = [dict(item) for item in storyboard.get("beats", []) if isinstance(item, dict)]
+                revised_beats = []
+                for index, narration in enumerate(revised.get("narration", [])):
+                    template = dict(old_beats[min(index, len(old_beats) - 1)]) if old_beats else {}
+                    narration_id = int(narration.get("id", index + 1) or index + 1)
+                    template.update(
+                        {
+                            "id": narration_id,
+                            "narration_id": narration_id,
+                            "text_en": str(narration.get("text_en", "")),
+                            "estimated_duration_sec": float(narration.get("estimated_duration_sec", 0) or 0),
+                        }
+                    )
+                    revised_beats.append(template)
+                storyboard["beats"] = revised_beats
+                storyboard["shot_segment_count"] = len(revised_beats)
+                temporary_storyboard.write_text(
+                    json.dumps(storyboard, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                generate_manuscript_matches(
+                    temporary_storyboard,
+                    project_dir / "assets" / "analysis.json",
+                    temporary_matches,
+                )
+            else:
+                generate_shot_matches(temporary_story, events_file, temporary_matches)
             build_rough_cut(temporary_matches, temporary_rough_cut)
 
             archive_dir = project_dir / "archive" / f"duration_revision_{stamp}"
@@ -5175,6 +5507,8 @@ class AppController(QObject):
                     source.unlink()
 
             temporary_story.replace(story_file)
+            if self._project_type == "manuscript" and temporary_storyboard.exists():
+                temporary_storyboard.replace(project_dir / "storyboard" / "storyboard.json")
             temporary_matches.replace(matches_file)
             temporary_rough_cut.replace(rough_cut_file)
             prepare_tts_srt(story_file, project_dir / "script" / "tts")
@@ -5226,6 +5560,8 @@ class AppController(QObject):
             )
             (project_dir / "script" / "content_review.json").unlink(missing_ok=True)
             self._set_story(dict(revised))
+            if self._project_type == "manuscript":
+                self._load_storyboard(project_file)
             self._set_fact_review({})
             self._set_terminology_review({})
             self._load_matches(project_file)
@@ -5252,6 +5588,7 @@ class AppController(QObject):
             self.noticeChanged.emit()
         finally:
             temporary_story.unlink(missing_ok=True)
+            temporary_storyboard.unlink(missing_ok=True)
             temporary_matches.unlink(missing_ok=True)
             temporary_rough_cut.unlink(missing_ok=True)
 
@@ -5840,6 +6177,7 @@ class AppController(QObject):
                         "name": str(payload.get("name") or project_file.parent.name),
                         "video": source_label,
                         "projectType": project_type,
+                        "projectTypeText": "纯文稿" if project_type == "manuscript" else "视频",
                         "stage": stage,
                         "stageText": stage_names.get(stage, stage),
                         "updated": updated,
@@ -6073,6 +6411,11 @@ class AppController(QObject):
         self._preview_url = ""
         self._preview_position = 0.0
         self._preview_busy = False
+        self._preview_source_path = ""
+        self._preview_source_start = 0.0
+        self._preview_duration_sec = 0.0
+        self._preview_source_name = ""
+        self._preview_static = False
         self._analysis_busy = False
         self._analysis_progress = 0.0
         self._analysis_content_mode = str(
@@ -6120,6 +6463,8 @@ class AppController(QObject):
         self._terminology_review_issues = []
         self._matching_status = "等待匹配镜头"
         self._matching_busy = False
+        self._matching_job_id += 1
+        self._matching_progress = 0.0
         self._matches = []
         self._manuscript_assets = []
         self._stock_search_job_id += 1
@@ -6443,8 +6788,82 @@ class AppController(QObject):
             if success and isinstance(result, dict)
             else []
         )
+        if success and isinstance(result, dict) and int(result.get("downloaded_count", 0) or 0) > 0 and self._current_project_file:
+            try:
+                merge_downloaded_stock_assets(
+                    self._current_project_file.parent / "assets" / "manifest.json",
+                    self._current_project_file.parent / "assets" / "online_search.json",
+                )
+                self._load_manuscript_assets(self._current_project_file)
+                payload = json.loads(self._current_project_file.read_text(encoding="utf-8"))
+                payload["stage"] = "assets_ready"
+                payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                self._update_payload_artifacts(
+                    payload,
+                    invalidate=(*self._TIMELINE_ARTIFACT_KEYS, *self._RENDER_ARTIFACT_KEYS),
+                    bind={"asset_manifest": "assets/manifest.json", "online_search": "assets/online_search.json"},
+                )
+                self._current_project_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                self._matches = []
+                self._invalidate_render_outputs("下载素材已更新，请重新分析并匹配", persist=False)
+                self._matching_status = f"{message}；可以开始自动分析与匹配"
+            except (OSError, ValueError, TypeError) as exc:
+                self._matching_status = f"素材已下载，但清单更新失败：{exc}"
         self.matchingChanged.emit()
         self.noticeChanged.emit()
+
+    @Slot(float, str, int)
+    def _apply_manuscript_media_progress(self, value: float, status: str, job_id: int) -> None:
+        if job_id != self._matching_job_id:
+            return
+        self._matching_progress = min(max(value, 0.0), 1.0)
+        self._matching_status = status
+        self.matchingChanged.emit()
+
+    @Slot(bool, str, object, int)
+    def _apply_manuscript_media_finished(
+        self, success: bool, message: str, result: object, job_id: int
+    ) -> None:
+        if job_id != self._matching_job_id:
+            return
+        self._matching_busy = False
+        self._matching_progress = 1.0 if success else self._matching_progress
+        self._matching_status = message if success else f"素材分析或匹配失败：{message}"
+        self._notice = self._matching_status
+        if self._current_project_file:
+            self._load_manuscript_assets(self._current_project_file)
+            if success:
+                self._update_storyboard_from_manuscript_matches(result)
+                self._load_matches(self._current_project_file)
+                self._matching_status = message
+                self._invalidate_render_outputs("素材匹配已更新，请重新生成预览", persist=False)
+                self._refresh_recent_projects()
+        self.matchingChanged.emit()
+        self.noticeChanged.emit()
+
+    def _update_storyboard_from_manuscript_matches(self, result: object) -> None:
+        if not isinstance(result, dict) or not self._current_project_file:
+            return
+        by_id = {
+            int(item.get("narration_id", 0) or 0): item
+            for item in result.get("items", [])
+            if isinstance(item, dict)
+        }
+        for beat in self._storyboard_beats:
+            match = by_id.get(int(beat.get("narration_id", beat.get("id", 0)) or 0))
+            if not match:
+                continue
+            confidence = str(match.get("confidence", "red"))
+            beat["match_status"] = "exact" if confidence == "green" else "fallback" if confidence == "yellow" else "missing"
+            beat["match_confidence"] = round(float(next((c.get("score", 0) for c in match.get("candidates", []) if int(c.get("event_id", 0)) == int(match.get("selected_event_id", 0))), 0)) * 100)
+            beat["selected_asset_id"] = str(next((c.get("asset_id", "") for c in match.get("candidates", []) if int(c.get("event_id", 0)) == int(match.get("selected_event_id", 0))), ""))
+        self._storyboard["beats"] = self._storyboard_beats
+        self._storyboard["matched_count"] = sum(str(item.get("match_status", "")) in {"exact", "fallback"} for item in self._storyboard_beats)
+        self._storyboard["coverage_percent"] = round(100 * int(self._storyboard["matched_count"]) / len(self._storyboard_beats)) if self._storyboard_beats else 0
+        (self._current_project_file.parent / "storyboard" / "storyboard.json").write_text(
+            json.dumps(self._storyboard, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self.storyChanged.emit()
 
     @Slot(bool, str, object, int)
     def _apply_story_finished(self, success: bool, message: str, story: object, job_id: int) -> None:
@@ -6717,12 +7136,13 @@ class AppController(QObject):
                     dict(item)
                     for item in payload.get("assets", [])
                     if isinstance(item, dict)
-                    and Path(str(item.get("source_path", ""))).is_file()
                 ]
             except (OSError, ValueError, TypeError):
                 self._manuscript_assets = []
         if self._project_type == "manuscript" and self._manuscript_assets:
-            self._matching_status = f"已选择 {len(self._manuscript_assets)} 个本地素材；等待场景分析和自动匹配"
+            available = sum(Path(str(item.get("source_path", ""))).is_file() for item in self._manuscript_assets)
+            missing = len(self._manuscript_assets) - available
+            self._matching_status = f"已登记 {available} 个可用素材" + (f"，{missing} 个文件缺失" if missing else "") + "；等待场景分析和自动匹配"
 
     def _load_stock_search(self, project_file: Path) -> None:
         self._stock_search_results = []
@@ -6940,7 +7360,8 @@ class AppController(QObject):
                     candidates = []
                     for raw_candidate in raw_item.get("candidates", []):
                         candidate = dict(raw_candidate)
-                        keyframe = project_file.parent / "analysis" / str(candidate.get("keyframe", ""))
+                        keyframe_root = project_file.parent if self._project_type == "manuscript" else project_file.parent / "analysis"
+                        keyframe = keyframe_root / str(candidate.get("keyframe", ""))
                         candidate["keyframeUrl"] = keyframe.as_uri() if keyframe.exists() else ""
                         candidate["timeRange"] = (
                             f"{self._format_time(float(candidate.get('start', 0)))} – "
@@ -6953,6 +7374,12 @@ class AppController(QObject):
             except (OSError, ValueError, TypeError):
                 loaded = []
         self._matches = loaded
+        if self._project_type == "manuscript" and loaded:
+            high = sum(str(item.get("confidence", "")) == "green" for item in loaded)
+            medium = sum(str(item.get("confidence", "")) == "yellow" for item in loaded)
+            low = len(loaded) - high - medium
+            self._matching_progress = 1.0
+            self._matching_status = f"已恢复素材匹配：高 {high} / 中 {medium} / 低 {low}"
         self.matchingChanged.emit()
 
     def _load_export(self, project_file: Path) -> None:

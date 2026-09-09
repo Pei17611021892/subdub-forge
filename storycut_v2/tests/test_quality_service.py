@@ -57,6 +57,27 @@ class QualityServiceTests(unittest.TestCase):
             self.assertTrue(report["passed"])
             self.assertEqual(report["error_count"], 0)
 
+    def test_manuscript_project_checks_timeline_assets_instead_of_source_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project, _source, audio, srt = self._project(root)
+            asset = root / "asset.mp4"
+            asset.write_bytes(b"asset")
+            project.write_text(json.dumps({"project_type": "manuscript"}), encoding="utf-8")
+            rough_cut = root / "timeline" / "rough_cut.json"
+            timeline = json.loads(rough_cut.read_text(encoding="utf-8"))
+            timeline["clips"][0].update({"source_path": str(asset), "media_kind": "video"})
+            rough_cut.write_text(json.dumps(timeline), encoding="utf-8")
+
+            report = inspect_project_for_export(
+                project, None, audio, 12.0, srt, {}
+            )
+
+            self.assertTrue(report["passed"])
+            titles = {item["title"] for item in report["checks"]}
+            self.assertIn("多素材项目", titles)
+            self.assertIn("时间线素材", titles)
+
     def test_invalidated_timeline_files_are_not_accepted_as_current(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

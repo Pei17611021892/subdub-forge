@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "version": "2.1.1",
+  "version": "2.1.2",
   "files": [
     "config.default.yaml",
     "main.py",
@@ -14,6 +14,7 @@
     "src/fact_review_service.py",
     "src/layered_analysis_service.py",
     "src/manuscript_service.py",
+    "src/manuscript_media_service.py",
     "src/stock_media_service.py",
     "src/matching_service.py",
     "src/media_service.py",
@@ -31,6 +32,7 @@
     "tests/test_fact_review_service.py",
     "tests/test_layered_analysis_service.py",
     "tests/test_manuscript_service.py",
+    "tests/test_manuscript_media_service.py",
     "tests/test_matching_service.py",
     "tests/test_stock_media_service.py",
     "tests/test_quality_service.py",

@@ -13,7 +13,7 @@ ProgressCallback = Callable[[float, str], None]
 
 
 def render_rough_preview(
-    source_video: Path,
+    source_video: Path | None,
     rough_cut_json: Path,
     output_video: Path,
     narration_audio: Path | None,
@@ -30,21 +30,35 @@ def render_rough_preview(
     if not clips or total_duration <= 0:
         raise ValueError("粗剪时间线中没有可导出的镜头")
 
+    uses_timeline_sources = any(str(item.get("source_path", "")).strip() for item in clips)
+    if uses_timeline_sources:
+        missing = [
+            str(item.get("source_path", "")).strip() or "（未记录路径）"
+            for item in clips
+            if not str(item.get("source_path", "")).strip()
+            or not Path(str(item.get("source_path", ""))).is_file()
+        ]
+        if missing:
+            raise ValueError(f"粗剪时间线有 {len(missing)} 个素材文件不可用：{missing[0]}")
+    elif not source_video or not source_video.is_file():
+        raise ValueError("原视频不可用，无法生成粗剪预览")
+
     shared = config.get("shared", {})
     ffmpeg = _resolve_tool(str(shared.get("ffmpeg_bin", "ffmpeg")), app_root, "ffmpeg")
     if not ffmpeg:
         raise RuntimeError("未找到 FFmpeg，无法生成粗剪预览")
 
     has_narration = bool(narration_audio and narration_audio.exists())
+    narration_input_index = len(clips) if uses_timeline_sources else 1
     export_config = config.get("export", {})
-    preserve_original_audio = bool(export_config.get("preserve_original_audio", False))
+    preserve_original_audio = bool(export_config.get("preserve_original_audio", False)) and not uses_timeline_sources
     original_audio_mix_volume = min(
         1.0, max(0.0, float(export_config.get("original_audio_mix_volume", 0.22) or 0.22))
     )
     configured_width = int(export_config.get("width", 1080) or 1080)
     configured_height = int(export_config.get("height", 1920) or 1920)
     fps = int(export_config.get("fps", 30) or 30)
-    cleanup_original_subtitles = bool(export_config.get("cleanup_original_subtitles", True))
+    cleanup_original_subtitles = bool(export_config.get("cleanup_original_subtitles", True)) and not uses_timeline_sources
     source_crop_ratio = min(1.0, max(0.6, float(export_config.get("source_crop_height_ratio", 0.82) or 0.82)))
     fit_mode = str(export_config.get("fit_mode", "original")).lower()
     crop_fill_percent = _normalize_crop_fill_percent(
@@ -54,6 +68,8 @@ def render_rough_preview(
     height = int(source_height or configured_height) if fit_mode == "original" else configured_height
     cleanup_mode = str(export_config.get("original_subtitle_cleanup_mode", "none")).lower()
     if cleanup_mode not in {"none", "mask", "blur", "delogo"}:
+        cleanup_mode = "none"
+    if uses_timeline_sources:
         cleanup_mode = "none"
     if cleanup_mode == "delogo" and not _ffmpeg_supports_filter(ffmpeg, "delogo"):
         cleanup_mode = "blur"
@@ -70,18 +86,30 @@ def render_rough_preview(
     filters: list[str] = []
     concat_inputs: list[str] = []
     original_audio_inputs: list[str] = []
-    source_aspect = max(0.01, float(source_width or width) / max(1.0, float(source_height or height)))
     canvas_scale_x = min(3.0, max(0.25, float(export_config.get("canvas_scale_x", 1.0) or 1.0)))
     canvas_scale_y = min(3.0, max(0.25, float(export_config.get("canvas_scale_y", 1.0) or 1.0)))
-    canvas_video_width = max(2, round(width * canvas_scale_x))
-    canvas_video_height = max(2, round((width / source_aspect) * canvas_scale_y))
-    canvas_video_width -= canvas_video_width % 2
-    canvas_video_height -= canvas_video_height % 2
     for index, clip in enumerate(clips):
         start = float(clip.get("source_start", 0))
         end = float(clip.get("source_end", 0))
         if end - start < 0.05:
             continue
+        input_index = index if uses_timeline_sources else 0
+        video_input = f"[{input_index}:v]"
+        audio_input = f"[{input_index}:a]"
+        media_kind = str(clip.get("media_kind", "video")).lower()
+        clip_duration = end - start
+        trim_filter = (
+            f"trim=duration={clip_duration:.3f}"
+            if media_kind == "image"
+            else f"trim=start={start:.3f}:end={end:.3f}"
+        )
+        clip_width = int(clip.get("width", 0) or source_width or width)
+        clip_height = int(clip.get("height", 0) or source_height or height)
+        source_aspect = max(0.01, float(clip_width) / max(1.0, float(clip_height)))
+        canvas_video_width = max(2, round(width * canvas_scale_x))
+        canvas_video_height = max(2, round((width / source_aspect) * canvas_scale_y))
+        canvas_video_width -= canvas_video_width % 2
+        canvas_video_height -= canvas_video_height % 2
         source_cleanup = f"crop=iw:ih*{source_crop_ratio:.3f}:0:0," if cleanup_original_subtitles else ""
         if fit_mode == "crop_stretch":
             fit_filter = (
@@ -91,14 +119,14 @@ def render_rough_preview(
                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
             )
             filters.append(
-                f"[0:v]trim=start={start:.3f}:end={end:.3f},"
+                f"{video_input}{trim_filter},"
                 f"setpts=PTS-STARTPTS,fps={fps},{source_cleanup}{fit_filter},"
                 f"setsar=1,format=yuv420p[v{index}]"
             )
             concat_inputs.append(f"[v{index}]")
             if preserve_original_audio:
                 filters.append(
-                    f"[0:a]atrim=start={start:.3f}:end={end:.3f},"
+                    f"{audio_input}atrim=start={start:.3f}:end={end:.3f},"
                     f"asetpts=PTS-STARTPTS,aresample=48000[aorig{index}]"
                 )
                 original_audio_inputs.append(f"[aorig{index}]")
@@ -111,7 +139,7 @@ def render_rough_preview(
             foreground_height = _crop_region_height(height, crop_fill_percent)
             filters.extend(
                 [
-                    f"[0:v]trim=start={start:.3f}:end={end:.3f},"
+                    f"{video_input}{trim_filter},"
                     f"setpts=PTS-STARTPTS,fps={fps},{source_cleanup}split=2[vbg{index}][vfg{index}]",
                     f"[vbg{index}]scale={width}:{height}:force_original_aspect_ratio=increase,"
                     f"crop={width}:{height},gblur=sigma={blur_radius}[vbgfit{index}]",
@@ -124,7 +152,7 @@ def render_rough_preview(
             concat_inputs.append(f"[v{index}]")
             if preserve_original_audio:
                 filters.append(
-                    f"[0:a]atrim=start={start:.3f}:end={end:.3f},"
+                    f"{audio_input}atrim=start={start:.3f}:end={end:.3f},"
                     f"asetpts=PTS-STARTPTS,aresample=48000[aorig{index}]"
                 )
                 original_audio_inputs.append(f"[aorig{index}]")
@@ -136,7 +164,7 @@ def render_rough_preview(
             )
             filters.extend(
                 [
-                    f"[0:v]trim=start={start:.3f}:end={end:.3f},"
+                    f"{video_input}{trim_filter},"
                     f"setpts=PTS-STARTPTS,fps={fps},{source_cleanup}split=2[vbg{index}][vfg{index}]",
                     f"[vbg{index}]scale={width}:{height}:force_original_aspect_ratio=increase,"
                     f"crop={width}:{height},gblur=sigma={blur_radius}[vbgfit{index}]",
@@ -148,7 +176,7 @@ def render_rough_preview(
             concat_inputs.append(f"[v{index}]")
             if preserve_original_audio:
                 filters.append(
-                    f"[0:a]atrim=start={start:.3f}:end={end:.3f},"
+                    f"{audio_input}atrim=start={start:.3f}:end={end:.3f},"
                     f"asetpts=PTS-STARTPTS,aresample=48000[aorig{index}]"
                 )
                 original_audio_inputs.append(f"[aorig{index}]")
@@ -158,7 +186,7 @@ def render_rough_preview(
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
                 f"crop={width}:{height}"
             )
-        elif fit_mode == "contain":
+        elif fit_mode == "contain" or uses_timeline_sources:
             fit_filter = (
                 f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
@@ -166,7 +194,7 @@ def render_rough_preview(
         else:
             fit_filter = ""
         filters.append(
-            f"[0:v]trim=start={start:.3f}:end={end:.3f},"
+            f"{video_input}{trim_filter},"
             f"setpts=PTS-STARTPTS,fps={fps},"
             f"{source_cleanup}"
             f"{fit_filter + ',' if fit_filter else ''}setsar=1,format=yuv420p[v{index}]"
@@ -174,7 +202,7 @@ def render_rough_preview(
         concat_inputs.append(f"[v{index}]")
         if preserve_original_audio:
             filters.append(
-                f"[0:a]atrim=start={start:.3f}:end={end:.3f},"
+                f"{audio_input}atrim=start={start:.3f}:end={end:.3f},"
                 f"asetpts=PTS-STARTPTS,aresample=48000[aorig{index}]"
             )
             original_audio_inputs.append(f"[aorig{index}]")
@@ -257,7 +285,7 @@ def render_rough_preview(
         filters.append(f"[vbase]subtitles='{_escape_subtitle_path(ass_path)}'[vout]")
     if has_narration:
         filters.append(
-            f"[1:a]atrim=start=0:end={total_duration:.3f},"
+            f"[{narration_input_index}:a]atrim=start=0:end={total_duration:.3f},"
             "asetpts=PTS-STARTPTS,aresample=48000[anarration]"
         )
     if has_narration and preserve_original_audio:
@@ -285,9 +313,20 @@ def render_rough_preview(
         "-hide_banner",
         "-loglevel",
         "error",
-        "-i",
-        str(source_video),
     ]
+    if uses_timeline_sources:
+        for clip in clips:
+            path = str(clip.get("source_path", ""))
+            if str(clip.get("media_kind", "video")).lower() == "image":
+                duration = max(
+                    0.05,
+                    float(clip.get("source_end", 0)) - float(clip.get("source_start", 0)),
+                )
+                command.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{duration:.3f}", "-i", path])
+            else:
+                command.extend(["-i", path])
+    else:
+        command.extend(["-i", str(source_video)])
     if has_narration:
         command.extend(["-i", str(narration_audio)])
     command.extend(

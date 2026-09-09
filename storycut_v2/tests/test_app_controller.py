@@ -44,7 +44,7 @@ class AppControllerProjectNameTests(unittest.TestCase):
                 "v2-0817-2",
             )
 
-    def test_manuscript_project_uses_v3_name_and_persists_source_text(self) -> None:
+    def test_manuscript_project_uses_neutral_name_and_persists_source_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
             controller = self._controller(root)
@@ -54,7 +54,7 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertTrue(controller.hasProject)
             self.assertTrue(controller.manuscriptProject)
             self.assertEqual(controller.projectType, "manuscript")
-            self.assertTrue(controller.projectName.startswith("v3-"))
+            self.assertTrue(controller.projectName.startswith("manuscript-"))
             self.assertEqual(
                 controller.sourceManuscriptText,
                 "大象之间是否拥有语言？\n它们会使用低频声音。",
@@ -75,6 +75,114 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertTrue(reopened.manuscriptProject)
             self.assertEqual(reopened.sourceManuscriptText, "新的完整文稿。")
             self.assertIn("纯文稿", reopened.recentProjects[0]["video"])
+            self.assertEqual(reopened.recentProjects[0]["projectType"], "manuscript")
+            self.assertEqual(reopened.recentProjects[0]["projectTypeText"], "纯文稿")
+
+    def test_manuscript_candidate_image_can_be_previewed_and_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            controller = self._controller(root)
+            controller.createManuscriptProject("一段需要配图的旁白。")
+            image = root / "projects" / "candidate.jpg"
+            image.write_bytes(b"image")
+            controller._matches = [
+                {
+                    "narration_id": 3,
+                    "narration_duration": 4.5,
+                    "candidates": [
+                        {
+                            "event_id": 12,
+                            "source_path": str(image),
+                            "media_kind": "image",
+                            "start": 0,
+                            "end": 180,
+                        }
+                    ],
+                }
+            ]
+
+            self.assertTrue(controller.requestCandidatePreview(3, 12))
+
+            self.assertEqual(controller.previewSourceName, "candidate.jpg")
+            self.assertEqual(controller.previewDurationSeconds, 4.5)
+            self.assertEqual(controller.previewPosition, 0.0)
+            self.assertEqual(controller.previewUrl, image.as_uri())
+            self.assertFalse(controller.previewBusy)
+
+            with patch("src.app_controller.QDesktopServices.openUrl", return_value=True) as open_url:
+                self.assertTrue(controller.openCandidateSource(3, 12))
+            opened_path = Path(open_url.call_args.args[0].toLocalFile())
+            self.assertEqual(opened_path, image.resolve())
+
+            controller.clearCandidatePreview()
+
+            self.assertEqual(controller.previewSourceName, controller.projectName)
+            self.assertEqual(controller.previewDurationSeconds, controller.durationSeconds)
+            self.assertEqual(controller._preview_source_path, "")
+
+    def test_video_cover_opens_current_source_in_system_player(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            source = root / "source.mp4"
+            source.write_bytes(b"video")
+            project_file = root / "projects" / "demo" / "project.json"
+            project_file.parent.mkdir(parents=True)
+            project_file.write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+            controller = self._controller(root)
+            controller._current_project_file = project_file
+            controller._project_type = "video"
+            controller._video_path = str(source)
+
+            with patch("src.app_controller.QDesktopServices.openUrl", return_value=True) as open_url:
+                self.assertTrue(controller.openCurrentVideoSource())
+
+            opened_path = Path(open_url.call_args.args[0].toLocalFile())
+            self.assertEqual(opened_path, source.resolve())
+
+    def test_project_loaded_signal_observes_restored_story_and_applied_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            (project / "script").mkdir(parents=True)
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps({"name": "demo", "project_type": "video", "stage": "scripted"}),
+                encoding="utf-8",
+            )
+            (project / "script" / "story.json").write_text(
+                json.dumps({"narration": [{"id": 1, "text_en": "Ready.", "event_ids": [1]}]}),
+                encoding="utf-8",
+            )
+            (project / "script" / "content_review.json").write_text(
+                json.dumps(
+                    {
+                        "fact_review": {
+                            "issue_count": 1,
+                            "issues": [
+                                {
+                                    "id": 1,
+                                    "narration_ids": [1],
+                                    "suggestion_en": "Ready.",
+                                    "applied": True,
+                                }
+                            ],
+                        },
+                        "terminology_review": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            controller = self._controller(root)
+            observed: list[tuple[int, bool]] = []
+            controller.projectLoaded.connect(
+                lambda: observed.append(
+                    (len(controller.storyNarration), controller.contentReviewHasAppliedSuggestions)
+                )
+            )
+
+            controller.openProject(str(project_file))
+
+            self.assertEqual(observed, [(1, True)])
 
     def test_recent_projects_finds_a_project_copied_with_an_extra_folder_level(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -116,6 +224,79 @@ class AppControllerProjectNameTests(unittest.TestCase):
                 controller.sourceManuscriptText,
                 "# 大象的语言\n\n它们如何交流？",
             )
+
+    def test_manuscript_asset_manifest_restores_missing_entries_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            controller = self._controller(root)
+            controller.createManuscriptProject("素材恢复测试。")
+            project_file = controller._current_project_file
+            missing = root / "removed.mp4"
+            manifest = project_file.parent / "assets" / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "assets": [
+                            {
+                                "id": "asset-missing",
+                                "source_path": str(missing),
+                                "kind": "video",
+                                "file_status": "missing",
+                                "analysis_status": "missing",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            reopened = self._controller(root)
+            reopened.openProject(str(project_file))
+
+            self.assertEqual(reopened.manuscriptAssetCount, 1)
+            self.assertIn("1 个文件缺失", reopened.matchingStatus)
+
+    def test_manuscript_project_can_start_preview_without_single_source_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            controller = self._controller(root)
+            controller.createManuscriptProject("多素材预览测试。")
+            project_file = controller._current_project_file
+            asset = root / "still.jpg"
+            asset.write_bytes(b"image")
+            rough_cut = project_file.parent / "timeline" / "rough_cut.json"
+            rough_cut.write_text(
+                json.dumps(
+                    {
+                        "duration_sec": 2.0,
+                        "clips": [
+                            {
+                                "source_path": str(asset),
+                                "media_kind": "image",
+                                "source_start": 0,
+                                "source_end": 2,
+                                "width": 800,
+                                "height": 1200,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            audio = project_file.parent / "audio" / "narration.wav"
+            audio.parent.mkdir(exist_ok=True)
+            audio.write_bytes(b"audio")
+            controller._narration_audio_path = str(audio)
+            controller._narration_duration_sec = 2.0
+
+            with patch.object(controller, "_run_quality_check", return_value=True), patch.object(
+                controller, "_start_rough_preview"
+            ) as start_preview:
+                controller.generateRoughPreview()
+
+            start_preview.assert_called_once()
+            self.assertEqual(controller._primary_timeline_dimensions(), (800, 1200))
 
     def test_editing_source_manuscript_marks_existing_storyboard_stale(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -920,6 +1101,7 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertEqual(controller._story_narration[1]["text_en"], "Safer two.")
             self.assertFalse(bool(controller._fact_review.get("stale", False)))
             self.assertTrue(controller._fact_review_issues[0]["applied"])
+            self.assertTrue(controller.contentReviewHasAppliedSuggestions)
             self.assertEqual(controller.contentReviewPendingCount, 0)
             self.assertIn("全部 1 条可应用建议已应用", controller.contentReviewStatus)
             saved_review = json.loads(
@@ -969,6 +1151,49 @@ class AppControllerProjectNameTests(unittest.TestCase):
             )
             self.assertFalse(bool(controller._terminology_review.get("stale", False)))
             self.assertTrue(controller._terminology_review_issues[0]["applied"])
+
+    def test_applying_one_review_suggestion_preserves_unapplied_issues(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "demo"
+            (project / "script").mkdir(parents=True)
+            project_file = project / "project.json"
+            project_file.write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+            controller = self._controller(root)
+            controller._current_project_file = project_file
+            controller._set_story(
+                {
+                    "narration": [
+                        {"id": 1, "text_en": "First.", "event_ids": [1]},
+                        {"id": 2, "text_en": "Second.", "event_ids": [2]},
+                    ]
+                }
+            )
+            (project / "script" / "story.json").write_text(
+                json.dumps(controller._story), encoding="utf-8"
+            )
+            controller._set_fact_review(
+                {
+                    "issue_count": 2,
+                    "issues": [
+                        {"id": 1, "narration_ids": [1], "suggestion_en": "First revised."},
+                        {"id": 2, "narration_ids": [2], "suggestion_en": "Second revised."},
+                    ],
+                }
+            )
+
+            controller.applyFactReviewSuggestion(1)
+
+            self.assertEqual(len(controller.contentReviewIssues), 2)
+            self.assertTrue(controller.contentReviewIssues[0]["applied"])
+            self.assertFalse(controller.contentReviewIssues[1].get("applied", False))
+            saved = json.loads(
+                (project / "script" / "content_review.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(saved["fact_review"]["issues"]), 2)
+            self.assertFalse(saved["fact_review"]["issues"][1].get("applied", False))
+            controller._fact_review["stale"] = True
+            self.assertIn("仍保留 1 条未应用建议", controller.contentReviewStatus)
 
     def test_combined_content_review_updates_both_sections(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

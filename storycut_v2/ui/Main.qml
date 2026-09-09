@@ -31,6 +31,18 @@ ApplicationWindow {
     property bool exportDone: appController.previewVideoReady
     property bool matchingAdvancedVisible: false
 
+    Connections {
+        target: appController
+        function onProjectLoaded() {
+            storySection.expanded = !storyDone
+            combinedReviewSection.expanded = !appController.contentReviewHasAppliedSuggestions
+        }
+        function onTerminologyReviewChanged() {
+            if (appController.contentReviewHasAppliedSuggestions)
+                combinedReviewSection.expanded = false
+        }
+    }
+
     component StepBadge: Rectangle {
         id: stepBadge
         property string stepNumber: "01"
@@ -653,8 +665,8 @@ ApplicationWindow {
 
             RowLayout {
                 Layout.fillWidth: true
-                Text { text: appController.projectName; color: textMain; font.pixelSize: 18; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
-                Text { text: appController.previewPositionText + " / " + appController.durationText; color: textMuted; font.pixelSize: 13 }
+                Text { text: appController.previewSourceName; color: textMain; font.pixelSize: 18; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
+                Text { text: appController.previewPositionText + " / " + appController.previewDurationText; color: textMuted; font.pixelSize: 13 }
                 GhostButton { text: "关闭"; onClicked: previewDialog.close() }
             }
 
@@ -694,7 +706,7 @@ ApplicationWindow {
                     id: previewSlider
                     Layout.fillWidth: true
                     from: 0
-                    to: Math.max(1, appController.durationSeconds)
+                    to: Math.max(1, appController.previewDurationSeconds)
                     value: appController.previewPosition
                     onMoved: previewSeekTimer.restart()
                     background: Rectangle {
@@ -727,6 +739,7 @@ ApplicationWindow {
             previewSlider.value = appController.previewPosition
             appController.requestPreviewFrame(previewSlider.value)
         }
+        onClosed: appController.clearCandidatePreview()
     }
 
     Timer {
@@ -859,20 +872,46 @@ ApplicationWindow {
                             Layout.preferredWidth: 48
                             Layout.preferredHeight: 48
                             radius: 11
-                            color: "#292238"
-                            Text { anchors.centerIn: parent; text: "▶"; color: accentLight; font.pixelSize: 17 }
+                            color: modelData.projectType === "manuscript" ? "#173c2b" : "#292238"
+                            border.color: modelData.projectType === "manuscript" ? "#347456" : "#57417b"
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData.projectType === "manuscript" ? "文" : "▶"
+                                color: modelData.projectType === "manuscript" ? "#8ee3b4" : accentLight
+                                font.pixelSize: modelData.projectType === "manuscript" ? 19 : 17
+                                font.bold: true
+                            }
                         }
 
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 4
-                            Text {
+                            RowLayout {
                                 Layout.fillWidth: true
-                                text: modelData.name
-                                color: textMain
-                                font.pixelSize: 14
-                                font.bold: true
-                                elide: Text.ElideRight
+                                spacing: 8
+                                Text {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    text: modelData.name
+                                    color: textMain
+                                    font.pixelSize: 14
+                                    font.bold: true
+                                    elide: Text.ElideRight
+                                }
+                                Rectangle {
+                                    Layout.preferredWidth: modelData.projectType === "manuscript" ? 58 : 42
+                                    Layout.preferredHeight: 21
+                                    radius: 6
+                                    color: modelData.projectType === "manuscript" ? "#173c2b" : "#292238"
+                                    border.color: modelData.projectType === "manuscript" ? "#347456" : "#57417b"
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.projectTypeText
+                                        color: modelData.projectType === "manuscript" ? "#8ee3b4" : accentLight
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                    }
+                                }
                             }
                             Text {
                                 Layout.fillWidth: true
@@ -3509,7 +3548,7 @@ ApplicationWindow {
                                     anchors.centerIn: parent
                                     spacing: 10
                                     Text { anchors.horizontalCenter: parent.horizontalCenter; text: manuscriptProject ? "文" : appController.mediaBusy ? "◌" : appController.videoPath ? "▶" : "＋"; color: accentLight; font.pixelSize: manuscriptProject ? 30 : 34; font.bold: manuscriptProject }
-                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: manuscriptProject ? "纯文稿项目" : appController.mediaBusy ? "正在生成封面…" : appController.videoPath ? "视频已导入" : "选择视频或文稿开始"; color: textMain; font.pixelSize: 14; font.bold: true }
+                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: manuscriptProject ? "纯文稿项目" : appController.mediaBusy ? "正在生成封面…" : appController.videoPath ? "点击用系统播放器打开" : "选择视频或文稿开始"; color: textMain; font.pixelSize: 14; font.bold: true }
                                     Text { anchors.horizontalCenter: parent.horizontalCenter; text: manuscriptProject ? appController.sourceManuscriptCharCount + " 字符 · 原稿已保存" : appController.videoPath ? appController.durationText + "  ·  " + appController.resolutionText : "MP4 · MKV · TXT · Markdown"; color: "#d1d5db"; font.pixelSize: 11 }
                                 }
                                 MouseArea {
@@ -3518,7 +3557,7 @@ ApplicationWindow {
                                         if (manuscriptProject)
                                             scrollToSection(understandingSection, 1)
                                         else if (appController.videoPath)
-                                            previewDialog.open()
+                                            appController.openCurrentVideoSource()
                                         else
                                             projectTypeDialog.open()
                                     }
@@ -4315,9 +4354,11 @@ ApplicationWindow {
                             }
 
                             Rectangle {
+                                id: combinedReviewSection
+                                property bool expanded: true
                                 Layout.fillWidth: true
                                 visible: storySection.expanded && storyDone
-                                Layout.preferredHeight: visible ? combinedReviewContent.implicitHeight + 26 : 0
+                                Layout.preferredHeight: visible ? (expanded ? combinedReviewContent.implicitHeight + 26 : 74) : 0
                                 radius: 12
                                 color: "#15171e"
                                 border.color: appController.factReviewStatus.indexOf("高风险") >= 0 ? "#7f3d46" : "#303440"
@@ -4356,132 +4397,143 @@ ApplicationWindow {
                                             enabled: !appController.contentReviewBusy && !appController.storyBusy
                                             onClicked: appController.runFactReview()
                                         }
+                                        GhostButton {
+                                            text: combinedReviewSection.expanded ? "收起  ▴" : "展开  ▾"
+                                            onClicked: combinedReviewSection.expanded = !combinedReviewSection.expanded
+                                        }
                                     }
 
-                                    ProgressBar {
+                                    ColumnLayout {
+                                        id: combinedReviewDetails
                                         Layout.fillWidth: true
-                                        visible: appController.contentReviewBusy
-                                        indeterminate: true
-                                    }
+                                        visible: combinedReviewSection.expanded
+                                        spacing: 10
 
-                                    Text {
-                                        visible: appController.contentReviewSummary !== ""
-                                        text: appController.contentReviewSummary
-                                        color: textMain
-                                        font.pixelSize: 11
-                                        Layout.fillWidth: true
-                                        wrapMode: Text.WordWrap
-                                    }
+                                        ProgressBar {
+                                            Layout.fillWidth: true
+                                            visible: appController.contentReviewBusy
+                                            indeterminate: true
+                                        }
 
-                                    Text {
-                                        visible: appController.contentReviewBreakdown !== ""
-                                        text: appController.contentReviewBreakdown
-                                        color: "#9fc5a8"
-                                        font.pixelSize: 10
-                                        font.bold: true
-                                        Layout.fillWidth: true
-                                        wrapMode: Text.WordWrap
-                                    }
+                                        Text {
+                                            visible: appController.contentReviewSummary !== ""
+                                            text: appController.contentReviewSummary
+                                            color: textMain
+                                            font.pixelSize: 11
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.WordWrap
+                                        }
 
-                                    Flow {
-                                        Layout.fillWidth: true
-                                        spacing: 6
-                                        visible: appController.contentReviewCanonicalTerms.length > 0
+                                        Text {
+                                            visible: appController.contentReviewBreakdown !== ""
+                                            text: appController.contentReviewBreakdown
+                                            color: "#9fc5a8"
+                                            font.pixelSize: 10
+                                            font.bold: true
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.WordWrap
+                                        }
+
+                                        Flow {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            visible: appController.contentReviewCanonicalTerms.length > 0
+                                            Repeater {
+                                                model: appController.contentReviewCanonicalTerms
+                                                delegate: Rectangle {
+                                                    required property var modelData
+                                                    width: unifiedCanonicalText.implicitWidth + 18
+                                                    height: 26
+                                                    radius: 7
+                                                    color: "#202735"
+                                                    border.color: "#3b4c68"
+                                                    Text {
+                                                        id: unifiedCanonicalText
+                                                        anchors.centerIn: parent
+                                                        text: (modelData.source_term ? modelData.source_term + " → " : "") + modelData.preferred_en
+                                                        color: "#b9d4ff"
+                                                        font.pixelSize: 9
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         Repeater {
-                                            model: appController.contentReviewCanonicalTerms
+                                            model: appController.contentReviewIssues
                                             delegate: Rectangle {
                                                 required property var modelData
-                                                width: unifiedCanonicalText.implicitWidth + 18
-                                                height: 26
-                                                radius: 7
-                                                color: "#202735"
-                                                border.color: "#3b4c68"
-                                                Text {
-                                                    id: unifiedCanonicalText
-                                                    anchors.centerIn: parent
-                                                    text: (modelData.source_term ? modelData.source_term + " → " : "") + modelData.preferred_en
-                                                    color: "#b9d4ff"
-                                                    font.pixelSize: 9
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    Repeater {
-                                        model: appController.contentReviewIssues
-                                        delegate: Rectangle {
-                                            required property var modelData
-                                            Layout.fillWidth: true
-                                            Layout.preferredHeight: 116
-                                            radius: 9
-                                            color: modelData.applied ? "#16251d"
-                                                   : modelData.reviewType === "fact" && modelData.severity === "high" ? "#28191d"
-                                                   : modelData.reviewType === "terminology" ? "#211e18" : "#1c1e26"
-                                            border.color: modelData.applied ? "#347456"
-                                                          : modelData.reviewType === "fact" && modelData.severity === "high" ? "#7f3d46"
-                                                          : modelData.reviewType === "terminology" ? "#655431" : "#343843"
-                                            ColumnLayout {
-                                                anchors.fill: parent
-                                                anchors.margins: 10
-                                                spacing: 4
-                                                RowLayout {
-                                                    Layout.fillWidth: true
-                                                    Rectangle {
-                                                        Layout.preferredWidth: unifiedTypeText.implicitWidth + 14
-                                                        Layout.preferredHeight: 22
-                                                        radius: 6
-                                                        color: modelData.reviewType === "fact" ? "#2b2145" : "#3a301e"
-                                                        Text {
-                                                            id: unifiedTypeText
-                                                            anchors.centerIn: parent
-                                                            text: modelData.reviewTypeText
-                                                            color: modelData.reviewType === "fact" ? accentLight : "#f1c978"
-                                                            font.pixelSize: 9
-                                                            font.bold: true
-                                                        }
-                                                    }
-                                                    Text { text: modelData.titleText; color: textMain; font.pixelSize: 10; font.bold: true }
-                                                    Text { text: "解说句 " + modelData.narrationText; color: textMuted; font.pixelSize: 9 }
-                                                    Item { Layout.fillWidth: true }
-                                                    Button {
-                                                        text: modelData.applied ? "✓ 已应用"
-                                                              : modelData.suggestion_en ? "应用建议" : "手动处理"
-                                                        implicitWidth: 72
-                                                        implicitHeight: 25
-                                                        enabled: !modelData.applied && modelData.suggestion_en !== "" && !appController.contentReviewBusy && !appController.storyBusy
-                                                        contentItem: Text {
-                                                            text: parent.text
-                                                            color: modelData.applied ? "#91e5b4" : "#b8f3cf"
-                                                            font.pixelSize: 9
-                                                            horizontalAlignment: Text.AlignHCenter
-                                                            verticalAlignment: Text.AlignVCenter
-                                                        }
-                                                        background: Rectangle {
+                                                Layout.fillWidth: true
+                                                Layout.preferredHeight: 116
+                                                radius: 9
+                                                color: modelData.applied ? "#16251d"
+                                                       : modelData.reviewType === "fact" && modelData.severity === "high" ? "#28191d"
+                                                       : modelData.reviewType === "terminology" ? "#211e18" : "#1c1e26"
+                                                border.color: modelData.applied ? "#347456"
+                                                              : modelData.reviewType === "fact" && modelData.severity === "high" ? "#7f3d46"
+                                                              : modelData.reviewType === "terminology" ? "#655431" : "#343843"
+                                                ColumnLayout {
+                                                    anchors.fill: parent
+                                                    anchors.margins: 10
+                                                    spacing: 4
+                                                    RowLayout {
+                                                        Layout.fillWidth: true
+                                                        Rectangle {
+                                                            Layout.preferredWidth: unifiedTypeText.implicitWidth + 14
+                                                            Layout.preferredHeight: 22
                                                             radius: 6
-                                                            color: modelData.applied ? "#183729" : parent.hovered ? "#224633" : "#183729"
-                                                            border.color: "#347456"
+                                                            color: modelData.reviewType === "fact" ? "#2b2145" : "#3a301e"
+                                                            Text {
+                                                                id: unifiedTypeText
+                                                                anchors.centerIn: parent
+                                                                text: modelData.reviewTypeText
+                                                                color: modelData.reviewType === "fact" ? accentLight : "#f1c978"
+                                                                font.pixelSize: 9
+                                                                font.bold: true
+                                                            }
                                                         }
-                                                        onClicked: {
-                                                            if (modelData.reviewType === "fact")
-                                                                appController.applyFactReviewSuggestion(modelData.id)
-                                                            else
-                                                                appController.applyTerminologySuggestion(modelData.id)
+                                                        Text { text: modelData.titleText; color: textMain; font.pixelSize: 10; font.bold: true }
+                                                        Text { text: "解说句 " + modelData.narrationText; color: textMuted; font.pixelSize: 9 }
+                                                        Item { Layout.fillWidth: true }
+                                                        Button {
+                                                            text: modelData.applied ? "✓ 已应用"
+                                                                  : modelData.suggestion_en ? "应用建议" : "手动处理"
+                                                            implicitWidth: 72
+                                                            implicitHeight: 25
+                                                            enabled: !modelData.applied && modelData.suggestion_en !== "" && !appController.contentReviewBusy && !appController.storyBusy
+                                                            contentItem: Text {
+                                                                text: parent.text
+                                                                color: modelData.applied ? "#91e5b4" : "#b8f3cf"
+                                                                font.pixelSize: 9
+                                                                horizontalAlignment: Text.AlignHCenter
+                                                                verticalAlignment: Text.AlignVCenter
+                                                            }
+                                                            background: Rectangle {
+                                                                radius: 6
+                                                                color: modelData.applied ? "#183729" : parent.hovered ? "#224633" : "#183729"
+                                                                border.color: "#347456"
+                                                            }
+                                                            onClicked: {
+                                                                if (modelData.reviewType === "fact")
+                                                                    appController.applyFactReviewSuggestion(modelData.id)
+                                                                else
+                                                                    appController.applyTerminologySuggestion(modelData.id)
+                                                            }
                                                         }
                                                     }
+                                                    Text { visible: modelData.subjectText !== ""; text: modelData.subjectText; color: modelData.reviewType === "terminology" ? "#d8c18f" : textMain; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                    Text { text: modelData.reason_zh; color: "#b8bdc9"; font.pixelSize: 10; Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+                                                    Text { text: "建议：" + modelData.suggestion_en; color: "#8ee3b4"; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
                                                 }
-                                                Text { visible: modelData.subjectText !== ""; text: modelData.subjectText; color: modelData.reviewType === "terminology" ? "#d8c18f" : textMain; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
-                                                Text { text: modelData.reason_zh; color: "#b8bdc9"; font.pixelSize: 10; Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
-                                                Text { text: "建议：" + modelData.suggestion_en; color: "#8ee3b4"; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
                                             }
                                         }
-                                    }
 
-                                    Text {
-                                        text: appController.contentReviewDisclaimer
-                                        color: "#737986"
-                                        font.pixelSize: 9
-                                        Layout.fillWidth: true
-                                        wrapMode: Text.WordWrap
+                                        Text {
+                                            text: appController.contentReviewDisclaimer
+                                            color: "#737986"
+                                            font.pixelSize: 9
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.WordWrap
+                                        }
                                     }
 
                             Rectangle {
@@ -4915,22 +4967,42 @@ ApplicationWindow {
                                     text: appController.stockSearchBusy
                                           ? "正在寻找素材…"
                                           : appController.matchingBusy
-                                          ? "正在自动匹配…"
+                                          ? "正在分析并匹配…"
                                           : appController.matches.length > 0
                                             ? "重新自动匹配"
-                                            : manuscriptProject
-                                              ? appController.stockSearchResults.length > 0 ? "重新寻找素材" : "自动寻找素材  →"
+                                          : manuscriptProject
+                                              ? appController.manuscriptAssetCount > 0
+                                                ? "分析并自动匹配  →"
+                                                : appController.stockSearchResults.length > 0 ? "重新寻找素材" : "自动寻找素材  →"
                                               : "自动匹配镜头  →"
                                     enabled: appController.storyNarration.length > 0 && !appController.matchingBusy && !appController.stockSearchBusy
                                     onClicked: {
                                         if (manuscriptProject) {
-                                            if (appController.stockMediaConfigured)
+                                            if (appController.manuscriptAssetCount > 0)
+                                                appController.generateMatches()
+                                            else if (appController.stockMediaConfigured)
                                                 appController.searchStockMedia()
                                             else
                                                 stockMediaSettingsDialog.open()
                                         } else {
                                             appController.generateMatches()
                                         }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                visible: matchingSection.expanded && manuscriptProject && appController.matchingBusy
+                                Layout.preferredHeight: 48
+                                radius: 10
+                                color: "#11141a"
+                                border.color: "#303440"
+                                ColumnLayout {
+                                    anchors.fill: parent; anchors.margins: 10; spacing: 5
+                                    Text { text: appController.matchingStatus; color: textMuted; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    Rectangle {
+                                        Layout.fillWidth: true; Layout.preferredHeight: 4; radius: 2; color: "#30333d"
+                                        Rectangle { width: parent.width * appController.matchingProgress; height: parent.height; radius: 2; color: accent }
                                     }
                                 }
                             }
@@ -4997,7 +5069,8 @@ ApplicationWindow {
                                     required property var modelData
                                     visible: matchingSection.expanded && matchingAdvancedVisible
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: visible ? 292 : 0
+                                    Layout.minimumWidth: 0
+                                    Layout.preferredHeight: visible ? (manuscriptProject ? 330 : 292) : 0
                                     radius: 12
                                     color: "#15171e"
                                     border.color: "#292c36"
@@ -5011,11 +5084,23 @@ ApplicationWindow {
                                                 width: 28; height: 28; radius: 8; color: "#292238"
                                                 Text { anchors.centerIn: parent; text: modelData.narration_id; color: accentLight; font.bold: true; font.pixelSize: 11 }
                                             }
-                                            Text { text: modelData.text_en; color: textMain; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                                            Text { text: modelData.text_en; color: textMain; font.pixelSize: 12; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight }
                                             Text { text: "解说约 " + modelData.narration_duration_sec + " 秒"; color: textMuted; font.pixelSize: 10 }
+                                            Rectangle {
+                                                visible: manuscriptProject
+                                                width: 46; height: 22; radius: 7
+                                                color: modelData.confidence === "green" ? "#173c2b" : modelData.confidence === "yellow" ? "#49391d" : "#4a2427"
+                                                Text { anchors.centerIn: parent; text: modelData.confidence_label || "低"; color: modelData.confidence === "green" ? "#8ee3b4" : modelData.confidence === "yellow" ? "#ffd37a" : "#ff9c9c"; font.pixelSize: 10; font.bold: true }
+                                            }
+                                            GhostButton {
+                                                visible: manuscriptProject
+                                                text: modelData.locked ? "已锁定" : "锁定"
+                                                onClicked: appController.setMatchLocked(modelData.narration_id, !modelData.locked)
+                                            }
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             spacing: 10
                                             Repeater {
                                                 model: modelData.candidates
@@ -5023,6 +5108,8 @@ ApplicationWindow {
                                                     id: candidateItem
                                                     required property var modelData
                                                     Layout.fillWidth: true
+                                                    Layout.minimumWidth: 0
+                                                    Layout.preferredWidth: 1
                                                     Layout.preferredHeight: 142
                                                     radius: 9
                                                     color: modelData.event_id === matchingItem.modelData.selected_event_id ? "#272039" : "#20222a"
@@ -5042,7 +5129,7 @@ ApplicationWindow {
                                                         }
                                                         RowLayout {
                                                             Layout.fillWidth: true
-                                                            Text { text: "场景 " + modelData.event_id + " · " + modelData.timeRange; color: textMain; font.pixelSize: 9; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                            Text { text: (manuscriptProject ? (modelData.provider || "本地") + " · " : "场景 " + modelData.event_id + " · ") + modelData.timeRange; color: textMain; font.pixelSize: 9; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight }
                                                             Text { text: modelData.scorePercent + "%"; color: accentLight; font.pixelSize: 9; font.bold: true }
                                                         }
                                                         Text { text: modelData.reason; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true; elide: Text.ElideRight }
@@ -5052,12 +5139,22 @@ ApplicationWindow {
                                                         cursorShape: Qt.PointingHandCursor
                                                         onClicked: appController.selectMatch(matchingItem.modelData.narration_id, candidateItem.modelData.event_id)
                                                         onDoubleClicked: {
-                                                            appController.requestPreviewFrame(candidateItem.modelData.start)
-                                                            previewDialog.open()
+                                                            if (manuscriptProject) {
+                                                                appController.openCandidateSource(matchingItem.modelData.narration_id, candidateItem.modelData.event_id)
+                                                            } else {
+                                                                appController.requestPreviewFrame(candidateItem.modelData.start)
+                                                                previewDialog.open()
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
+                                        }
+                                        Text {
+                                            visible: manuscriptProject
+                                            text: modelData.match_reason + (modelData.missing_prompt ? " · 更适合补充：" + modelData.missing_prompt : "")
+                                            color: modelData.confidence === "red" ? "#ff9c7a" : textMuted
+                                            font.pixelSize: 9; Layout.fillWidth: true; wrapMode: Text.Wrap
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
@@ -5074,7 +5171,7 @@ ApplicationWindow {
                                             GhostButton { text: "出点 -0.5"; onClicked: appController.adjustMatchBoundary(matchingItem.modelData.narration_id, "end", -0.5) }
                                             GhostButton { text: "出点 +0.5"; onClicked: appController.adjustMatchBoundary(matchingItem.modelData.narration_id, "end", 0.5) }
                                         }
-                                        Text { text: "单击候选画面可替换，双击可打开原片预览；入点/出点调整会立即保存到粗剪时间线"; color: textMuted; font.pixelSize: 9 }
+                                        Text { text: manuscriptProject ? "单击候选可替换并自动锁定，双击用系统播放器查看素材；锁定项不会被重新匹配覆盖" : "单击候选画面可替换，双击可打开原片预览；入点/出点调整会立即保存到粗剪时间线"; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight }
                                     }
                                 }
                             }
@@ -5190,6 +5287,7 @@ ApplicationWindow {
                                 }
 
                                 Rectangle {
+                                    visible: !manuscriptProject
                                     Layout.fillWidth: true; Layout.preferredHeight: cleanupDetailColumn.implicitHeight + 24; radius: 11
                                     color: "#171a21"; border.color: appController.subtitleCleanedVideoReady ? "#315d48" : "#303540"
                                     RowLayout {
@@ -5223,7 +5321,7 @@ ApplicationWindow {
                                         anchors.fill: parent; anchors.margins: 12; spacing: 8
                                         RowLayout {
                                             Layout.fillWidth: true; spacing: 12
-                                            SubstepBadge { stepNumber: "4" }
+                                            SubstepBadge { stepNumber: manuscriptProject ? "3" : "4" }
                                             ColumnLayout { Layout.preferredWidth: 142; spacing: 2
                                                 Text { text: "成片画布"; color: textMain; font.pixelSize: 13; font.bold: true }
                                                 Text { text: "输出 " + appController.subtitleCanvasWidth + "×" + appController.subtitleCanvasHeight; color: textMuted; font.pixelSize: 9 }
@@ -5270,7 +5368,7 @@ ApplicationWindow {
                                     color: "#171a21"; border.color: "#303540"
                                     RowLayout {
                                         anchors.fill: parent; anchors.margins: 12; spacing: 12
-                                        SubstepBadge { stepNumber: "5" }
+                                        SubstepBadge { stepNumber: manuscriptProject ? "4" : "5" }
                                         ColumnLayout { Layout.fillWidth: true; spacing: 2
                                             Text { text: "字幕样式"; color: textMain; font.pixelSize: 13; font.bold: true }
                                             Text { text: "调整字体、字号、位置、描边和字幕安全区域"; color: textMuted; font.pixelSize: 9 }
@@ -5295,7 +5393,7 @@ ApplicationWindow {
                                     border.color: appController.previewVideoReady ? "#315d48" : "#303540"
                                     RowLayout {
                                         anchors.fill: parent; anchors.margins: 12; spacing: 12
-                                        SubstepBadge { stepNumber: appController.burnSubtitles ? "6" : "5"; Layout.alignment: Qt.AlignTop }
+                                        SubstepBadge { stepNumber: manuscriptProject ? (appController.burnSubtitles ? "5" : "4") : (appController.burnSubtitles ? "6" : "5"); Layout.alignment: Qt.AlignTop }
                                         ColumnLayout {
                                             id: synthesisColumn
                                             Layout.fillWidth: true; spacing: 9
@@ -5315,10 +5413,11 @@ ApplicationWindow {
                                                 Text { text: "是否烧录字幕"; color: textMain; font.pixelSize: 10; font.bold: true }
                                                 ModernSwitch { checked: appController.burnSubtitles; onToggled: appController.setBurnSubtitles(checked) }
                                                 Text { text: appController.burnSubtitles ? "显示第 5 步并应用全部字幕样式" : "不添加字幕，可在外部软件处理"; color: textMuted; font.pixelSize: 9 }
-                                                Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 20; color: "#343946" }
-                                                Text { text: "保留原片声音"; color: textMain; font.pixelSize: 10; font.bold: true }
-                                                ModernSwitch { checked: appController.preserveOriginalAudio; onToggled: appController.setPreserveOriginalAudio(checked) }
-                                                Text { text: appController.preserveOriginalAudio ? "原声将降低音量后混合" : "默认关闭"; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true }
+                                                Rectangle { visible: !manuscriptProject; Layout.preferredWidth: 1; Layout.preferredHeight: 20; color: "#343946" }
+                                                Text { visible: !manuscriptProject; text: "保留原片声音"; color: textMain; font.pixelSize: 10; font.bold: true }
+                                                ModernSwitch { visible: !manuscriptProject; checked: appController.preserveOriginalAudio; onToggled: appController.setPreserveOriginalAudio(checked) }
+                                                Text { visible: !manuscriptProject; text: appController.preserveOriginalAudio ? "原声将降低音量后混合" : "默认关闭"; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true }
+                                                Text { visible: manuscriptProject; text: "多素材原声默认不混合，以英文配音为主"; color: textMuted; font.pixelSize: 9; Layout.fillWidth: true }
                                                 GhostButton { visible: appController.previewVideoReady; text: "用播放器打开"; onClicked: appController.openRoughPreview() }
                                                 FlatButton {
                                                     visible: appController.previewVideoReady

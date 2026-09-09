@@ -149,6 +149,72 @@ class ExportSubtitleStyleTests(unittest.TestCase):
             self.assertIn("crop=w='min(iw\\,1080)'", filters)
             self.assertIn("pad=1080:1920", filters)
 
+    def test_timeline_sources_build_video_and_looped_image_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            video = root / "one.mp4"
+            image = root / "still.jpg"
+            video.write_bytes(b"video")
+            image.write_bytes(b"image")
+            rough_cut = root / "rough.json"
+            rough_cut.write_text(
+                json.dumps(
+                    {
+                        "duration_sec": 3.0,
+                        "clips": [
+                            {
+                                "source_path": str(video),
+                                "media_kind": "video",
+                                "source_start": 1.0,
+                                "source_end": 2.5,
+                                "width": 1280,
+                                "height": 720,
+                            },
+                            {
+                                "source_path": str(image),
+                                "media_kind": "image",
+                                "source_start": 0.0,
+                                "source_end": 1.5,
+                                "width": 800,
+                                "height": 1200,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "preview.mp4"
+            output.write_bytes(b"rendered")
+            process = MagicMock()
+            process.stdout = []
+            process.stderr.read.return_value = ""
+            process.wait.return_value = 0
+
+            with patch("src.export_service._resolve_tool", return_value="ffmpeg"), patch(
+                "src.export_service.subprocess.Popen", return_value=process
+            ) as popen:
+                result = render_rough_preview(
+                    None,
+                    rough_cut,
+                    output,
+                    None,
+                    None,
+                    0,
+                    0,
+                    {"shared": {}, "export": {"fit_mode": "vertical_blur", "width": 1080, "height": 1920}},
+                    root,
+                    lambda _value, _status: None,
+                )
+
+            command = popen.call_args.args[0]
+            filters = Path(result["filter_log"]).read_text(encoding="utf-8")
+            self.assertIn(str(video), command)
+            self.assertIn(str(image), command)
+            self.assertIn("-loop", command)
+            self.assertIn("[0:v]trim=start=1.000:end=2.500", filters)
+            self.assertIn("[1:v]trim=duration=1.500", filters)
+            self.assertFalse(result["has_audio"])
+
 
 if __name__ == "__main__":
     unittest.main()
