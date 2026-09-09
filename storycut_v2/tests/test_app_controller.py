@@ -1501,7 +1501,10 @@ class AppControllerProjectNameTests(unittest.TestCase):
             controller.openProject(str(project_file))
             controller._layered_analysis_enabled = False
 
-            def fake_describe(path, *_args):  # type: ignore[no-untyped-def]
+            describe_options = {}
+
+            def fake_describe(path, *_args, **kwargs):  # type: ignore[no-untyped-def]
+                describe_options.update(kwargs)
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 payload["events"][0]["visual_description"] = "人物站在扶梯入口。"
                 path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -1526,6 +1529,56 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertIn("story", saved["artifact_state"]["invalidated"])
             self.assertTrue(controller.analysisComplete)
             self.assertFalse(controller.analysisNeedsVisionRetry)
+            self.assertTrue(describe_options["retry_skipped"])
+
+    def test_skipped_vision_frame_is_restored_for_thumbnail_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "vision-limited"
+            analysis = project / "analysis"
+            keyframes = analysis / "keyframes"
+            keyframes.mkdir(parents=True)
+            frame = keyframes / "scene_0007.jpg"
+            frame.write_bytes(b"frame")
+            (analysis / "events.json").write_text(
+                json.dumps(
+                    {
+                        "events": [
+                            {
+                                "id": 7,
+                                "start": 12.0,
+                                "end": 15.0,
+                                "keyframe": "keyframes/scene_0007.jpg",
+                                "vision_skipped_reason": "内容安全规则限制",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "vision-limited",
+                        "project_type": "video",
+                        "analysis_state": "complete",
+                        "stage": "understood",
+                        "settings": {},
+                        "artifacts": {"events": "analysis/events.json"},
+                        "warnings": {"vision_limited": "1 个关键画面已跳过"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            controller = self._controller(root)
+            controller.openProject(str(project_file))
+
+            self.assertTrue(controller.analysisComplete)
+            self.assertEqual(controller.visionFailedFrameCount, 1)
+            self.assertEqual(controller.visionFailedFrames[0]["id"], 7)
+            self.assertTrue(controller.visionFailedFrames[0]["keyframeUrl"].startswith("file:"))
 
     def test_voice_speed_completion_saves_working_audio_and_clears_busy_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

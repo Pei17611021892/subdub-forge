@@ -117,6 +117,125 @@ class VisionServiceTests(unittest.TestCase):
                         lambda _value, _status: None,
                     )
 
+    def test_content_policy_failure_is_isolated_to_one_frame(self) -> None:
+        class PolicyError(Exception):
+            status_code = 400
+            code = "content_policy_violation"
+
+        class FakeCompletions:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                images = [
+                    item
+                    for item in kwargs["messages"][0]["content"]
+                    if item.get("type") == "image_url"
+                ]
+                if len(images) > 1 or self.calls == 3:
+                    raise PolicyError("content_policy_violation")
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content=json.dumps([{"id": 1, "description": "安全画面"}])
+                            )
+                        )
+                    ]
+                )
+
+        completions = FakeCompletions()
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            events, _source = self._project(root)
+            second_frame = root / "analysis" / "keyframes" / "scene_0002.jpg"
+            second_frame.write_bytes(b"second jpeg bytes")
+            payload = json.loads(events.read_text(encoding="utf-8"))
+            payload["events"].append(
+                {
+                    "id": 2,
+                    "start": 3.0,
+                    "end": 6.0,
+                    "keyframe": "keyframes/scene_0002.jpg",
+                }
+            )
+            events.write_text(json.dumps(payload), encoding="utf-8")
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "openai.OpenAI", return_value=client
+            ):
+                result = describe_event_keyframes(
+                    events,
+                    {"shared": {"env_file": ".missing"}, "vision": {"batch_size": 2}},
+                    root,
+                    lambda _value, _status: None,
+                )
+
+        self.assertEqual(completions.calls, 3)
+        self.assertEqual(result["events"][0]["visual_description"], "安全画面")
+        self.assertIn("内容安全规则", result["events"][1]["vision_skipped_reason"])
+        self.assertEqual(result["vision_skipped_event_count"], 1)
+
+    def test_retry_skipped_only_requests_frames_without_descriptions(self) -> None:
+        class FakeCompletions:
+            def __init__(self) -> None:
+                self.requested_text = ""
+
+            def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                content = kwargs["messages"][0]["content"]
+                self.requested_text = " ".join(
+                    str(item.get("text", ""))
+                    for item in content
+                    if item.get("type") == "text"
+                )
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content=json.dumps([{"id": 2, "description": "重试成功"}])
+                            )
+                        )
+                    ]
+                )
+
+        completions = FakeCompletions()
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            events, _source = self._project(root)
+            second_frame = root / "analysis" / "keyframes" / "scene_0002.jpg"
+            second_frame.write_bytes(b"second jpeg bytes")
+            payload = json.loads(events.read_text(encoding="utf-8"))
+            payload["events"][0]["visual_description"] = "已经完成"
+            payload["events"].append(
+                {
+                    "id": 2,
+                    "start": 3.0,
+                    "end": 6.0,
+                    "keyframe": "keyframes/scene_0002.jpg",
+                    "vision_skipped_reason": "内容安全规则限制",
+                }
+            )
+            events.write_text(json.dumps(payload), encoding="utf-8")
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "openai.OpenAI", return_value=client
+            ):
+                result = describe_event_keyframes(
+                    events,
+                    {"shared": {"env_file": ".missing"}, "vision": {"batch_size": 4}},
+                    root,
+                    lambda _value, _status: None,
+                    retry_skipped=True,
+                )
+
+        self.assertIn("事件 2", completions.requested_text)
+        self.assertNotIn("事件 1，", completions.requested_text)
+        self.assertEqual(result["events"][0]["visual_description"], "已经完成")
+        self.assertEqual(result["events"][1]["visual_description"], "重试成功")
+        self.assertNotIn("vision_skipped_reason", result["events"][1])
+        self.assertEqual(result["vision_skipped_event_count"], 0)
+
     def test_high_detail_review_is_conditional_and_batched(self) -> None:
         responses = iter(
             [

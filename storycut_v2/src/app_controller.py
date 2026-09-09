@@ -198,6 +198,7 @@ class AppController(QObject):
         self._analysis_complete = False
         self._analysis_needs_vision_retry = False
         self._vision_failure_detail = ""
+        self._analysis_invalidate_downstream = True
         self._analysis_started_at = 0.0
         self._analysis_eta_seconds = -1.0
         self._analysis_eta_updated_at = 0.0
@@ -302,9 +303,9 @@ class AppController(QObject):
         self._subtitle_cleaned_video_path = ""
         self._subtitle_cleaned_preview_url = ""
         try:
-            self._app_version = str(read_version().get("version", "2.1.3"))
+            self._app_version = str(read_version().get("version", "2.1.4"))
         except Exception:
-            self._app_version = "2.1.3"
+            self._app_version = "2.1.4"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -482,6 +483,18 @@ class AppController(QObject):
     @Property(str, notify=analysisChanged)
     def visionFailureDetail(self) -> str:
         return self._vision_failure_detail
+
+    @Property("QVariantList", notify=eventsChanged)
+    def visionFailedFrames(self) -> list[dict[str, object]]:
+        return [
+            event
+            for event in self._events
+            if str(event.get("visionSkippedReason", "")).strip()
+        ]
+
+    @Property(int, notify=eventsChanged)
+    def visionFailedFrameCount(self) -> int:
+        return len(self.visionFailedFrames)
 
     @Property(str, notify=analysisChanged)
     def analysisContentMode(self) -> str:
@@ -2369,6 +2382,29 @@ class AppController(QObject):
             self.noticeChanged.emit()
         return opened
 
+    @Slot(int, result=bool)
+    def openVisionFailedFrame(self, event_id: int) -> bool:
+        event = next(
+            (
+                item
+                for item in self.visionFailedFrames
+                if int(item.get("id", 0) or 0) == event_id
+            ),
+            None,
+        )
+        if not event:
+            return False
+        path = Path(QUrlHelper.to_local_path(str(event.get("keyframeUrl", ""))))
+        if not path.is_file():
+            self._notice = "失败画面文件已不存在，请重新理解原片"
+            self.noticeChanged.emit()
+            return False
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+        if not opened:
+            self._notice = f"无法调用系统看图程序打开：{path.name}"
+            self.noticeChanged.emit()
+        return opened
+
     @Slot()
     def startUnderstanding(self) -> None:
         if self._current_project_file:
@@ -2512,6 +2548,7 @@ class AppController(QObject):
         self._analysis_complete = False
         self._analysis_needs_vision_retry = False
         self._vision_failure_detail = ""
+        self._analysis_invalidate_downstream = True
         self._analysis_started_at = time.monotonic()
         self._analysis_estimated_total = -1.0
         self._model_download_progress = 0.0
@@ -2644,6 +2681,7 @@ class AppController(QObject):
                     json.dumps(events_payload, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
                 vision_warning = "用户选择仅执行本地分析，未调用视觉模型" if skip_vision else ""
+                vision_skipped_count = 0
                 if bool(self._config.get("vision", {}).get("enabled", True)) and not skip_vision:
                     try:
                         target_count = sum(
@@ -2680,10 +2718,18 @@ class AppController(QObject):
                             for event in described_payload.get("events", [])
                             if isinstance(event, dict)
                         )
-                        if target_count and described_count < target_count:
+                        skipped_count = sum(
+                            bool(str(event.get("vision_skipped_reason", "")).strip())
+                            for event in described_payload.get("events", [])
+                            if isinstance(event, dict)
+                        )
+                        vision_skipped_count = skipped_count
+                        if target_count and described_count + skipped_count < target_count:
                             raise RuntimeError(
                                 f"视觉接口只完成 {described_count}/{target_count} 个关键场景描述"
                             )
+                        if target_count and not described_count:
+                            raise RuntimeError("所有关键画面均被视觉接口限制，无法完成画面理解")
                     except Exception as exc:
                         if content_mode == "visual":
                             raise RuntimeError(
@@ -2747,6 +2793,12 @@ class AppController(QObject):
                     payload.setdefault("warnings", {})["vision"] = vision_warning
                 else:
                     payload.get("warnings", {}).pop("vision", None)
+                if vision_skipped_count:
+                    payload.setdefault("warnings", {})["vision_limited"] = (
+                        f"{vision_skipped_count} 个关键画面被内容安全规则限制，已跳过；其余画面理解已完成"
+                    )
+                else:
+                    payload.get("warnings", {}).pop("vision_limited", None)
                 if layered_warning:
                     payload.setdefault("warnings", {})["layered_analysis"] = layered_warning
                 else:
@@ -2756,6 +2808,10 @@ class AppController(QObject):
                     message = "本地结构化完成；未生成视觉描述。配置 API 后建议重新理解原片，再组织故事"
                 elif vision_warning:
                     message = f"原片结构化完成；视觉描述生成失败：{vision_warning}"
+                elif vision_skipped_count:
+                    message = (
+                        f"原片理解完成；{vision_skipped_count} 个受限画面已跳过，可以继续组织故事"
+                    )
                 elif layered_file.exists():
                     message = "原片与分层结构理解完成，可以开始组织故事"
                 elif layered_warning:
@@ -2820,6 +2876,7 @@ class AppController(QObject):
         self._analysis_status = "正在重试关键画面理解；已保留语音转写和场景切分…"
         self._analysis_started_at = time.monotonic()
         self._analysis_complete = False
+        self._analysis_invalidate_downstream = False
         self.analysisChanged.emit()
         source_video = self._available_video_source()
         status_file = project_file.parent / "analysis" / "status.json"
@@ -2831,12 +2888,20 @@ class AppController(QObject):
 
         def worker() -> None:
             try:
+                before_payload = json.loads(events_file.read_text(encoding="utf-8"))
+                before_described_ids = {
+                    int(item.get("id", 0))
+                    for item in before_payload.get("events", [])
+                    if isinstance(item, dict)
+                    and str(item.get("visual_description", "")).strip()
+                }
                 result = describe_event_keyframes(
                     events_file,
                     self._config,
                     self._root,
                     report,
                     source_video,
+                    retry_skipped=True,
                 )
                 events = [
                     item for item in result.get("events", []) if isinstance(item, dict)
@@ -2845,14 +2910,23 @@ class AppController(QObject):
                 described = [
                     item for item in targets if str(item.get("visual_description", "")).strip()
                 ]
-                if targets and len(described) < len(targets):
+                skipped = [
+                    item for item in targets if str(item.get("vision_skipped_reason", "")).strip()
+                ]
+                if targets and len(described) + len(skipped) < len(targets):
                     raise RuntimeError(
                         f"视觉接口只完成 {len(described)}/{len(targets)} 个关键场景描述"
                     )
+                if targets and not described:
+                    raise RuntimeError("所有关键画面均被视觉接口限制，无法完成画面理解")
+                self._analysis_invalidate_downstream = any(
+                    int(item.get("id", 0)) not in before_described_ids
+                    for item in described
+                )
 
                 layered_file = project_file.parent / "analysis" / "layered_structure.json"
                 layered_warning = ""
-                if self._layered_analysis_enabled:
+                if self._layered_analysis_enabled and self._analysis_invalidate_downstream:
                     try:
                         analyze_layered_structure(
                             events_file,
@@ -2870,6 +2944,12 @@ class AppController(QObject):
                 payload["stage"] = "understood"
                 warnings = payload.setdefault("warnings", {})
                 warnings.pop("vision", None)
+                if skipped:
+                    warnings["vision_limited"] = (
+                        f"{len(skipped)} 个关键画面被内容安全规则限制，已跳过；其余画面理解已完成"
+                    )
+                else:
+                    warnings.pop("vision_limited", None)
                 if layered_warning:
                     warnings["layered_analysis"] = layered_warning
                 else:
@@ -2878,11 +2958,22 @@ class AppController(QObject):
                 project_file.write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
-                message = (
-                    "关键画面理解已补全；旧故事和镜头已失效，请重新生成故事"
-                    if not layered_warning
-                    else f"关键画面理解已补全；分层理解未生成：{layered_warning}"
-                )
+                if layered_warning:
+                    message = f"关键画面理解已补全；分层理解未生成：{layered_warning}"
+                elif skipped and self._analysis_invalidate_downstream:
+                    message = (
+                        f"关键画面理解已补全（{len(skipped)} 个受限画面已跳过）；"
+                        "旧故事和镜头已失效，请重新生成故事"
+                    )
+                elif skipped:
+                    message = (
+                        f"失败画面重试完成；{len(skipped)} 个画面仍受限，"
+                        "其余结果及现有故事保持不变"
+                    )
+                elif not self._analysis_invalidate_downstream:
+                    message = "没有需要补充的失败画面，现有结果保持不变"
+                else:
+                    message = "关键画面理解已补全；旧故事和镜头已失效，请重新生成故事"
                 status_file.write_text(
                     json.dumps(
                         {
@@ -6431,6 +6522,7 @@ class AppController(QObject):
         self._analysis_complete = False
         self._analysis_needs_vision_retry = False
         self._vision_failure_detail = ""
+        self._analysis_invalidate_downstream = True
         self._analysis_started_at = 0.0
         self._analysis_eta_seconds = -1.0
         self._analysis_estimated_total = -1.0
@@ -6723,7 +6815,8 @@ class AppController(QObject):
         if success:
             self._refresh_recent_projects()
             if self._current_project_file:
-                self._invalidate_story_downstream_after_analysis()
+                if self._analysis_invalidate_downstream:
+                    self._invalidate_story_downstream_after_analysis()
                 try:
                     payload = json.loads(
                         self._current_project_file.read_text(encoding="utf-8")
@@ -6740,6 +6833,7 @@ class AppController(QObject):
                 except (OSError, ValueError, TypeError, AttributeError):
                     pass
                 self._load_events(self._current_project_file)
+        self._analysis_invalidate_downstream = True
         if self._current_project_file:
             try:
                 payload = json.loads(
@@ -7057,6 +7151,9 @@ class AppController(QObject):
                     item["keyframeUrl"] = keyframe.as_uri() if keyframe.exists() else ""
                     item["timeRange"] = f"{self._format_time(float(event.get('start', 0)))} – {self._format_time(float(event.get('end', 0)))}"
                     item["visualDescription"] = str(event.get("visual_description", "") or "尚无视觉描述")
+                    item["visionSkippedReason"] = str(
+                        event.get("vision_skipped_reason", "")
+                    ).strip()
                     technical = event.get("technical_visual", {})
                     technical = technical if isinstance(technical, dict) else {}
                     screen_text = event.get("screen_text", [])

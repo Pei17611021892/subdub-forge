@@ -3688,9 +3688,12 @@ ApplicationWindow {
                                 StepBadge { stepNumber: "01"; completed: understandingDone }
                                 ColumnLayout {
                                     Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
                                     spacing: 4
                                     Text { text: manuscriptProject ? "整理文稿" : "理解原片"; color: textMain; font.pixelSize: 18; font.bold: true }
                                     Text {
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
                                         text: manuscriptProject
                                               ? "原稿保存在当前项目中；编辑停止约 0.7 秒后自动保存。"
                                               : appController.analysisNeedsVisionRetry
@@ -3742,6 +3745,7 @@ ApplicationWindow {
 
                             Rectangle {
                                 Layout.fillWidth: true
+                                Layout.minimumWidth: 0
                                 Layout.preferredHeight: visionFailureContent.implicitHeight + 26
                                 visible: understandingSection.expanded
                                          && !manuscriptProject
@@ -3749,6 +3753,7 @@ ApplicationWindow {
                                 radius: 10
                                 color: "#2c2018"
                                 border.color: "#9a5b27"
+                                clip: true
 
                                 RowLayout {
                                     id: visionFailureContent
@@ -3758,6 +3763,7 @@ ApplicationWindow {
 
                                     ColumnLayout {
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
                                         spacing: 3
                                         Text {
                                             text: "关键画面理解请求失败"
@@ -3767,6 +3773,7 @@ ApplicationWindow {
                                         }
                                         Text {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             text: "语音转写和场景切分已经保留，不必全部重跑。" + appController.visionFailureDetail
                                             color: "#d8c0aa"
                                             font.pixelSize: 11
@@ -3782,6 +3789,115 @@ ApplicationWindow {
                                             } else {
                                                 apiPreflightDialog.requestedAction = "understanding"
                                                 apiPreflightDialog.open()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                id: failedVisionSection
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                Layout.preferredHeight: failedVisionContent.implicitHeight + 26
+                                visible: understandingSection.expanded
+                                         && !manuscriptProject
+                                         && appController.visionFailedFrameCount > 0
+                                radius: 10
+                                color: "#211d18"
+                                border.color: "#73512d"
+                                clip: true
+
+                                ColumnLayout {
+                                    id: failedVisionContent
+                                    anchors.fill: parent
+                                    anchors.margins: 13
+                                    spacing: 10
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        spacing: 10
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                            spacing: 3
+                                            Text {
+                                                text: appController.visionFailedFrameCount + " 个画面未通过视觉接口检查"
+                                                color: "#f1b86b"
+                                                font.pixelSize: 13
+                                                font.bold: true
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
+                                                text: "这些画面已跳过，不影响继续组织故事。单击缩略图可用系统看图程序打开，也可以稍后只重试这些失败画面。"
+                                                color: "#d8c0aa"
+                                                font.pixelSize: 11
+                                                wrapMode: Text.WordWrap
+                                            }
+                                        }
+                                        FlatButton {
+                                            visible: !appController.analysisNeedsVisionRetry
+                                            text: appController.analysisBusy ? "正在重试…" : "仅重试失败画面"
+                                            enabled: !appController.analysisBusy
+                                            onClicked: {
+                                                if (appController.refreshApiConfiguration()) {
+                                                    appController.retryVisionUnderstanding()
+                                                } else {
+                                                    apiPreflightDialog.requestedAction = "understanding"
+                                                    apiPreflightDialog.open()
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    GridLayout {
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        columns: width >= 760 ? 4 : 2
+                                        columnSpacing: 9
+                                        rowSpacing: 9
+
+                                        Repeater {
+                                            model: appController.visionFailedFrames
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
+                                                Layout.preferredWidth: 1
+                                                Layout.preferredHeight: 118
+                                                radius: 8
+                                                color: "#111217"
+                                                border.color: "#4b3b2c"
+                                                clip: true
+                                                Image {
+                                                    anchors.fill: parent
+                                                    source: modelData.keyframeUrl
+                                                    fillMode: Image.PreserveAspectCrop
+                                                    asynchronous: true
+                                                }
+                                                Rectangle {
+                                                    anchors.left: parent.left
+                                                    anchors.right: parent.right
+                                                    anchors.bottom: parent.bottom
+                                                    height: 30
+                                                    color: "#c0101117"
+                                                    Text {
+                                                        anchors.fill: parent
+                                                        anchors.margins: 7
+                                                        text: "场景 " + modelData.id + " · " + modelData.timeRange
+                                                        color: "white"
+                                                        font.pixelSize: 10
+                                                        elide: Text.ElideRight
+                                                        verticalAlignment: Text.AlignVCenter
+                                                    }
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: appController.openVisionFailedFrame(modelData.id)
+                                                }
                                             }
                                         }
                                     }

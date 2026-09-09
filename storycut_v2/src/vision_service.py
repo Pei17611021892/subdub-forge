@@ -33,6 +33,7 @@ def describe_event_keyframes(
     app_root: Path,
     progress: ProgressCallback,
     source_video: Path | None = None,
+    retry_skipped: bool = False,
 ) -> dict[str, Any]:
     from openai import OpenAI
 
@@ -53,15 +54,26 @@ def describe_event_keyframes(
     events = list(payload.get("events", []))
     content_mode = str(payload.get("content_mode", "speech"))
     project_analysis_dir = events_json.parent
-    targets = [event for event in events if str(event.get("keyframe", "")).strip()]
+    all_targets = [event for event in events if str(event.get("keyframe", "")).strip()]
+    if retry_skipped:
+        targets = [
+            event
+            for event in all_targets
+            if not str(event.get("visual_description", "")).strip()
+        ]
+    else:
+        targets = [
+            event
+            for event in all_targets
+            if not str(event.get("visual_description", "")).strip()
+            and not str(event.get("vision_skipped_reason", "")).strip()
+        ]
     if not targets:
         return payload
 
     client = OpenAI(api_key=api_key, base_url=base_url)
-    for offset in range(0, len(targets), batch_size):
-        batch = targets[offset : offset + batch_size]
-        if content_mode == "visual":
-            instruction = (
+    if content_mode == "visual":
+        instruction = (
                 "下面是按时间顺序排列的视频场景，每个场景可能包含起始关键帧和后续采样帧。"
                 "请把同一事件的多张图当作短动作序列分析，而不是互不相关的图片。"
                 "只依据可见证据，详细记录：人物外观与可区分特征；身体姿态、朝向、视线、手部动作；"
@@ -73,15 +85,15 @@ def describe_event_keyframes(
                 "严格返回 JSON 数组："
                 "[{\"id\":1,\"description\":\"...\",\"story_value\":\"...\","
                 "\"continuity\":\"...\",\"uncertainty\":\"...\"}]。"
-            )
-        else:
-            instruction = (
+        )
+    else:
+        instruction = (
                 "依次分析下面的关键帧。只描述画面中可见的人物、动作、物体、环境和镜头类型，"
                 "不要猜测看不到的剧情。每条用简洁中文，适合视频剪辑检索。"
                 "严格返回 JSON 数组，格式为 [{\"id\":1,\"description\":\"...\"}]。"
-            )
-        if technical_enabled:
-            instruction += (
+        )
+    if technical_enabled:
+        instruction += (
                 " 同一次分析还要识别画面中的文字、数字、单位、标题、标签、表格、图表、示意图、公式和软件界面。"
                 "只抄录清晰可见的内容，不补全模糊文字；图表只描述可见坐标、图例、趋势和数值，"
                 "公式保留原符号，不要擅自求解或推导。每个结果额外返回 screen_text 数组与 technical_visual 对象："
@@ -91,7 +103,22 @@ def describe_event_keyframes(
                 "\"summary\":\"中文摘要\",\"facts\":[\"可见事实\"],\"uncertainty\":\"不确定项\","
                 "\"importance\":0,\"needs_high_detail_review\":false,\"review_reason\":\"\"}。"
                 "importance 使用 0-3；只有内容可能影响科普事实、但当前低清图确实无法辨认时，才请求高清复查。"
-            )
+        )
+
+    processed = 0
+
+    def persist_progress(status: str) -> None:
+        nonlocal processed
+        payload["events"] = events
+        payload["vision_model"] = model
+        events_json.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        first_pass_share = 0.82 if high_detail_enabled and source_video else 1.0
+        progress(processed / len(targets) * first_pass_share, status)
+
+    def request_batch(batch: list[dict[str, Any]]) -> None:
+        nonlocal processed
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
@@ -133,6 +160,19 @@ def describe_event_keyframes(
                 temperature=0.1,
             )
         except Exception as exc:
+            if is_content_policy_error(exc):
+                if len(batch) > 1:
+                    midpoint = len(batch) // 2
+                    request_batch(batch[:midpoint])
+                    request_batch(batch[midpoint:])
+                    return
+                event = batch[0]
+                event["vision_skipped_reason"] = "该关键画面被视觉接口的内容安全规则限制"
+                processed += 1
+                persist_progress(
+                    f"已处理 {processed}/{len(targets)} 个关键帧；1 个受限画面已跳过"
+                )
+                return
             raise friendly_api_error(exc, base_url, "视觉描述") from exc
         text = str(response.choices[0].message.content or "")
         descriptions = _parse_json_array(text)
@@ -150,16 +190,12 @@ def describe_event_keyframes(
         for event in batch:
             description = by_id.get(int(event["id"]), {})
             _apply_vision_item(event, description, content_mode, technical_enabled)
+            event.pop("vision_skipped_reason", None)
+        processed += len(batch)
+        persist_progress(f"已理解 {processed}/{len(targets)} 个关键帧")
 
-        payload["events"] = events
-        payload["vision_model"] = model
-        events_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        completed = min(offset + len(batch), len(targets))
-        first_pass_share = 0.82 if high_detail_enabled and source_video else 1.0
-        progress(
-            completed / len(targets) * first_pass_share,
-            f"已理解 {completed}/{len(targets)} 个关键帧",
-        )
+    for offset in range(0, len(targets), batch_size):
+        request_batch(targets[offset : offset + batch_size])
 
     reviewed = 0
     if high_detail_enabled and source_video and source_video.exists():
@@ -194,6 +230,9 @@ def describe_event_keyframes(
     payload["high_detail_review_count"] = reviewed
     payload["visual_description_event_count"] = sum(
         bool(str(event.get("visual_description", "")).strip()) for event in events
+    )
+    payload["vision_skipped_event_count"] = sum(
+        bool(str(event.get("vision_skipped_reason", "")).strip()) for event in all_targets
     )
     payload["events"] = events
     events_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -395,6 +434,11 @@ def _review_high_detail_events(
 def friendly_api_error(exc: Exception, base_url: str | None, operation: str) -> RuntimeError:
     message = str(exc).strip()
     status_code = getattr(exc, "status_code", None)
+    if is_content_policy_error(exc):
+        return RuntimeError(
+            f"{operation}被内容安全规则限制。StoryCut 会隔离受限画面并继续处理其余关键帧；"
+            "若仍然出现此提示，请重新抽取该场景的关键帧。"
+        )
     if status_code == 405 or "405 Not Allowed" in message or "405 Method Not Allowed" in message:
         endpoint = base_url or "OpenAI 官方接口"
         return RuntimeError(
@@ -404,6 +448,12 @@ def friendly_api_error(exc: Exception, base_url: str | None, operation: str) -> 
             "不要填写服务商网页、管理后台或以 /chat/completions 结尾的完整请求地址。"
         )
     return RuntimeError(f"{operation}接口请求失败：{message or type(exc).__name__}")
+
+
+def is_content_policy_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    code = str(getattr(exc, "code", "")).lower()
+    return "content_policy_violation" in message or "content_policy_violation" in code
 
 
 def _load_env_file(app_root: Path, configured: str) -> None:
