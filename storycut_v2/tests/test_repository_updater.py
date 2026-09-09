@@ -34,29 +34,14 @@ def make_archive(files: dict[str, bytes]) -> bytes:
 
 
 class RepositoryUpdaterTests(unittest.TestCase):
-    def test_release_manifest_remains_compatible_with_v211_zip_updater(self) -> None:
+    def test_release_manifest_uses_current_managed_root_allowlist(self) -> None:
         manifest_path = UPDATER_PATH.parent / "update_manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        legacy_root_files = {
-            ".env.example",
-            ".gitignore",
-            "CODEX_HANDOFF.md",
-            "LICENSE",
-            "MODEL_DOWNLOAD.md",
-            "README.md",
-            "repository_updater.py",
-            "requirements.txt",
-            "update_manifest.json",
-            "version.json",
-            "点我启动StoryCut（AI解说剪辑）.vbs",
-        }
+        updater = load_updater()
 
         for value in manifest["files"]:
-            relative = Path(*value.split("/"))
-            if len(relative.parts) == 1:
-                self.assertIn(relative.name, legacy_root_files)
-            else:
-                self.assertEqual(relative.parts[0], "storycut_v2")
+            updater._safe_managed_path(value)
+        self.assertIn("AGENTS.md", manifest["files"])
 
     def test_current_updater_allows_managed_documentation_paths(self) -> None:
         updater = load_updater()

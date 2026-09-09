@@ -5,6 +5,7 @@
   "files": [
     ".env.example",
     ".gitignore",
+    "AGENTS.md",
     "CODEX_HANDOFF.md",
     "LICENSE",
     "MODEL_DOWNLOAD.md",
