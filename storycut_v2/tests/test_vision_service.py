@@ -8,7 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from src.vision_service import describe_event_keyframes
+from src.vision_service import (
+    _parse_json_array,
+    _record_response_anomaly,
+    describe_event_keyframes,
+)
 
 
 class VisionServiceTests(unittest.TestCase):
@@ -37,6 +41,38 @@ class VisionServiceTests(unittest.TestCase):
         source = root / "source.mp4"
         source.write_bytes(b"source placeholder")
         return events, source
+
+    def test_json_array_parser_merges_a_second_payload_after_trailing_text(self) -> None:
+        first = [{"id": 7, "description": "第一段有效结果"}]
+        second = [{"id": 8, "description": "第二段有效结果"}]
+        parsed = _parse_json_array(
+            "```json\n"
+            + json.dumps(first, ensure_ascii=False, indent=2)
+            + "\n```\n补充说明\n"
+            + json.dumps(second, ensure_ascii=False)
+        )
+
+        self.assertEqual(parsed, first + second)
+
+    def test_json_array_parser_reports_truncated_array_clearly(self) -> None:
+        with self.assertRaisesRegex(ValueError, "JSON 数组不完整"):
+            _parse_json_array('[{"id": 7, "description": "未结束"}')
+
+    def test_response_anomaly_keeps_event_ids_tail_and_raw_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            path = Path(temporary_dir) / "vision_response_anomalies.json"
+            raw = '[{"id": 7}]\n模型补充了一段说明'
+            _record_response_anomaly(
+                path,
+                [{"id": 7}, {"id": 8}],
+                raw,
+                "模型补充了一段说明",
+            )
+            saved = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(saved["responses"][0]["event_ids"], [7, 8])
+        self.assertEqual(saved["responses"][0]["tail"], "模型补充了一段说明")
+        self.assertEqual(saved["responses"][0]["raw_response"], raw)
 
     def test_technical_fields_reuse_existing_vision_request(self) -> None:
         response_payload = [
@@ -91,9 +127,13 @@ class VisionServiceTests(unittest.TestCase):
             self.assertEqual(result["events"][0]["technical_visual"]["type"], "chart")
             self.assertEqual(result["events"][0]["screen_text"][0]["text"], "Temperature (°C)")
 
-    def test_missing_event_in_vision_response_is_a_failure(self) -> None:
+    def test_single_missing_event_is_recorded_and_does_not_abort(self) -> None:
         class FakeCompletions:
+            def __init__(self) -> None:
+                self.calls = 0
+
             def create(self, **_kwargs):  # type: ignore[no-untyped-def]
+                self.calls += 1
                 return SimpleNamespace(
                     choices=[
                         SimpleNamespace(
@@ -102,20 +142,90 @@ class VisionServiceTests(unittest.TestCase):
                     ]
                 )
 
-        client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+        completions = FakeCompletions()
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
             events, _source = self._project(root)
             with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False), patch(
                 "openai.OpenAI", return_value=client
             ):
-                with self.assertRaisesRegex(RuntimeError, "视觉接口未返回"):
-                    describe_event_keyframes(
-                        events,
-                        {"shared": {"env_file": ".missing"}, "vision": {"batch_size": 4}},
-                        root,
-                        lambda _value, _status: None,
-                    )
+                result = describe_event_keyframes(
+                    events,
+                    {"shared": {"env_file": ".missing"}, "vision": {"batch_size": 4}},
+                    root,
+                    lambda _value, _status: None,
+                )
+
+        self.assertEqual(completions.calls, 1)
+        self.assertIn("未返回", result["events"][0]["vision_skipped_reason"])
+        self.assertEqual(result["vision_skipped_event_count"], 1)
+
+    def test_full_batch_with_restarted_ids_is_aligned_by_order(self) -> None:
+        class FakeCompletions:
+            def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                prompt = " ".join(
+                    str(item.get("text", ""))
+                    for item in kwargs["messages"][0]["content"]
+                    if item.get("type") == "text"
+                )
+                self.prompt = prompt
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content=json.dumps(
+                                    [
+                                        {"id": 1, "description": "第五个画面", "story_value": "对应故障铺垫"},
+                                        {"id": 2, "description": "第六个画面", "story_value": "对应人群增加"},
+                                    ]
+                                )
+                            )
+                        )
+                    ]
+                )
+
+        completions = FakeCompletions()
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            events, _source = self._project(root)
+            second_frame = root / "analysis" / "keyframes" / "scene_0006.jpg"
+            second_frame.write_bytes(b"second jpeg bytes")
+            payload = json.loads(events.read_text(encoding="utf-8"))
+            payload["events"] = [
+                {
+                    "id": 5,
+                    "start": 23.5,
+                    "end": 30.3,
+                    "keyframe": "keyframes/scene_0001.jpg",
+                    "transcript": "扶梯内部开始出现问题",
+                },
+                {
+                    "id": 6,
+                    "start": 30.3,
+                    "end": 33.6,
+                    "keyframe": "keyframes/scene_0006.jpg",
+                    "transcript": "人群越来越多",
+                },
+            ]
+            events.write_text(json.dumps(payload), encoding="utf-8")
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "openai.OpenAI", return_value=client
+            ):
+                result = describe_event_keyframes(
+                    events,
+                    {"shared": {"env_file": ".missing"}, "vision": {"batch_size": 2}},
+                    root,
+                    lambda _value, _status: None,
+                )
+
+        self.assertIn("当前解说：扶梯内部开始出现问题", completions.prompt)
+        self.assertEqual(result["events"][0]["id"], 5)
+        self.assertEqual(result["events"][0]["visual_description"], "第五个画面")
+        self.assertEqual(result["events"][0]["story_value"], "对应故障铺垫")
+        self.assertEqual(result["events"][1]["id"], 6)
+        self.assertEqual(result["events"][1]["visual_description"], "第六个画面")
 
     def test_content_policy_failure_is_isolated_to_one_frame(self) -> None:
         class PolicyError(Exception):

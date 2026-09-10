@@ -3416,6 +3416,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: window.color
+            clip: true
 
             ScrollView {
                 id: mainScroll
@@ -3424,6 +3425,7 @@ ApplicationWindow {
                 contentWidth: availableWidth
                 contentHeight: mainContent.implicitHeight + mainContent.y + 30
                 ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
                 MouseArea {
                     anchors.fill: parent
@@ -3442,6 +3444,8 @@ ApplicationWindow {
 
                 ColumnLayout {
                     id: mainContent
+                    objectName: "mainContent"
+                    property bool showAllEvents: false
                     x: 38
                     y: 30
                     width: parent.width - 76
@@ -3450,10 +3454,13 @@ ApplicationWindow {
                     RowLayout {
                         id: homeSection
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             spacing: 5
                             Text { text: manuscriptProject ? "把一篇文稿，变成一个完整画面故事" : "下午好，开始一个新故事"; color: textMain; font.pixelSize: 27; font.weight: Font.DemiBold }
-                            Text { text: appController.notice; color: textMuted; font.pixelSize: 14 }
+                            Text { Layout.fillWidth: true; Layout.minimumWidth: 0; text: appController.notice; color: textMuted; font.pixelSize: 14; elide: Text.ElideRight }
                             RowLayout {
                                 visible: appController.hasProject
                                 spacing: 7
@@ -3482,7 +3489,6 @@ ApplicationWindow {
                                 }
                             }
                         }
-                        Item { Layout.fillWidth: true }
                         GhostButton {
                             text: appController.updateBusy
                                   ? "检查中…"
@@ -3567,6 +3573,7 @@ ApplicationWindow {
 
                             ColumnLayout {
                                 Layout.fillWidth: true
+                                Layout.minimumWidth: 0
                                 Layout.fillHeight: true
                                 spacing: 10
                                 Text {
@@ -3613,6 +3620,7 @@ ApplicationWindow {
 
                     GridLayout {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         columns: 4
                         columnSpacing: 14
                         rowSpacing: 14
@@ -3633,6 +3641,8 @@ ApplicationWindow {
                                                            : index === 2 ? matchingDone
                                                            : exportDone
                                 Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                Layout.preferredWidth: 1
                                 Layout.preferredHeight: 154
                                 radius: 14
                                 color: completed ? "#14241d" : panel
@@ -3671,6 +3681,7 @@ ApplicationWindow {
                         id: understandingSection
                         property bool expanded: true
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         Layout.preferredHeight: expanded ? understandingContent.implicitHeight + 36 : 90
                         radius: 14
                         color: panel
@@ -3684,6 +3695,7 @@ ApplicationWindow {
 
                             RowLayout {
                                 Layout.fillWidth: true
+                                Layout.minimumWidth: 0
                                 spacing: 16
                                 StepBadge { stepNumber: "01"; completed: understandingDone }
                                 ColumnLayout {
@@ -5559,27 +5571,35 @@ ApplicationWindow {
 
                     RowLayout {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         Layout.topMargin: 8
                         visible: understandingSection.expanded && appController.events.length > 0
                         Text { text: "原片事件"; color: textMain; font.pixelSize: 18; font.bold: true }
                         Text { text: appController.events.length + " 个场景事件"; color: textMuted; font.pixelSize: 12 }
                         Item { Layout.fillWidth: true }
-                        GhostButton { text: "查看前 12 个"; enabled: false }
+                        GhostButton {
+                            text: mainContent.showAllEvents ? "只看前 12 个" : "查看全部 " + appController.events.length + " 个"
+                            enabled: appController.events.length > 12
+                            onClicked: mainContent.showAllEvents = !mainContent.showAllEvents
+                        }
                     }
 
                     GridLayout {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         columns: 2
                         columnSpacing: 14
                         rowSpacing: 12
                         visible: understandingSection.expanded && appController.events.length > 0
 
                         Repeater {
-                            model: appController.events.slice(0, 12)
+                            model: appController.events.slice(0, mainContent.showAllEvents ? appController.events.length : 12)
                             delegate: Rectangle {
                                 required property var modelData
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: modelData.technicalVisualSummary ? 154 : 136
+                                Layout.minimumWidth: 0
+                                Layout.preferredWidth: 1
+                                Layout.preferredHeight: modelData.storyValue ? 184 : modelData.technicalVisualSummary ? 154 : 136
                                 radius: 13
                                 color: panel
                                 border.color: "#292c36"
@@ -5598,12 +5618,25 @@ ApplicationWindow {
                                     }
                                     ColumnLayout {
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
                                         Layout.fillHeight: true
                                         spacing: 6
                                         Text { text: "场景 " + modelData.id; color: accentLight; font.pixelSize: 11; font.bold: true }
-                                        Text { Layout.fillWidth: true; text: modelData.visualDescription; color: textMain; font.pixelSize: 12; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+                                        Text { Layout.fillWidth: true; Layout.minimumWidth: 0; text: modelData.visualDescription; color: textMain; font.pixelSize: 12; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
                                         Text {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                            visible: !!modelData.storyValue
+                                            text: "叙事定位 · " + modelData.storyValue
+                                            color: "#e8c76a"
+                                            font.pixelSize: 10
+                                            wrapMode: Text.WordWrap
+                                            maximumLineCount: 2
+                                            elide: Text.ElideRight
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             visible: !!modelData.technicalVisualSummary
                                             text: "画面信息 · " + modelData.technicalVisualSummary + (modelData.highDetailReviewed ? "  ✓ 高清复查" : "")
                                             color: "#e8c76a"
@@ -5612,7 +5645,7 @@ ApplicationWindow {
                                             maximumLineCount: 2
                                             elide: Text.ElideRight
                                         }
-                                        Text { Layout.fillWidth: true; Layout.fillHeight: true; text: modelData.transcript || "（该场景没有对白）"; color: textMuted; font.pixelSize: 11; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+                                        Text { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.fillHeight: true; text: modelData.transcript || "（该场景没有对白）"; color: textMuted; font.pixelSize: 11; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
                                     }
                                 }
                             }

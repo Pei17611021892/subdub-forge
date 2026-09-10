@@ -1408,6 +1408,51 @@ class AppControllerProjectNameTests(unittest.TestCase):
             self.assertIn("项目已恢复", controller.notice)
             self.assertEqual(controller.voiceStatus, "等待导出 SRT 到 GPT-SoVITS")
 
+    def test_open_project_notifies_qml_after_restoring_completed_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            project = root / "projects" / "understood"
+            analysis = project / "analysis"
+            analysis.mkdir(parents=True)
+            (analysis / "events.json").write_text(
+                json.dumps(
+                    {
+                        "events": [
+                            {
+                                "id": 1,
+                                "start": 0,
+                                "end": 3,
+                                "visual_description": "人物走进大厅。",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            project_file = project / "project.json"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "name": "understood",
+                        "project_type": "video",
+                        "analysis_state": "complete",
+                        "stage": "understood",
+                        "settings": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            controller = self._controller(root)
+            notified_values: list[bool] = []
+            controller.analysisChanged.connect(
+                lambda: notified_values.append(controller.analysisComplete)
+            )
+
+            controller.openProject(str(project_file))
+
+            self.assertTrue(controller.analysisComplete)
+            self.assertTrue(notified_values[-1])
+
     def test_open_project_restores_persistent_vision_failure_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

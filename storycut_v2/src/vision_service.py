@@ -88,9 +88,14 @@ def describe_event_keyframes(
         )
     else:
         instruction = (
-                "依次分析下面的关键帧。只描述画面中可见的人物、动作、物体、环境和镜头类型，"
-                "不要猜测看不到的剧情。每条用简洁中文，适合视频剪辑检索。"
-                "严格返回 JSON 数组，格式为 [{\"id\":1,\"description\":\"...\"}]。"
+                "依次分析下面的关键帧，并结合每个事件附带的解说文字判断这张画面在当前叙事中的位置。"
+                "description 用具体中文描述可见主体、动作或状态、环境、构图和镜头类型，避免“许多人在一个空间”"
+                "这类泛化表述；不要把解说中提到但画面看不到的内容写成可见事实。"
+                "story_value 说明画面具体对应、铺垫或偏离了当前解说的哪一部分；continuity 写可用于衔接前后镜头的"
+                "人物、物体、地点、动作方向或视觉风格；uncertainty 写无法从单帧确认的内容。"
+                "每项 id 必须原样复制事件编号，绝不能从 1 重新编号。严格返回 JSON 数组，格式为 "
+                "[{\"id\":5,\"description\":\"...\",\"story_value\":\"...\","
+                "\"continuity\":\"...\",\"uncertainty\":\"...\"}]。"
         )
     if technical_enabled:
         instruction += (
@@ -140,6 +145,7 @@ def describe_event_keyframes(
                     "type": "text",
                     "text": (
                         f"事件 {event['id']}，时间 {event['start']}-{event['end']} 秒，"
+                        f"当前解说：{str(event.get('transcript', '')).strip()[:360] or '无对白'}。"
                         f"共 {len(existing_frames)} 张时间顺序画面："
                     ),
                 }
@@ -175,24 +181,53 @@ def describe_event_keyframes(
                 return
             raise friendly_api_error(exc, base_url, "视觉描述") from exc
         text = str(response.choices[0].message.content or "")
-        descriptions = _parse_json_array(text)
-        by_id = {int(item.get("id", 0)): item for item in descriptions}
-        missing_ids = [
-            int(event.get("id", 0))
-            for event in batch
-            if int(event.get("id", 0)) not in by_id
-        ]
-        if missing_ids:
-            raise RuntimeError(
-                "视觉接口未返回这些关键场景："
-                + ", ".join(str(item) for item in missing_ids[:12])
+        descriptions, response_tail = _parse_json_array_details(text)
+        if response_tail:
+            _record_response_anomaly(
+                project_analysis_dir / "vision_response_anomalies.json",
+                batch,
+                text,
+                response_tail,
             )
-        for event in batch:
+        requested_ids = [int(event.get("id", 0)) for event in batch]
+        returned_ids = [int(item.get("id", 0) or 0) for item in descriptions]
+        if (
+            len(descriptions) == len(batch)
+            and not set(returned_ids).intersection(requested_ids)
+        ):
+            descriptions = [
+                {**item, "id": int(event.get("id", 0))}
+                for event, item in zip(batch, descriptions)
+            ]
+        by_id = {int(item.get("id", 0)): item for item in descriptions}
+        completed_events = [
+            event for event in batch if int(event.get("id", 0)) in by_id
+        ]
+        missing_events = [
+            event for event in batch if int(event.get("id", 0)) not in by_id
+        ]
+        for event in completed_events:
             description = by_id.get(int(event["id"]), {})
             _apply_vision_item(event, description, content_mode, technical_enabled)
             event.pop("vision_skipped_reason", None)
-        processed += len(batch)
-        persist_progress(f"已理解 {processed}/{len(targets)} 个关键帧")
+        if completed_events:
+            processed += len(completed_events)
+            persist_progress(f"已理解 {processed}/{len(targets)} 个关键帧")
+        if missing_events:
+            if len(missing_events) < len(batch):
+                request_batch(missing_events)
+                return
+            if len(batch) > 1:
+                midpoint = len(batch) // 2
+                request_batch(batch[:midpoint])
+                request_batch(batch[midpoint:])
+                return
+            event = batch[0]
+            event["vision_skipped_reason"] = "视觉接口未返回该关键场景的描述"
+            processed += 1
+            persist_progress(
+                f"已处理 {processed}/{len(targets)} 个关键帧；1 个无返回画面已跳过"
+            )
 
     for offset in range(0, len(targets), batch_size):
         request_batch(targets[offset : offset + batch_size])
@@ -249,10 +284,9 @@ def _apply_vision_item(
     event["visual_description"] = str(
         item.get("description", event.get("visual_description", ""))
     ).strip()
-    if content_mode == "visual":
-        event["story_value"] = str(item.get("story_value", "")).strip()
-        event["continuity"] = str(item.get("continuity", "")).strip()
-        event["visual_uncertainty"] = str(item.get("uncertainty", "")).strip()
+    event["story_value"] = str(item.get("story_value", "")).strip()
+    event["continuity"] = str(item.get("continuity", "")).strip()
+    event["visual_uncertainty"] = str(item.get("uncertainty", "")).strip()
     if technical_enabled:
         event["screen_text"] = _normalize_screen_text(item.get("screen_text", []))
         event["technical_visual"] = _normalize_technical_visual(
@@ -479,16 +513,68 @@ def _image_data_url(path: Path) -> str:
 
 
 def _parse_json_array(text: str) -> list[dict[str, Any]]:
+    items, _response_tail = _parse_json_array_details(text)
+    return items
+
+
+def _parse_json_array_details(text: str) -> tuple[list[dict[str, Any]], str]:
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
+    array_start = cleaned.find("[")
+    if array_start < 0:
+        raise ValueError("视觉模型未返回可解析的 JSON 数组")
     try:
-        value = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\[.*\]", cleaned, flags=re.DOTALL)
-        if not match:
-            raise ValueError("视觉模型未返回可解析的 JSON 数组")
-        value = json.loads(match.group(0))
+        value, _end = json.JSONDecoder().raw_decode(cleaned[array_start:])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"视觉模型返回的 JSON 数组不完整：{exc.msg}") from exc
     if not isinstance(value, list):
         raise ValueError("视觉模型返回结果不是数组")
-    return [item for item in value if isinstance(item, dict)]
+    items = [item for item in value if isinstance(item, dict)]
+    response_tail = cleaned[array_start + _end :].strip()
+    meaningful_tail = re.sub(
+        r"```(?:json)?", " ", response_tail, flags=re.IGNORECASE
+    ).strip()
+    cursor = 0
+    decoder = json.JSONDecoder()
+    while meaningful_tail:
+        next_array = meaningful_tail.find("[", cursor)
+        if next_array < 0:
+            break
+        try:
+            extra_value, extra_end = decoder.raw_decode(meaningful_tail[next_array:])
+        except json.JSONDecodeError:
+            cursor = next_array + 1
+            continue
+        if isinstance(extra_value, list):
+            items.extend(item for item in extra_value if isinstance(item, dict))
+        cursor = next_array + extra_end
+    return items, meaningful_tail
+
+
+def _record_response_anomaly(
+    path: Path,
+    batch: list[dict[str, Any]],
+    raw_response: str,
+    response_tail: str,
+) -> None:
+    try:
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            payload = {"schema_version": 1, "responses": []}
+        responses = payload.get("responses", [])
+        if not isinstance(responses, list):
+            responses = []
+        responses.append(
+            {
+                "event_ids": [int(event.get("id", 0)) for event in batch],
+                "tail": response_tail[:12000],
+                "raw_response": raw_response[:50000],
+            }
+        )
+        payload["responses"] = responses[-12:]
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except (OSError, ValueError, TypeError):
+        return

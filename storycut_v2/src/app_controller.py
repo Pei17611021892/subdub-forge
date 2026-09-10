@@ -303,9 +303,9 @@ class AppController(QObject):
         self._subtitle_cleaned_video_path = ""
         self._subtitle_cleaned_preview_url = ""
         try:
-            self._app_version = str(read_version().get("version", "2.1.4"))
+            self._app_version = str(read_version().get("version", "2.1.5"))
         except Exception:
-            self._app_version = "2.1.4"
+            self._app_version = "2.1.5"
         self._update_busy = False
         self._update_available = False
         self._update_installed = False
@@ -2136,6 +2136,10 @@ class AppController(QObject):
             self.previewChanged.emit()
             self._load_events(project_file)
             self._restore_analysis_state(payload, project_file)
+            # _clear_current_project() notified QML while analysisComplete was
+            # false. Notify again after restoring the persisted event state so
+            # the step badge/button does not remain in its pre-load state.
+            self.analysisChanged.emit()
             self._load_story(project_file)
             self._load_manuscript_assets(project_file)
             self._load_stock_search(project_file)
@@ -7151,6 +7155,8 @@ class AppController(QObject):
                     item["keyframeUrl"] = keyframe.as_uri() if keyframe.exists() else ""
                     item["timeRange"] = f"{self._format_time(float(event.get('start', 0)))} – {self._format_time(float(event.get('end', 0)))}"
                     item["visualDescription"] = str(event.get("visual_description", "") or "尚无视觉描述")
+                    item["storyValue"] = str(event.get("story_value", "")).strip()
+                    item["visualContinuity"] = str(event.get("continuity", "")).strip()
                     item["visionSkippedReason"] = str(
                         event.get("vision_skipped_reason", "")
                     ).strip()
